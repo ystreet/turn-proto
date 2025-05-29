@@ -1,0 +1,22 @@
+[package]
+name = "turn-types"
+description = "TURN parsing and writing"
+version.workspace = true
+authors = ["Matthew Waters <matthew@centricular.com>"]
+license = "MIT OR Apache-2.0"
+keywords = ["TURN"]
+categories = ["network-programming", ]
+documentation = "https://docs.rs/turn-types"
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+stun-types.workspace = true
+byteorder.workspace = true
+rand.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
