@@ -17,7 +17,7 @@
 //!
 //! This is based on the following standards:
 //! - [RFC5766]
-//! 
+//!
 //! [RFC5766]: https://tools.ietf.org/html/rfc5766
 
 pub use stun_types as stun;

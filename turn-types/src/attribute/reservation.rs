@@ -8,10 +8,7 @@
 
 use byteorder::{BigEndian, ByteOrder};
 
-use stun_types::{
-    attribute::*,
-    message::StunParseError,
-};
+use stun_types::{attribute::*, message::StunParseError};
 
 /// The ReservationToken [`Attribute`]
 #[derive(Debug, Clone)]
