@@ -78,7 +78,7 @@ impl ChannelNumber {
         Self { channel }
     }
 
-    /// The channel number stored in a [`ChannelNuumber`] [`Attribute`]
+    /// The channel number stored in a [`ChannelNumber`] [`Attribute`]
     ///
     /// # Examples
     ///
