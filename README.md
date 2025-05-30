@@ -1,12 +1,12 @@
 [![Build status](https://github.com/ystreet/turn-proto/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/ystreet/turn-proto/actions)
 [![codecov](https://codecov.io/gh/ystreet/turn-proto/branch/main/graph/badge.svg)](https://codecov.io/gh/ystreet/turn-proto)
 [![Dependencies](https://deps.rs/repo/github/ystreet/turn-proto/status.svg)](https://deps.rs/repo/github/ystreet/turn-proto)
-[![crates.io](https://img.shields.io/crates/v/turn-proto.svg)](https://crates.io/crates/turn-proto)
-[![docs.rs](https://docs.rs/turn-proto/badge.svg)](https://docs.rs/turn-proto)
+[![crates.io](https://img.shields.io/crates/v/turn-client-proto.svg)](https://crates.io/crates/turn-client-proto)
+[![docs.rs](https://docs.rs/turn-client-proto/badge.svg)](https://docs.rs/turn-client-proto)
 
 # turn-proto
 
-Repository containing a sans-IO implementation of the STUN (RFC5389/RFC8489) protocol
+Repository containing a sans-IO implementation of the TURN (RFC5766) protocol
 and STUN parsing and writing in the [Rust programming language](https://www.rust-lang.org/).
 
 ## Why sans-io?
@@ -45,9 +45,8 @@ For other examples of sans-IO implementations, take a look at:
 
 ### [turn-types](https://github.com/ystreet/turn-proto/tree/main/turn-types)
 
-Contains parsers and writing implementations for STUN messages and attributes.
-Message parsing is zero-copy by default and easily supports externally defined
-custom attributes.
+Contains parsers and writing implementations for TURN related STUN messages and attributes.
+Message parsing is zero-copy by default.
 
 ### [turn-client-proto](https://github.com/ystreet/turn-proto/tree/main/turn-client-proto)
 
