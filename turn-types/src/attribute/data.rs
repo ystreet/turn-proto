@@ -6,10 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use stun_types::{
-    attribute::*,
-    message::StunParseError,
-};
+use stun_types::{attribute::*, message::StunParseError};
 
 /// The Data [`Attribute`]
 #[derive(Debug, Clone)]
@@ -66,9 +63,7 @@ impl<'a> TryFrom<RawAttribute<'a>> for Data<'a> {
 
     fn try_from(raw: RawAttribute<'a>) -> Result<Self, Self::Error> {
         raw.check_type_and_len(Self::TYPE, ..)?;
-        Ok(Self {
-            data: raw.value,
-        })
+        Ok(Self { data: raw.value })
     }
 }
 

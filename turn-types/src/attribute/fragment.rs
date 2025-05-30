@@ -6,10 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use stun_types::{
-    attribute::*,
-    message::StunParseError,
-};
+use stun_types::{attribute::*, message::StunParseError};
 
 /// The DontFragment [`Attribute`]
 #[derive(Default, Debug, Clone)]
