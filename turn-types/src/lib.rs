@@ -23,6 +23,7 @@
 pub use stun_types as stun;
 pub mod attribute;
 pub mod channel;
+pub mod message;
 
 /// Initialize the library.
 pub fn debug_init() {
