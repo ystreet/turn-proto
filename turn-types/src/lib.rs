@@ -25,7 +25,7 @@ pub mod attribute;
 pub mod channel;
 
 /// Initialize the library.
-pub fn init() {
+pub fn debug_init() {
     attribute::attributes_init();
 }
 
@@ -36,7 +36,7 @@ mod tests {
     use tracing_subscriber::Layer;
 
     pub fn test_init_log() -> DefaultGuard {
-        crate::init();
+        crate::debug_init();
         let level_filter = std::env::var("TURN_LOG")
             .or(std::env::var("RUST_LOG"))
             .ok()
