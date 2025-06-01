@@ -22,6 +22,7 @@
 
 pub use stun_types as stun;
 pub mod attribute;
+pub mod channel;
 
 /// Initialize the library.
 pub fn init() {
