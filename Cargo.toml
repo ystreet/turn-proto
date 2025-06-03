@@ -1,6 +1,6 @@
 [workspace]
-members = ["turn-types"]
-default-members = ["turn-types"]
+members = ["turn-types", "turn-client-proto", "turn-server-proto"]
+default-members = ["turn-types", "turn-client-proto", "turn-server-proto"]
 resolver = "2"
 
 [workspace.package]
@@ -12,7 +12,8 @@ rust-version = "1.70.0"
 [workspace.dependencies]
 byteorder = "1"
 rand = "0.9"
-tracing = "0.1"
-thiserror = "2"
-tracing-subscriber = "0.3"
+stun-proto = "0.4.1"
 stun-types = "0.4.1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"

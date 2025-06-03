@@ -21,6 +21,7 @@
 //! [RFC5766]: https://tools.ietf.org/html/rfc5766
 
 pub use stun_types as stun;
+use stun_types::message::LongTermCredentials;
 pub mod attribute;
 pub mod channel;
 pub mod message;
@@ -28,6 +29,38 @@ pub mod message;
 /// Initialize the library.
 pub fn debug_init() {
     attribute::attributes_init();
+}
+
+/// Credentials used for a TURN user.
+#[derive(Debug, Clone)]
+pub struct TurnCredentials {
+    username: String,
+    password: String,
+}
+
+impl TurnCredentials {
+    /// Transform these credentials into some `LongTermCredentials` for use in a STUN context.
+    pub fn into_long_term_credentials(self, realm: &str) -> LongTermCredentials {
+        LongTermCredentials::new(self.username, self.password, realm.to_string())
+    }
+
+    /// Construct a new set of [`TurnCredentials`]
+    pub fn new(username: &str, password: &str) -> Self {
+        Self {
+            username: username.to_owned(),
+            password: password.to_owned(),
+        }
+    }
+
+    /// The username of the credentials.
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
+    /// The password of the credentials.
+    pub fn password(&self) -> &str {
+        &self.password
+    }
 }
 
 #[cfg(test)]
