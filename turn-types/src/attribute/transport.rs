@@ -6,12 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use byteorder::{BigEndian, ByteOrder};
-
-use stun_proto::types::{
-    attribute::*,
-    message::{StunParseError, TransactionId},
-};
+use stun_types::{attribute::*, message::StunParseError};
 
 /// The RequestedTransport [`Attribute`]
 #[derive(Debug, Clone)]
@@ -67,6 +62,7 @@ impl TryFrom<&RawAttribute<'_>> for RequestedTransport {
 }
 
 impl RequestedTransport {
+    /// The UDP transport type.
     pub const UDP: u8 = 17;
 
     /// Create a new RequestedTransport [`Attribute`]
@@ -74,7 +70,7 @@ impl RequestedTransport {
     /// # Examples
     ///
     /// ```
-    /// # use librice_proto::turn::attribute::*;
+    /// # use turn_types::attribute::*;
     /// let requested_transport = RequestedTransport::new(RequestedTransport::UDP);
     /// assert_eq!(requested_transport.protocol(), RequestedTransport::UDP);
     /// ```
@@ -87,7 +83,7 @@ impl RequestedTransport {
     /// # Examples
     ///
     /// ```
-    /// # use librice_proto::turn::attribute::*;
+    /// # use turn_types::attribute::*;
     /// let requested_transport = RequestedTransport::new(RequestedTransport::UDP);
     /// assert_eq!(requested_transport.protocol(), RequestedTransport::UDP);
     /// ```
@@ -105,6 +101,7 @@ impl std::fmt::Display for RequestedTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use byteorder::{BigEndian, ByteOrder};
 
     #[test]
     fn requested_transport() {
@@ -113,7 +110,7 @@ mod tests {
         assert_eq!(trans.get_type(), RequestedTransport::TYPE);
         assert_eq!(trans.protocol(), 17);
         let raw: RawAttribute = trans.to_raw();
-        trace!("raw: {raw:?}");
+        println!("raw: {raw:?}");
         assert_eq!(raw.get_type(), RequestedTransport::TYPE);
         let trans2 = RequestedTransport::try_from(&raw).unwrap();
         assert_eq!(trans2.get_type(), RequestedTransport::TYPE);
