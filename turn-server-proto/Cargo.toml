@@ -17,7 +17,7 @@ stun-proto.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 turn-types = { path = "../turn-types", version = "0.1.0" }
-turn-client-proto = { path = "../turn-client-proto", version = "0.1.0" }
 
 [dev-dependencies]
+turn-client-proto = { path = "../turn-client-proto" }
 tracing-subscriber.workspace = true
