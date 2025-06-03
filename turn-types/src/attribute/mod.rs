@@ -27,6 +27,8 @@ mod lifetime;
 pub use lifetime::Lifetime;
 mod reservation;
 pub use reservation::ReservationToken;
+mod transport;
+pub use transport::RequestedTransport;
 
 pub(super) fn attributes_init() {
     use stun_types::prelude::*;
