@@ -1,0 +1,23 @@
+[package]
+name = "turn-client-proto"
+description = "TURN protocol in a sans-IO fashion"
+version.workspace = true
+authors = ["Matthew Waters <matthew@centricular.com>"]
+license = "MIT OR Apache-2.0"
+keywords = ["TURN"]
+categories = ["network-programming", ]
+documentation = "https://docs.rs/turn-client-proto"
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+byteorder.workspace = true
+stun-proto.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+turn-types = { path = "../turn-types", version = "0.1.0" }
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
+turn-server-proto = { path = "../turn-server-proto", version = "0.1.0" }
