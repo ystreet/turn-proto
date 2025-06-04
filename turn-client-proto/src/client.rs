@@ -165,8 +165,16 @@ impl TurnClient {
         }
     }
 
+    pub fn transport(&self) -> TransportType {
+        self.stun_agent.transport()
+    }
+
     pub fn local_addr(&self) -> SocketAddr {
         self.stun_agent.local_addr()
+    }
+
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.stun_agent.remote_addr().unwrap()
     }
 
     #[tracing::instrument(name = "turn_agent_poll", ret, skip(self))]
