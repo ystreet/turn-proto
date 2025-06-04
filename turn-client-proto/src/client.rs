@@ -58,6 +58,7 @@ struct Permission {
 struct Allocation {
     relayed_address: SocketAddr,
     transport: TransportType,
+    expired: bool,
     lifetime: Duration,
     expires_at: Instant,
     permissions: Vec<Permission>,
@@ -264,6 +265,13 @@ impl TurnClient {
                 return TurnPollRet::WaitUntil(earliest_wait.max(now));
             }
         }
+    }
+
+    pub fn relayed_addresses(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+        self.allocations
+            .iter()
+            .filter(|allocation| !allocation.expired)
+            .map(|allocation| allocation.relayed_address)
     }
 
     #[tracing::instrument(
@@ -606,6 +614,7 @@ impl TurnClient {
                             relayed_address,
                             // TODO support TCP
                             transport: TransportType::Udp,
+                            expired: false,
                             lifetime,
                             expires_at,
                             permissions: vec![],
@@ -868,6 +877,7 @@ impl TurnClient {
             alloc.permissions.clear();
             alloc.channels.clear();
             alloc.expires_at = now;
+            alloc.expired = true;
             alloc.pending_refresh = Some((transaction_id, 0));
         }
         Some(transmit.into_owned())
@@ -889,6 +899,7 @@ impl TurnClient {
         };
 
         if now >= allocation.expires_at {
+            allocation.expired = true;
             warn!("Allocation has expired");
             return Err(CreatePermissionError::NoAllocation);
         }
@@ -962,6 +973,7 @@ impl TurnClient {
         };
 
         if now >= allocation.expires_at {
+            allocation.expired = true;
             return Err(BindChannelError::NoAllocation);
         }
 
@@ -1397,6 +1409,10 @@ mod tests {
             assert!(msg.has_attribute(XorMappedAddress::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
             self.client.recv(transmit, now);
+            assert!(self
+                .client
+                .relayed_addresses()
+                .any(|relayed| relayed == self.turn_alloc_addr))
         }
 
         fn refresh(&mut self, now: Instant) {
@@ -1423,6 +1439,10 @@ mod tests {
             assert!(msg.has_attribute(Lifetime::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
             self.client.recv(transmit, now);
+            assert!(self
+                .client
+                .relayed_addresses()
+                .any(|relayed| relayed == self.turn_alloc_addr))
         }
 
         fn delete_allocation(&mut self, now: Instant) {
@@ -1445,6 +1465,10 @@ mod tests {
             assert!(msg.has_attribute(Lifetime::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
             self.client.recv(transmit, now);
+            assert!(!self
+                .client
+                .relayed_addresses()
+                .any(|relayed| relayed == self.turn_alloc_addr))
         }
 
         fn create_permission(&mut self, now: Instant) {
