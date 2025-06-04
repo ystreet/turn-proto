@@ -80,7 +80,7 @@ impl TurnClient {
                 println!("recv ret {ret:?}");
                 match ret {
                     TurnRecvRet::Reply(transmit) => transmit,
-                    TurnRecvRet::Ignored => continue,
+                    TurnRecvRet::Ignored(_) => continue,
                     TurnRecvRet::Handled => {
                         inner_s.1.notify_one();
                         continue;
