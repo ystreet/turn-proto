@@ -111,7 +111,7 @@ pub enum TurnPollRet {
 pub enum TurnRecvRet<T: AsRef<[u8]> + std::fmt::Debug> {
     Reply(TransmitBuild<DelayedTransmit<T>>),
     Handled,
-    Ignored,
+    Ignored(Transmit<T>),
 }
 
 #[derive(Debug)]
@@ -467,10 +467,10 @@ impl TurnClient {
                 self.stun_agent.local_addr(),
                 transmit.to
             );
-            return TurnRecvRet::Ignored;
+            return TurnRecvRet::Ignored(transmit);
         }
         let (credentials, nonce) = match &mut self.state {
-            AuthState::Error | AuthState::Initial => return TurnRecvRet::Ignored,
+            AuthState::Error | AuthState::Initial => return TurnRecvRet::Ignored(transmit),
             AuthState::InitialSent(transaction_id) => {
                 let msg = if self.stun_agent.transport() == TransportType::Tcp {
                     self.tcp_buffer.extend_from_slice(transmit.data.as_ref());
@@ -481,41 +481,41 @@ impl TurnClient {
                         return TurnRecvRet::Handled;
                     }
                     let Ok(ret) = Message::from_bytes(transmit.data.as_ref()) else {
-                        return TurnRecvRet::Ignored;
+                        return TurnRecvRet::Ignored(transmit);
                     };
                     ret
                 } else {
                     let Ok(ret) = Message::from_bytes(transmit.data.as_ref()) else {
-                        return TurnRecvRet::Ignored;
+                        return TurnRecvRet::Ignored(transmit);
                     };
                     ret
                 };
                 trace!("received STUN message {msg}");
                 let msg = match self.stun_agent.handle_stun(msg, transmit.from) {
                     HandleStunReply::Drop => return TurnRecvRet::Handled,
-                    HandleStunReply::IncomingStun(_) => return TurnRecvRet::Ignored,
+                    HandleStunReply::IncomingStun(_) => return TurnRecvRet::Ignored(transmit),
                     HandleStunReply::StunResponse(msg) => msg,
                 };
                 if !msg.is_response() || &msg.transaction_id() != transaction_id {
-                    return TurnRecvRet::Ignored;
+                    return TurnRecvRet::Ignored(transmit);
                 }
                 /* The Initial stun request should result in an unauthorized error as there were
                  * no credentials in the initial request */
                 if !msg.has_class(stun_proto::types::message::MessageClass::Error) {
                     self.state = AuthState::Error;
-                    return TurnRecvRet::Ignored;
+                    return TurnRecvRet::Ignored(transmit);
                 }
                 let Ok(error_code) = msg.attribute::<ErrorCode>() else {
                     self.state = AuthState::Error;
-                    return TurnRecvRet::Ignored;
+                    return TurnRecvRet::Ignored(transmit);
                 };
                 let Ok(realm) = msg.attribute::<Realm>() else {
                     self.state = AuthState::Error;
-                    return TurnRecvRet::Ignored;
+                    return TurnRecvRet::Ignored(transmit);
                 };
                 let Ok(nonce) = msg.attribute::<Nonce>() else {
                     self.state = AuthState::Error;
-                    return TurnRecvRet::Ignored;
+                    return TurnRecvRet::Ignored(transmit);
                 };
                 match error_code.code() {
                     ErrorCode::UNAUTHORIZED => {
@@ -546,7 +546,7 @@ impl TurnClient {
                         self.state = AuthState::Error;
                     }
                 }
-                return TurnRecvRet::Ignored;
+                return TurnRecvRet::Ignored(transmit);
             }
             AuthState::Authenticating {
                 credentials,
@@ -562,39 +562,39 @@ impl TurnClient {
                         return TurnRecvRet::Handled;
                     }
                     let Ok(ret) = Message::from_bytes(transmit.data.as_ref()) else {
-                        return TurnRecvRet::Ignored;
+                        return TurnRecvRet::Ignored(transmit);
                     };
                     ret
                 } else {
                     let Ok(ret) = Message::from_bytes(transmit.data.as_ref()) else {
-                        return TurnRecvRet::Ignored;
+                        return TurnRecvRet::Ignored(transmit);
                     };
                     ret
                 };
                 trace!("received STUN message {msg}");
                 let msg = match self.stun_agent.handle_stun(msg, transmit.from) {
                     HandleStunReply::Drop => return TurnRecvRet::Handled,
-                    HandleStunReply::IncomingStun(_) => return TurnRecvRet::Ignored,
+                    HandleStunReply::IncomingStun(_) => return TurnRecvRet::Ignored(transmit),
                     HandleStunReply::StunResponse(msg) => msg,
                 };
                 if !msg.is_response() || &msg.transaction_id() != transaction_id {
-                    return TurnRecvRet::Ignored;
+                    return TurnRecvRet::Ignored(transmit);
                 }
                 match msg.class() {
                     stun_proto::types::message::MessageClass::Error => {
                         let Ok(error_code) = msg.attribute::<ErrorCode>() else {
                             self.state = AuthState::Error;
-                            return TurnRecvRet::Ignored;
+                            return TurnRecvRet::Ignored(transmit);
                         };
                         match error_code.code() {
                             ErrorCode::STALE_NONCE => {
                                 let Ok(realm) = msg.attribute::<Realm>() else {
                                     self.state = AuthState::Error;
-                                    return TurnRecvRet::Ignored;
+                                    return TurnRecvRet::Ignored(transmit);
                                 };
                                 let Ok(nonce) = msg.attribute::<Nonce>() else {
                                     self.state = AuthState::Error;
-                                    return TurnRecvRet::Ignored;
+                                    return TurnRecvRet::Ignored(transmit);
                                 };
                                 let credentials = self
                                     .credentials
@@ -623,7 +623,7 @@ impl TurnClient {
                         let Ok(_) = msg.validate_integrity(&MessageIntegrityCredentials::LongTerm(
                             credentials.clone(),
                         )) else {
-                            return TurnRecvRet::Ignored;
+                            return TurnRecvRet::Ignored(transmit);
                         };
                         let xor_relayed_address = msg.attribute::<XorRelayedAddress>();
                         let lifetime = msg.attribute::<Lifetime>();
@@ -631,7 +631,7 @@ impl TurnClient {
                             (xor_relayed_address, lifetime)
                         else {
                             self.state = AuthState::Error;
-                            return TurnRecvRet::Ignored;
+                            return TurnRecvRet::Ignored(transmit);
                         };
                         let relayed_address = xor_relayed_address.addr(msg.transaction_id());
                         let lifetime = Duration::from_secs(lifetime.seconds() as u64);
@@ -663,7 +663,7 @@ impl TurnClient {
                     }
                     _ => (),
                 }
-                return TurnRecvRet::Ignored;
+                return TurnRecvRet::Ignored(transmit);
             }
             AuthState::Authenticated { credentials, nonce } => (credentials.clone(), nonce),
         };
@@ -673,7 +673,7 @@ impl TurnClient {
             self.tcp_buffer.extend_from_slice(transmit.data.as_ref());
             let Ok(hdr) = MessageHeader::from_bytes(&self.tcp_buffer) else {
                 let Ok(channel) = ChannelData::parse(&self.tcp_buffer) else {
-                    return TurnRecvRet::Ignored;
+                    return TurnRecvRet::Ignored(transmit);
                 };
                 let data = channel.data();
                 for alloc in self.allocations.iter_mut() {
@@ -700,14 +700,18 @@ impl TurnClient {
                 return TurnRecvRet::Handled;
             }
             let Ok(msg) = Message::from_bytes(transmit.data.as_ref()) else {
-                return TurnRecvRet::Ignored;
+                return TurnRecvRet::Ignored(transmit);
             };
 
-            self.handle_stun(msg, transmit.from, credentials, now)
+            if !self.handle_stun(msg, transmit.from, credentials, now) {
+                TurnRecvRet::Ignored(transmit)
+            } else {
+                TurnRecvRet::Handled
+            }
         } else {
             let Ok(msg) = Message::from_bytes(transmit.data.as_ref()) else {
                 let Ok(channel) = ChannelData::parse(transmit.data.as_ref()) else {
-                    return TurnRecvRet::Ignored;
+                    return TurnRecvRet::Ignored(transmit);
                 };
                 for alloc in self.allocations.iter_mut() {
                     if alloc
@@ -727,29 +731,33 @@ impl TurnClient {
                         });
                     }
                 }
-                return TurnRecvRet::Ignored;
+                return TurnRecvRet::Ignored(transmit);
             };
-            self.handle_stun(msg, transmit.from, credentials, now)
+            if !self.handle_stun(msg, transmit.from, credentials, now) {
+                TurnRecvRet::Ignored(transmit)
+            } else {
+                TurnRecvRet::Handled
+            }
         }
     }
 
-    fn handle_stun<T: AsRef<[u8]> + std::fmt::Debug>(
+    fn handle_stun(
         &mut self,
         msg: Message<'_>,
         from: SocketAddr,
         credentials: LongTermCredentials,
         now: Instant,
-    ) -> TurnRecvRet<T> {
+    ) -> bool {
         trace!("received STUN message {msg}");
         let msg = match self.stun_agent.handle_stun(msg, from) {
-            HandleStunReply::Drop => return TurnRecvRet::Ignored,
+            HandleStunReply::Drop => return false,
             HandleStunReply::IncomingStun(msg) => msg,
             HandleStunReply::StunResponse(msg) => msg,
         };
         let Ok(_) = msg.validate_integrity(&MessageIntegrityCredentials::LongTerm(credentials))
         else {
             trace!("incoming message failed integrity check");
-            return TurnRecvRet::Ignored;
+            return false;
         };
 
         if msg.is_response() {
@@ -797,17 +805,13 @@ impl TurnClient {
                         } else {
                             info!("Successfully refreshed allocation");
                         }
-                        TurnRecvRet::Handled
+                        true
                     } else {
-                        TurnRecvRet::Ignored
+                        false
                     }
                 }
                 CREATE_PERMISSION => {
-                    if self.update_permission_state(msg, now) {
-                        TurnRecvRet::Handled
-                    } else {
-                        TurnRecvRet::Ignored
-                    }
+                    self.update_permission_state(msg, now)
                 }
                 CHANNEL_BIND => {
                     if let Some((alloc_idx, channel_idx)) = self
@@ -831,7 +835,7 @@ impl TurnClient {
                         if msg.has_class(stun_proto::types::message::MessageClass::Error) {
                             error!("Received error response to channel bind request");
                             // TODO: handle
-                            return TurnRecvRet::Handled;
+                            return true;
                         }
                         info!("Succesfully created/refreshed {channel:?}");
                         self.update_permission_state(msg, now);
@@ -853,23 +857,23 @@ impl TurnClient {
                             channel.expires_at = now + Duration::from_secs(600);
                             self.allocations[alloc_idx].channels.push(channel);
                         }
-                        return TurnRecvRet::Handled;
+                        return true;
                     }
-                    TurnRecvRet::Ignored
+                    false
                 }
-                _ => TurnRecvRet::Ignored, // Other responses are not expected
+                _ => false, // Other responses are not expected
             }
         } else if msg.has_class(stun_proto::types::message::MessageClass::Request) {
             // TODO: reply with an error?
-            TurnRecvRet::Ignored
+            false
         } else {
             /* The message is an indication */
             match msg.method() {
                 DATA => {
                     // FIXME
-                    TurnRecvRet::Ignored
+                    false
                 }
-                _ => TurnRecvRet::Ignored, // All other indications should be ignored
+                _ => false, // All other indications should be ignored
             }
         }
     }
