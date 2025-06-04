@@ -49,6 +49,7 @@ struct Channel {
 
 #[derive(Debug)]
 struct Permission {
+    expired: bool,
     expires_at: Instant,
     ttype: TransportType,
     ip: IpAddr,
@@ -186,7 +187,7 @@ impl TurnClient {
                 return TurnPollRet::WaitUntil(now);
             }
             AuthState::InitialSent(transaction_id) => {
-                if cancelled_transaction.map_or(false, |cancelled| &cancelled == transaction_id) {
+                if cancelled_transaction.is_some_and(|cancelled| &cancelled == transaction_id) {
                     self.state = AuthState::Error;
                 }
                 return TurnPollRet::WaitUntil(earliest_wait);
@@ -196,7 +197,7 @@ impl TurnClient {
                 nonce: _,
                 transaction_id,
             } => {
-                if cancelled_transaction.map_or(false, |cancelled| &cancelled == transaction_id) {
+                if cancelled_transaction.is_some_and(|cancelled| &cancelled == transaction_id) {
                     self.state = AuthState::Error;
                 }
                 return TurnPollRet::WaitUntil(earliest_wait);
@@ -267,11 +268,32 @@ impl TurnClient {
         }
     }
 
-    pub fn relayed_addresses(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+    pub fn relayed_addresses(&self) -> impl Iterator<Item = (TransportType, SocketAddr)> + '_ {
         self.allocations
             .iter()
             .filter(|allocation| !allocation.expired)
-            .map(|allocation| allocation.relayed_address)
+            .map(|allocation| (allocation.transport, allocation.relayed_address))
+    }
+
+    pub fn permissions(
+        &self,
+        transport: TransportType,
+        relayed: SocketAddr,
+    ) -> impl Iterator<Item = IpAddr> + '_ {
+        self.allocations
+            .iter()
+            .filter(move |allocation| {
+                !allocation.expired
+                    && allocation.transport == transport
+                    && allocation.relayed_address == relayed
+            })
+            .flat_map(|allocation| {
+                allocation
+                    .permissions
+                    .iter()
+                    .filter(|permission| !permission.expired)
+                    .map(|permission| permission.ip)
+            })
     }
 
     #[tracing::instrument(
@@ -404,6 +426,7 @@ impl TurnClient {
                     permission.ip,
                 ));
                 permission.expires_at = now + Duration::from_secs(300);
+                permission.expired = false;
                 self.allocations[alloc_idx].permissions.push(permission);
             }
             return true;
@@ -923,6 +946,7 @@ impl TurnClient {
             return Err(CreatePermissionError::NoAllocation);
         };
         let permission = Permission {
+            expired: false,
             expires_at: now,
             ttype: transport,
             ip: peer_addr,
@@ -1038,6 +1062,7 @@ impl TurnClient {
             .unwrap();
 
         let permission = Permission {
+            expired: false,
             expires_at: now,
             ttype: transport,
             ip: peer_addr.ip(),
@@ -1412,7 +1437,8 @@ mod tests {
             assert!(self
                 .client
                 .relayed_addresses()
-                .any(|relayed| relayed == self.turn_alloc_addr))
+                .any(|(transport, relayed)| transport == TransportType::Udp
+                    && relayed == self.turn_alloc_addr))
         }
 
         fn refresh(&mut self, now: Instant) {
@@ -1442,7 +1468,8 @@ mod tests {
             assert!(self
                 .client
                 .relayed_addresses()
-                .any(|relayed| relayed == self.turn_alloc_addr))
+                .any(|(transport, relayed)| transport == TransportType::Udp
+                    && relayed == self.turn_alloc_addr))
         }
 
         fn delete_allocation(&mut self, now: Instant) {
@@ -1468,7 +1495,8 @@ mod tests {
             assert!(!self
                 .client
                 .relayed_addresses()
-                .any(|relayed| relayed == self.turn_alloc_addr))
+                .any(|(transport, relayed)| transport == TransportType::Udp
+                    && relayed == self.turn_alloc_addr))
         }
 
         fn create_permission(&mut self, now: Instant) {
@@ -1492,6 +1520,10 @@ mod tests {
                 unreachable!();
             };
             assert_eq!(permision.expires_at, now + Duration::from_secs(300));
+            assert!(self
+                .client
+                .permissions(TransportType::Udp, self.turn_alloc_addr)
+                .any(|perm_addr| perm_addr == self.peer_addr.ip()));
         }
 
         fn bind_channel(&mut self, now: Instant) {
