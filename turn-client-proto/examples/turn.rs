@@ -70,7 +70,7 @@ impl TurnClient {
             let Ok((size, from)) = socket_clone.recv_from(&mut data) else {
                 break;
             };
-            let transmit = {
+            {
                 let mut inner = inner_s.0.lock().unwrap();
                 let now = Instant::now();
                 let ret = inner.client.recv(
@@ -79,15 +79,24 @@ impl TurnClient {
                 );
                 println!("recv ret {ret:?}");
                 match ret {
-                    TurnRecvRet::Reply(transmit) => transmit,
                     TurnRecvRet::Ignored(_) => continue,
                     TurnRecvRet::Handled => {
                         inner_s.1.notify_one();
                         continue;
                     }
+                    TurnRecvRet::PeerData {
+                        data,
+                        transport,
+                        peer,
+                    } => {
+                        println!(
+                            "received {} bytes from {peer:?} using {transport:?}",
+                            data.len()
+                        );
+                        continue;
+                    }
                 }
-            };
-            let data = transmit.data.build();
+            }
         });
 
         let inner_s = inner.clone();

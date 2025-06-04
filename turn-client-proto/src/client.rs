@@ -109,9 +109,25 @@ pub enum TurnPollRet {
 
 #[derive(Debug)]
 pub enum TurnRecvRet<T: AsRef<[u8]> + std::fmt::Debug> {
-    Reply(TransmitBuild<DelayedTransmit<T>>),
     Handled,
     Ignored(Transmit<T>),
+    // TODO: try to return existing data without a copy
+    PeerData {
+        data: Vec<u8>,
+        transport: TransportType,
+        peer: SocketAddr,
+    },
+}
+
+#[derive(Debug)]
+enum InternalHandleStunReply {
+    Handled,
+    Ignored,
+    PeerData {
+        data: Vec<u8>,
+        transport: TransportType,
+        peer: SocketAddr,
+    },
 }
 
 #[derive(Debug)]
@@ -682,15 +698,13 @@ impl TurnClient {
                         .iter_mut()
                         .find(|chan| chan.id == channel.id())
                     {
-                        // TODO: try to passthrough transmits if they line up with the input.
-                        self.pending_transmits.push_front(Transmit::new(
-                            data.to_vec().into_boxed_slice().into(),
-                            alloc.transport,
-                            alloc.relayed_address,
-                            chan.peer_addr,
-                        ));
+                        let data = data.to_vec();
                         self.tcp_buffer = self.tcp_buffer.split_at(data.len() + 2).1.to_vec();
-                        return TurnRecvRet::Handled;
+                        return TurnRecvRet::PeerData {
+                            data,
+                            transport: chan.transport,
+                            peer: chan.peer_addr,
+                        };
                     }
                 }
                 self.tcp_buffer = self.tcp_buffer.split_at(data.len() + 2).1.to_vec();
@@ -703,10 +717,26 @@ impl TurnClient {
                 return TurnRecvRet::Ignored(transmit);
             };
 
-            if !self.handle_stun(msg, transmit.from, credentials, now) {
-                TurnRecvRet::Ignored(transmit)
-            } else {
-                TurnRecvRet::Handled
+            // FIXME: dual allocations
+            let transport = self
+                .allocations
+                .iter()
+                .map(|allocation| allocation.transport)
+                .next()
+                .unwrap();
+
+            match self.handle_stun(msg, transport, transmit.from, credentials, now) {
+                InternalHandleStunReply::Handled => TurnRecvRet::Handled,
+                InternalHandleStunReply::Ignored => TurnRecvRet::Ignored(transmit),
+                InternalHandleStunReply::PeerData {
+                    data,
+                    transport,
+                    peer,
+                } => TurnRecvRet::PeerData {
+                    data,
+                    transport,
+                    peer,
+                },
             }
         } else {
             let Ok(msg) = Message::from_bytes(transmit.data.as_ref()) else {
@@ -714,29 +744,41 @@ impl TurnClient {
                     return TurnRecvRet::Ignored(transmit);
                 };
                 for alloc in self.allocations.iter_mut() {
-                    if alloc
+                    if let Some(chan) = alloc
                         .channels
                         .iter_mut()
-                        .any(|chan| chan.id == channel.id())
+                        .find(|chan| chan.id == channel.id())
                     {
-                        let range = 2..2 + channel.data().len();
-                        return TurnRecvRet::Reply(TransmitBuild {
-                            data: DelayedTransmit {
-                                data: transmit.data,
-                                range,
-                            },
-                            transport: alloc.transport,
-                            from: transmit.from,
-                            to: transmit.to,
-                        });
+                        return TurnRecvRet::PeerData {
+                            data: channel.data().to_vec(),
+                            transport: chan.transport,
+                            peer: chan.peer_addr,
+                        };
                     }
                 }
                 return TurnRecvRet::Ignored(transmit);
             };
-            if !self.handle_stun(msg, transmit.from, credentials, now) {
-                TurnRecvRet::Ignored(transmit)
-            } else {
-                TurnRecvRet::Handled
+
+            // FIXME: TCP allocations
+            let transport = self
+                .allocations
+                .iter()
+                .map(|allocation| allocation.transport)
+                .next()
+                .unwrap();
+
+            match self.handle_stun(msg, transport, transmit.from, credentials, now) {
+                InternalHandleStunReply::Handled => TurnRecvRet::Handled,
+                InternalHandleStunReply::Ignored => TurnRecvRet::Ignored(transmit),
+                InternalHandleStunReply::PeerData {
+                    data,
+                    transport,
+                    peer,
+                } => TurnRecvRet::PeerData {
+                    data,
+                    transport,
+                    peer,
+                },
             }
         }
     }
@@ -744,23 +786,24 @@ impl TurnClient {
     fn handle_stun(
         &mut self,
         msg: Message<'_>,
+        transport: TransportType,
         from: SocketAddr,
         credentials: LongTermCredentials,
         now: Instant,
-    ) -> bool {
+    ) -> InternalHandleStunReply {
         trace!("received STUN message {msg}");
         let msg = match self.stun_agent.handle_stun(msg, from) {
-            HandleStunReply::Drop => return false,
+            HandleStunReply::Drop => return InternalHandleStunReply::Ignored,
             HandleStunReply::IncomingStun(msg) => msg,
             HandleStunReply::StunResponse(msg) => msg,
         };
-        let Ok(_) = msg.validate_integrity(&MessageIntegrityCredentials::LongTerm(credentials))
-        else {
-            trace!("incoming message failed integrity check");
-            return false;
-        };
-
         if msg.is_response() {
+            let Ok(_) = msg.validate_integrity(&MessageIntegrityCredentials::LongTerm(credentials))
+            else {
+                trace!("incoming message failed integrity check");
+                return InternalHandleStunReply::Ignored;
+            };
+
             match msg.method() {
                 REFRESH => {
                     let is_success = if msg.has_class(MessageClass::Error) {
@@ -805,13 +848,17 @@ impl TurnClient {
                         } else {
                             info!("Successfully refreshed allocation");
                         }
-                        true
+                        InternalHandleStunReply::Handled
                     } else {
-                        false
+                        InternalHandleStunReply::Ignored
                     }
                 }
                 CREATE_PERMISSION => {
-                    self.update_permission_state(msg, now)
+                    if self.update_permission_state(msg, now) {
+                        InternalHandleStunReply::Handled
+                    } else {
+                        InternalHandleStunReply::Ignored
+                    }
                 }
                 CHANNEL_BIND => {
                     if let Some((alloc_idx, channel_idx)) = self
@@ -835,7 +882,7 @@ impl TurnClient {
                         if msg.has_class(stun_proto::types::message::MessageClass::Error) {
                             error!("Received error response to channel bind request");
                             // TODO: handle
-                            return true;
+                            return InternalHandleStunReply::Handled;
                         }
                         info!("Succesfully created/refreshed {channel:?}");
                         self.update_permission_state(msg, now);
@@ -857,23 +904,38 @@ impl TurnClient {
                             channel.expires_at = now + Duration::from_secs(600);
                             self.allocations[alloc_idx].channels.push(channel);
                         }
-                        return true;
+                        return InternalHandleStunReply::Handled;
                     }
-                    false
+                    InternalHandleStunReply::Ignored
                 }
-                _ => false, // Other responses are not expected
+                _ => InternalHandleStunReply::Ignored, // Other responses are not expected
             }
         } else if msg.has_class(stun_proto::types::message::MessageClass::Request) {
+            let Ok(_) = msg.validate_integrity(&MessageIntegrityCredentials::LongTerm(credentials))
+            else {
+                trace!("incoming message failed integrity check");
+                return InternalHandleStunReply::Ignored;
+            };
+
             // TODO: reply with an error?
-            false
+            InternalHandleStunReply::Ignored
         } else {
             /* The message is an indication */
             match msg.method() {
                 DATA => {
-                    // FIXME
-                    false
+                    let Ok(peer_addr) = msg.attribute::<XorPeerAddress>() else {
+                        return InternalHandleStunReply::Ignored;
+                    };
+                    let Ok(data) = msg.attribute::<Data>() else {
+                        return InternalHandleStunReply::Ignored;
+                    };
+                    InternalHandleStunReply::PeerData {
+                        data: data.data().to_vec(),
+                        transport,
+                        peer: peer_addr.addr(msg.transaction_id()),
+                    }
                 }
-                _ => false, // All other indications should be ignored
+                _ => InternalHandleStunReply::Ignored, // All other indications should be ignored
             }
         }
     }
@@ -1609,6 +1671,17 @@ mod tests {
             assert!(msg.has_method(DATA));
             let data = msg.attribute::<Data>().unwrap();
             assert_eq!(data.data(), sent_data);
+            let TurnRecvRet::PeerData {
+                data: recv_data,
+                transport,
+                peer,
+            } = self.client.recv(transmit, now)
+            else {
+                unreachable!();
+            };
+            assert_eq!(transport, TransportType::Udp);
+            assert_eq!(peer, self.peer_addr);
+            assert_eq!(recv_data, sent_data);
         }
 
         fn sendrecv_data_channel(&mut self, now: Instant) {
