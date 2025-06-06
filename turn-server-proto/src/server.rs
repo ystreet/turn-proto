@@ -124,6 +124,7 @@ impl TurnServer {
     ) -> Result<Option<Transmit<SData<'static>>>, StunError> {
         match Message::from_bytes(transmit.data.as_ref()) {
             Ok(msg) => {
+                trace!("received {} from {:?}", msg, transmit.from);
                 match self.handle_stun(&msg, transmit.transport, transmit.from, transmit.to, now) {
                     Err(builder) => {
                         let data = builder.build();
@@ -139,6 +140,11 @@ impl TurnServer {
                 }
             }
             Err(_) => {
+                trace!(
+                    "received {} bytes from {:?}",
+                    transmit.data.as_ref().len(),
+                    transmit.from
+                );
                 // TODO: TCP buffering requirements
                 if let Some(client) =
                     self.client_from_5tuple(transmit.transport, transmit.to, transmit.from)
@@ -146,6 +152,11 @@ impl TurnServer {
                     let Ok(channel) = ChannelData::parse(transmit.data.as_ref()) else {
                         return Ok(None);
                     };
+                    trace!(
+                        "parsed channel data with id {} and data length {}",
+                        channel.id(),
+                        channel.data().len()
+                    );
                     let Some((allocation, existing)) =
                         client.allocations.iter().find_map(|allocation| {
                             allocation
@@ -153,6 +164,11 @@ impl TurnServer {
                                 .map(|perm| (allocation, perm))
                         })
                     else {
+                        warn!(
+                            "no channel id {} for this client {:?}",
+                            channel.id(),
+                            client.remote_addr
+                        );
                         // no channel with that id
                         return Ok(None);
                     };
@@ -164,6 +180,10 @@ impl TurnServer {
                         allocation.addr,
                         existing.peer_addr,
                     ) else {
+                        warn!(
+                            "no permission for {:?} for this allocation {:?}",
+                            existing.peer_addr, allocation.addr
+                        );
                         return Ok(None);
                     };
                     Ok(Some(
@@ -187,15 +207,22 @@ impl TurnServer {
                         transmit.to,
                         transmit.from,
                     ) else {
+                        warn!(
+                            "no permission for {:?} for this allocation {:?}",
+                            transmit.from, allocation.addr
+                        );
                         return Ok(None);
                     };
 
                     if let Some(existing) = allocation.channel_from_5tuple(
                         transmit.transport,
-                        transmit.from,
                         transmit.to,
+                        transmit.from,
                     ) {
-                        // no channel with that id
+                        debug!(
+                            "found existing channel {} for {:?} for this allocation {:?}",
+                            existing.id, transmit.from, allocation.addr
+                        );
                         let mut data = vec![0; 4];
                         data[0..2].copy_from_slice(&existing.id.to_be_bytes());
                         data[2..4]
@@ -209,6 +236,11 @@ impl TurnServer {
                             client.remote_addr,
                         )))
                     } else {
+                        // no channel with that id
+                        debug!(
+                            "no channel for {:?} for this allocation {:?}, using DATA indication",
+                            transmit.from, allocation.addr
+                        );
                         let transaction_id = TransactionId::generate();
                         let mut builder = Message::builder(
                             MessageType::from_class_method(MessageClass::Indication, DATA),
