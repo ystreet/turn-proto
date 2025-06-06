@@ -38,7 +38,6 @@ use tracing::{debug, error, info, trace, warn};
 pub struct TurnServer {
     realm: String,
     // FIXME: remove
-    credentials: TurnCredentials,
     stun: StunAgent,
 
     clients: Vec<Client>,
@@ -81,13 +80,11 @@ impl TurnServer {
     pub fn new(
         ttype: TransportType,
         listen_addr: SocketAddr,
-        credentials: TurnCredentials,
         realm: String,
     ) -> Self {
         let stun = StunAgent::builder(ttype, listen_addr).build();
         Self {
             realm,
-            credentials,
             stun,
             clients: vec![],
             nonces: vec![],
@@ -250,6 +247,7 @@ impl TurnServer {
                         builder.add_attribute(&peer_address).unwrap();
                         let data = Data::new(transmit.data.as_ref());
                         builder.add_attribute(&data).unwrap();
+                        // XXX: try to avoid copy?
                         let msg_data = builder.build();
 
                         Ok(Some(Transmit::new(
