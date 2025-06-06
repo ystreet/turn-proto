@@ -1723,11 +1723,8 @@ mod tests {
             assert_eq!(transmit.transport, TransportType::Udp);
             assert_eq!(transmit.from, self.server.listen_address());
             assert_eq!(transmit.to, self.client.local_addr());
-            let msg = Message::from_bytes(&transmit.data).unwrap();
-            assert!(msg.has_class(stun_proto::types::message::MessageClass::Indication));
-            assert!(msg.has_method(DATA));
-            let data = msg.attribute::<Data>().unwrap();
-            assert_eq!(data.data(), sent_data);
+            let cd = ChannelData::parse(&transmit.data).unwrap();
+            assert_eq!(cd.data(), sent_data);
         }
     }
 
