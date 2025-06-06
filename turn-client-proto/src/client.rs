@@ -1396,11 +1396,8 @@ mod tests {
     }
     impl TurnTestBuilder {
         fn build(self) -> TurnTest {
-            let mut server = TurnServer::new(
-                self.client_transport,
-                self.turn_listen_addr,
-                self.realm,
-            );
+            let mut server =
+                TurnServer::new(self.client_transport, self.turn_listen_addr, self.realm);
             server.add_user(
                 self.credentials.username().to_owned(),
                 self.credentials.password().to_owned(),
@@ -1684,11 +1681,20 @@ mod tests {
         }
 
         fn sendrecv_data_channel(&mut self, now: Instant) {
-            // client to peer
-            let data = [4; 8];
+            let to_peer = [4; 8];
+            let from_peer = [5; 12];
+            self.sendrecv_data_channel_with_data(&to_peer, &from_peer, now);
+        }
+
+        fn sendrecv_data_channel_with_data(
+            &mut self,
+            to_peer: &[u8],
+            from_peer: &[u8],
+            now: Instant,
+        ) {
             let transmit = self
                 .client
-                .send_to(TransportType::Udp, self.peer_addr, data, now)
+                .send_to(TransportType::Udp, self.peer_addr, to_peer, now)
                 .unwrap();
             assert!(matches!(
                 transmit.data,
@@ -1703,12 +1709,11 @@ mod tests {
             assert_eq!(transmit.to, self.peer_addr);
 
             // peer to client
-            let sent_data = [5; 12];
             let Some(transmit) = self
                 .server
                 .recv(
                     Transmit::new(
-                        sent_data,
+                        from_peer,
                         TransportType::Udp,
                         self.peer_addr,
                         self.turn_alloc_addr,
@@ -1723,7 +1728,7 @@ mod tests {
             assert_eq!(transmit.from, self.server.listen_address());
             assert_eq!(transmit.to, self.client.local_addr());
             let cd = ChannelData::parse(&transmit.data).unwrap();
-            assert_eq!(cd.data(), sent_data);
+            assert_eq!(cd.data(), from_peer);
         }
     }
 
@@ -1877,5 +1882,38 @@ mod tests {
         };
         assert_eq!(permission_ip, test.peer_addr.ip());
         test.sendrecv_data_channel(now);
+    }
+
+    #[test]
+    fn test_turn_peer_incoming_stun() {
+        // tests that sending stun messages can be passed through the turn server
+        let _log = crate::tests::test_init_log();
+
+        let mut test = TurnTest::builder().build();
+        let now = Instant::now();
+
+        test.allocate(now);
+        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
+            test.client.poll_event()
+        else {
+            unreachable!();
+        };
+        assert_eq!(relayed_address, test.turn_alloc_addr);
+        test.bind_channel(now);
+        let Some(TurnEvent::PermissionCreated(TransportType::Udp, permission_ip)) =
+            test.client.poll_event()
+        else {
+            unreachable!();
+        };
+        assert_eq!(permission_ip, test.peer_addr.ip());
+
+        let mut msg = Message::builder(
+            MessageType::from_class_method(MessageClass::Indication, 0x1432),
+            TransactionId::generate(),
+        );
+        let realm = Realm::new("realm").unwrap();
+        msg.add_attribute(&realm).unwrap();
+        let data = msg.build();
+        test.sendrecv_data_channel_with_data(&data, &data, now);
     }
 }
