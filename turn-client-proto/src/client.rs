@@ -1396,21 +1396,20 @@ mod tests {
     }
     impl TurnTestBuilder {
         fn build(self) -> TurnTest {
-            let client = TurnClient::allocate(
-                self.client_transport,
-                self.client_addr,
-                self.turn_listen_addr,
-                self.credentials.clone(),
-            );
             let mut server = TurnServer::new(
                 self.client_transport,
                 self.turn_listen_addr,
-                self.credentials.clone(),
                 self.realm,
             );
             server.add_user(
                 self.credentials.username().to_owned(),
                 self.credentials.password().to_owned(),
+            );
+            let client = TurnClient::allocate(
+                self.client_transport,
+                self.client_addr,
+                self.turn_listen_addr,
+                self.credentials,
             );
             TurnTest {
                 client,
