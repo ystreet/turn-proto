@@ -77,11 +77,7 @@ pub enum TurnServerPollRet {
 }
 
 impl TurnServer {
-    pub fn new(
-        ttype: TransportType,
-        listen_addr: SocketAddr,
-        realm: String,
-    ) -> Self {
+    pub fn new(ttype: TransportType, listen_addr: SocketAddr, realm: String) -> Self {
         let stun = StunAgent::builder(ttype, listen_addr).build();
         Self {
             realm,
@@ -119,146 +115,154 @@ impl TurnServer {
         transmit: Transmit<T>,
         now: Instant,
     ) -> Result<Option<Transmit<SData<'static>>>, StunError> {
-        match Message::from_bytes(transmit.data.as_ref()) {
-            Ok(msg) => {
-                trace!("received {} from {:?}", msg, transmit.from);
-                match self.handle_stun(&msg, transmit.transport, transmit.from, transmit.to, now) {
-                    Err(builder) => {
-                        let data = builder.build();
-                        return Ok(Some(Transmit::new(
-                            data.into_boxed_slice().into(),
-                            transmit.transport,
-                            transmit.to,
-                            transmit.from,
-                        )));
-                    }
-                    Ok(Some(transmit)) => Ok(Some(transmit.into_owned())),
-                    Ok(None) => Ok(None),
-                }
-            }
-            Err(_) => {
-                trace!(
-                    "received {} bytes from {:?}",
-                    transmit.data.as_ref().len(),
-                    transmit.from
+        if let Some((client, allocation)) =
+            self.allocation_from_public_5tuple(transmit.transport, transmit.to, transmit.from)
+        {
+            // A packet from the relayed address needs to be sent to the client that set up
+            // the allocation.
+            let Some(_permission) =
+                allocation.permissions_from_5tuple(transmit.transport, transmit.to, transmit.from)
+            else {
+                warn!(
+                    "no permission for {:?} for this allocation {:?}",
+                    transmit.from, allocation.addr
                 );
-                // TODO: TCP buffering requirements
-                if let Some(client) =
-                    self.client_from_5tuple(transmit.transport, transmit.to, transmit.from)
-                {
-                    let Ok(channel) = ChannelData::parse(transmit.data.as_ref()) else {
-                        return Ok(None);
-                    };
-                    trace!(
-                        "parsed channel data with id {} and data length {}",
-                        channel.id(),
-                        channel.data().len()
-                    );
-                    let Some((allocation, existing)) =
-                        client.allocations.iter().find_map(|allocation| {
-                            allocation
-                                .channel_from_id(channel.id())
-                                .map(|perm| (allocation, perm))
-                        })
-                    else {
-                        warn!(
-                            "no channel id {} for this client {:?}",
-                            channel.id(),
-                            client.remote_addr
-                        );
-                        // no channel with that id
-                        return Ok(None);
-                    };
+                return Ok(None);
+            };
 
-                    // A packet from the client needs to be sent to the peer referenced by the
-                    // configured channel.
-                    let Some(_permission) = allocation.permissions_from_5tuple(
+            if let Some(existing) =
+                allocation.channel_from_5tuple(transmit.transport, transmit.to, transmit.from)
+            {
+                debug!(
+                    "found existing channel {} for {:?} for this allocation {:?}",
+                    existing.id, transmit.from, allocation.addr
+                );
+                let mut data = vec![0; 4];
+                data[0..2].copy_from_slice(&existing.id.to_be_bytes());
+                data[2..4].copy_from_slice(&(transmit.data.as_ref().len() as u16).to_be_bytes());
+                // XXX: try to avoid copy?
+                data.extend_from_slice(transmit.data.as_ref());
+                Ok(Some(Transmit::new(
+                    data.into_boxed_slice().into(),
+                    client.transport,
+                    client.local_addr,
+                    client.remote_addr,
+                )))
+            } else {
+                // no channel with that id
+                debug!(
+                    "no channel for {:?} for this allocation {:?}, using DATA indication",
+                    transmit.from, allocation.addr
+                );
+                let transaction_id = TransactionId::generate();
+                let mut builder = Message::builder(
+                    MessageType::from_class_method(MessageClass::Indication, DATA),
+                    transaction_id,
+                );
+                let peer_address = XorPeerAddress::new(transmit.from, transaction_id);
+                builder.add_attribute(&peer_address).unwrap();
+                let data = Data::new(transmit.data.as_ref());
+                builder.add_attribute(&data).unwrap();
+                // XXX: try to avoid copy?
+                let msg_data = builder.build();
+
+                Ok(Some(Transmit::new(
+                    msg_data.into_boxed_slice().into(),
+                    client.transport,
+                    client.local_addr,
+                    client.remote_addr,
+                )))
+            }
+        } else {
+            // TODO: TCP buffering requirements
+            match Message::from_bytes(transmit.data.as_ref()) {
+                Ok(msg) => {
+                    trace!("received {} from {:?}", msg, transmit.from);
+                    match self.handle_stun(
+                        &msg,
                         transmit.transport,
-                        allocation.addr,
-                        existing.peer_addr,
-                    ) else {
-                        warn!(
-                            "no permission for {:?} for this allocation {:?}",
-                            existing.peer_addr, allocation.addr
+                        transmit.from,
+                        transmit.to,
+                        now,
+                    ) {
+                        Err(builder) => {
+                            let data = builder.build();
+                            return Ok(Some(Transmit::new(
+                                data.into_boxed_slice().into(),
+                                transmit.transport,
+                                transmit.to,
+                                transmit.from,
+                            )));
+                        }
+                        Ok(Some(transmit)) => Ok(Some(transmit.into_owned())),
+                        Ok(None) => Ok(None),
+                    }
+                }
+                Err(_) => {
+                    if let Some(client) =
+                        self.client_from_5tuple(transmit.transport, transmit.to, transmit.from)
+                    {
+                        trace!(
+                            "received {} bytes from {:?}",
+                            transmit.data.as_ref().len(),
+                            transmit.from
                         );
-                        return Ok(None);
-                    };
-                    Ok(Some(
-                        Transmit::new(
-                            SData::from(channel.data()),
-                            allocation.ttype,
+                        let Ok(channel) = ChannelData::parse(transmit.data.as_ref()) else {
+                            return Ok(None);
+                        };
+                        trace!(
+                            "parsed channel data with id {} and data length {}",
+                            channel.id(),
+                            channel.data().len()
+                        );
+                        let Some((allocation, existing)) =
+                            client.allocations.iter().find_map(|allocation| {
+                                allocation
+                                    .channel_from_id(channel.id())
+                                    .map(|perm| (allocation, perm))
+                            })
+                        else {
+                            warn!(
+                                "no channel id {} for this client {:?}",
+                                channel.id(),
+                                client.remote_addr
+                            );
+                            // no channel with that id
+                            return Ok(None);
+                        };
+
+                        // A packet from the client needs to be sent to the peer referenced by the
+                        // configured channel.
+                        let Some(_permission) = allocation.permissions_from_5tuple(
+                            transmit.transport,
                             allocation.addr,
                             existing.peer_addr,
-                        )
-                        .into_owned(),
-                    ))
-                } else if let Some((client, allocation)) = self.allocation_from_public_5tuple(
-                    transmit.transport,
-                    transmit.to,
-                    transmit.from,
-                ) {
-                    // A packet from the relayed address needs to be sent to the client that set up
-                    // the allocation.
-                    let Some(_permission) = allocation.permissions_from_5tuple(
-                        transmit.transport,
-                        transmit.to,
-                        transmit.from,
-                    ) else {
-                        warn!(
-                            "no permission for {:?} for this allocation {:?}",
-                            transmit.from, allocation.addr
-                        );
-                        return Ok(None);
-                    };
-
-                    if let Some(existing) = allocation.channel_from_5tuple(
-                        transmit.transport,
-                        transmit.to,
-                        transmit.from,
-                    ) {
-                        debug!(
-                            "found existing channel {} for {:?} for this allocation {:?}",
-                            existing.id, transmit.from, allocation.addr
-                        );
-                        let mut data = vec![0; 4];
-                        data[0..2].copy_from_slice(&existing.id.to_be_bytes());
-                        data[2..4]
-                            .copy_from_slice(&(transmit.data.as_ref().len() as u16).to_be_bytes());
-                        // XXX: try to avoid copy?
-                        data.extend_from_slice(transmit.data.as_ref());
-                        Ok(Some(Transmit::new(
-                            data.into_boxed_slice().into(),
-                            client.transport,
-                            client.local_addr,
-                            client.remote_addr,
-                        )))
+                        ) else {
+                            warn!(
+                                "no permission for {:?} for this allocation {:?}",
+                                existing.peer_addr, allocation.addr
+                            );
+                            return Ok(None);
+                        };
+                        Ok(Some(
+                            Transmit::new(
+                                SData::from(channel.data()),
+                                allocation.ttype,
+                                allocation.addr,
+                                existing.peer_addr,
+                            )
+                            .into_owned(),
+                        ))
                     } else {
-                        // no channel with that id
-                        debug!(
-                            "no channel for {:?} for this allocation {:?}, using DATA indication",
-                            transmit.from, allocation.addr
+                        trace!(
+                            "No handler for {} bytes over {:?} from {:?}, to {:?}. Ignoring",
+                            transmit.data.as_ref().len(),
+                            transmit.transport,
+                            transmit.from,
+                            transmit.to
                         );
-                        let transaction_id = TransactionId::generate();
-                        let mut builder = Message::builder(
-                            MessageType::from_class_method(MessageClass::Indication, DATA),
-                            transaction_id,
-                        );
-                        let peer_address = XorPeerAddress::new(transmit.from, transaction_id);
-                        builder.add_attribute(&peer_address).unwrap();
-                        let data = Data::new(transmit.data.as_ref());
-                        builder.add_attribute(&data).unwrap();
-                        // XXX: try to avoid copy?
-                        let msg_data = builder.build();
-
-                        Ok(Some(Transmit::new(
-                            msg_data.into_boxed_slice().into(),
-                            client.transport,
-                            client.local_addr,
-                            client.remote_addr,
-                        )))
+                        Ok(None)
                     }
-                } else {
-                    Ok(None)
                 }
             }
         }
@@ -889,13 +893,13 @@ impl TurnServer {
             }
             if existing
                 .as_ref()
-                .map_or(false, |existing| existing.id != channel_no)
+                .is_some_and(|existing| existing.id != channel_no)
             {
                 trace!("channel peer address does not match channel ID");
                 return Err(bad_request(msg, credentials));
             }
         } else {
-            trace!("No requested channel id");
+            debug!("Bad request: no requested channel id");
             return Err(bad_request(msg, credentials));
         }
 
