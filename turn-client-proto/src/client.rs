@@ -42,7 +42,6 @@ pub enum TurnEvent {
 #[derive(Debug)]
 struct Channel {
     id: u16,
-    transport: TransportType,
     peer_addr: SocketAddr,
     expires_at: Instant,
 }
@@ -51,7 +50,6 @@ struct Channel {
 struct Permission {
     expired: bool,
     expires_at: Instant,
-    ttype: TransportType,
     ip: IpAddr,
 }
 
@@ -433,9 +431,7 @@ impl TurnClient {
                 .iter()
                 .enumerate()
                 .find_map(|(idx, existing_permission)| {
-                    if permission.ttype == existing_permission.ttype
-                        && permission.ip == existing_permission.ip
-                    {
+                    if permission.ip == existing_permission.ip {
                         Some(idx)
                     } else {
                         None
@@ -446,7 +442,7 @@ impl TurnClient {
                     now + Duration::from_secs(300);
             } else {
                 self.pending_events.push_front(TurnEvent::PermissionCreated(
-                    permission.ttype,
+                    self.allocations[alloc_idx].transport,
                     permission.ip,
                 ));
                 permission.expires_at = now + Duration::from_secs(300);
@@ -702,7 +698,7 @@ impl TurnClient {
                         self.tcp_buffer = self.tcp_buffer.split_at(data.len() + 2).1.to_vec();
                         return TurnRecvRet::PeerData {
                             data,
-                            transport: chan.transport,
+                            transport: alloc.transport,
                             peer: chan.peer_addr,
                         };
                     }
@@ -751,7 +747,7 @@ impl TurnClient {
                     {
                         return TurnRecvRet::PeerData {
                             data: channel.data().to_vec(),
-                            transport: chan.transport,
+                            transport: alloc.transport,
                             peer: chan.peer_addr,
                         };
                     }
@@ -1022,7 +1018,6 @@ impl TurnClient {
         let permission = Permission {
             expired: false,
             expires_at: now,
-            ttype: transport,
             ip: peer_addr,
         };
         let mut builder = Message::builder_request(CREATE_PERMISSION);
@@ -1138,7 +1133,6 @@ impl TurnClient {
         let permission = Permission {
             expired: false,
             expires_at: now,
-            ttype: transport,
             ip: peer_addr.ip(),
         };
         allocation
@@ -1146,7 +1140,6 @@ impl TurnClient {
             .push_back((permission, transaction_id));
         let channel = Channel {
             id: channel_id,
-            transport: TransportType::Udp,
             expires_at: now,
             peer_addr,
         };
@@ -1159,12 +1152,12 @@ impl TurnClient {
 
     fn have_permission(&self, transport: TransportType, to: SocketAddr, now: Instant) -> bool {
         self.allocations.iter().any(|allocation| {
-            allocation.expires_at >= now
-                && allocation.permissions.iter().any(|permission| {
-                    permission.ttype == transport
-                        && permission.expires_at >= now
-                        && permission.ip == to.ip()
-                })
+            allocation.transport == transport
+                && allocation.expires_at >= now
+                && allocation
+                    .permissions
+                    .iter()
+                    .any(|permission| permission.expires_at >= now && permission.ip == to.ip())
         })
     }
 
@@ -1205,21 +1198,27 @@ impl TurnClient {
 
     #[cfg(test)]
     fn permission(&self, transport: TransportType, ip: IpAddr) -> Option<&Permission> {
-        self.allocations.iter().find_map(|allocation| {
-            allocation
-                .permissions
-                .iter()
-                .find(|permission| permission.ip == ip && permission.ttype == transport)
-        })
+        self.allocations
+            .iter()
+            .filter(|allocation| allocation.transport == transport)
+            .find_map(|allocation| {
+                allocation
+                    .permissions
+                    .iter()
+                    .find(|permission| permission.ip == ip)
+            })
     }
 
     fn channel(&self, transport: TransportType, addr: SocketAddr) -> Option<&Channel> {
-        self.allocations.iter().find_map(|allocation| {
-            allocation
-                .channels
-                .iter()
-                .find(|channel| channel.peer_addr == addr && channel.transport == transport)
-        })
+        self.allocations
+            .iter()
+            .filter(|allocation| allocation.transport == transport)
+            .find_map(|allocation| {
+                allocation
+                    .channels
+                    .iter()
+                    .find(|channel| channel.peer_addr == addr)
+            })
     }
 }
 
