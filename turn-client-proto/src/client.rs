@@ -17,7 +17,7 @@ use stun_proto::agent::{
     TransmitBuild,
 };
 use stun_proto::types::attribute::{ErrorCode, Nonce, Realm, Username};
-use stun_proto::types::data::Data as SData;
+use stun_proto::types::data::Data;
 use stun_proto::types::message::{
     LongTermCredentials, Message, MessageClass, MessageHeader, MessageIntegrityCredentials,
     MessageType, TransactionId,
@@ -27,7 +27,10 @@ use turn_types::channel::ChannelData;
 
 use stun_proto::types::TransportType;
 
-use turn_types::attribute::*;
+use turn_types::attribute::Data as AData;
+use turn_types::attribute::{
+    ChannelNumber, DontFragment, Lifetime, RequestedTransport, XorPeerAddress, XorRelayedAddress,
+};
 use turn_types::message::*;
 use turn_types::TurnCredentials;
 
@@ -78,7 +81,7 @@ pub struct TurnClient {
     allocations: Vec<Allocation>,
 
     tcp_buffer: Vec<u8>,
-    pending_transmits: VecDeque<Transmit<SData<'static>>>,
+    pending_transmits: VecDeque<Transmit<Data<'static>>>,
 
     pending_events: VecDeque<TurnEvent>,
 }
@@ -322,7 +325,7 @@ impl TurnClient {
         name = "turn_agent_poll_transmit"
         skip(self)
     )]
-    pub fn poll_transmit(&mut self, now: Instant) -> Option<Transmit<SData<'static>>> {
+    pub fn poll_transmit(&mut self, now: Instant) -> Option<Transmit<Data<'static>>> {
         if let Some(transmit) = self.pending_transmits.pop_front() {
             return Some(transmit);
         }
@@ -357,7 +360,7 @@ impl TurnClient {
         self.pending_events.pop_back()
     }
 
-    fn send_initial_request(&mut self, now: Instant) -> (Transmit<SData<'static>>, TransactionId) {
+    fn send_initial_request(&mut self, now: Instant) -> (Transmit<Data<'static>>, TransactionId) {
         let mut msg = Message::builder_request(ALLOCATE);
         let lifetime = Lifetime::new(3600);
         msg.add_attribute(&lifetime).unwrap();
@@ -377,7 +380,7 @@ impl TurnClient {
         credentials: LongTermCredentials,
         nonce: &str,
         now: Instant,
-    ) -> (Transmit<SData<'static>>, TransactionId) {
+    ) -> (Transmit<Data<'static>>, TransactionId) {
         let mut builder = Message::builder_request(ALLOCATE);
         let requested_transport = RequestedTransport::new(RequestedTransport::UDP);
         builder.add_attribute(&requested_transport).unwrap();
@@ -922,7 +925,7 @@ impl TurnClient {
                     let Ok(peer_addr) = msg.attribute::<XorPeerAddress>() else {
                         return InternalHandleStunReply::Ignored;
                     };
-                    let Ok(data) = msg.attribute::<Data>() else {
+                    let Ok(data) = msg.attribute::<AData>() else {
                         return InternalHandleStunReply::Ignored;
                     };
                     InternalHandleStunReply::PeerData {
@@ -936,7 +939,7 @@ impl TurnClient {
         }
     }
 
-    pub fn delete(&mut self, now: Instant) -> Option<Transmit<SData<'static>>> {
+    pub fn delete(&mut self, now: Instant) -> Option<Transmit<Data<'static>>> {
         let mut builder = Message::builder_request(REFRESH);
         let transaction_id = builder.transaction_id();
 
@@ -982,7 +985,7 @@ impl TurnClient {
         transport: TransportType,
         peer_addr: IpAddr,
         now: Instant,
-    ) -> Result<Transmit<SData<'static>>, CreatePermissionError> {
+    ) -> Result<Transmit<Data<'static>>, CreatePermissionError> {
         let Some(allocation) = self.allocations.iter_mut().find(|allocation| {
             allocation.transport == transport
                 && allocation.relayed_address.is_ipv4() == peer_addr.is_ipv4()
@@ -1056,7 +1059,7 @@ impl TurnClient {
         transport: TransportType,
         peer_addr: SocketAddr,
         now: Instant,
-    ) -> Result<Transmit<SData<'static>>, BindChannelError> {
+    ) -> Result<Transmit<Data<'static>>, BindChannelError> {
         let Some(allocation) = self.allocations.iter_mut().find(|allocation| {
             allocation.transport == transport
                 && allocation.relayed_address.is_ipv4() == peer_addr.is_ipv4()
@@ -1272,7 +1275,7 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedMessageSe
         );
         let xor_peer_address = XorPeerAddress::new(self.peer_addr, transaction_id);
         msg.add_attribute(&xor_peer_address).unwrap();
-        let data = Data::new(self.data.as_ref());
+        let data = AData::new(self.data.as_ref());
         msg.add_attribute(&data).unwrap();
         msg.build()
     }
@@ -1288,7 +1291,7 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedMessageSe
         );
         let xor_peer_address = XorPeerAddress::new(self.peer_addr, transaction_id);
         msg.add_attribute(&xor_peer_address).unwrap();
-        let data = Data::new(self.data.as_ref());
+        let data = AData::new(self.data.as_ref());
         msg.add_attribute(&data).unwrap();
         msg.write_into(dest)
     }
@@ -1351,9 +1354,9 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedMessageOr
 
 fn transmit_send<T: AsRef<[u8]> + std::fmt::Debug>(
     transmit: &Transmit<T>,
-) -> Transmit<SData<'static>> {
+) -> Transmit<Data<'static>> {
     Transmit::new(
-        SData::from(transmit.data.as_ref()),
+        Data::from(transmit.data.as_ref()),
         transmit.transport,
         transmit.from,
         transmit.to,
@@ -1373,10 +1376,10 @@ mod tests {
 
     fn transmit_send_build<T: DelayedTransmitBuild>(
         transmit: TransmitBuild<T>,
-    ) -> Transmit<SData<'static>> {
+    ) -> Transmit<Data<'static>> {
         let data = transmit.data.build().into_boxed_slice();
         Transmit::new(
-            SData::from(data),
+            Data::from(data),
             transmit.transport,
             transmit.from,
             transmit.to,
@@ -1664,7 +1667,7 @@ mod tests {
             let msg = Message::from_bytes(&transmit.data).unwrap();
             assert!(msg.has_class(stun_proto::types::message::MessageClass::Indication));
             assert!(msg.has_method(DATA));
-            let data = msg.attribute::<Data>().unwrap();
+            let data = msg.attribute::<AData>().unwrap();
             assert_eq!(data.data(), sent_data);
             let TurnRecvRet::PeerData {
                 data: recv_data,

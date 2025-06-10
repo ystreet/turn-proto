@@ -15,7 +15,7 @@ use stun_proto::prelude::*;
 use stun_proto::types::attribute::{
     ErrorCode, Fingerprint, MessageIntegrity, Nonce, Realm, Username, XorMappedAddress,
 };
-use stun_proto::types::data::Data as SData;
+use stun_proto::types::data::Data;
 use stun_proto::types::message::{
     LongTermCredentials, Message, MessageBuilder, MessageClass, MessageIntegrityCredentials,
     MessageType, TransactionId, BINDING,
@@ -26,8 +26,9 @@ use turn_types::channel::ChannelData;
 
 use turn_types::message::CREATE_PERMISSION;
 
+use turn_types::attribute::Data as AData;
 use turn_types::attribute::{
-    ChannelNumber, Data, Lifetime, RequestedTransport, XorPeerAddress, XorRelayedAddress,
+    ChannelNumber, Lifetime, RequestedTransport, XorPeerAddress, XorRelayedAddress,
 };
 use turn_types::message::{ALLOCATE, CHANNEL_BIND, DATA, REFRESH, SEND};
 use turn_types::TurnCredentials;
@@ -42,7 +43,7 @@ pub struct TurnServer {
 
     clients: Vec<Client>,
     nonces: Vec<NonceData>,
-    pending_transmits: VecDeque<Transmit<SData<'static>>>,
+    pending_transmits: VecDeque<Transmit<Data<'static>>>,
     pending_allocates: VecDeque<PendingClient>,
 
     // username -> password mapping.
@@ -114,7 +115,7 @@ impl TurnServer {
         &mut self,
         transmit: Transmit<T>,
         now: Instant,
-    ) -> Result<Option<Transmit<SData<'static>>>, StunError> {
+    ) -> Result<Option<Transmit<Data<'static>>>, StunError> {
         if let Some((client, allocation)) =
             self.allocation_from_public_5tuple(transmit.transport, transmit.to, transmit.from)
         {
@@ -161,7 +162,7 @@ impl TurnServer {
                 );
                 let peer_address = XorPeerAddress::new(transmit.from, transaction_id);
                 builder.add_attribute(&peer_address).unwrap();
-                let data = Data::new(transmit.data.as_ref());
+                let data = AData::new(transmit.data.as_ref());
                 builder.add_attribute(&data).unwrap();
                 // XXX: try to avoid copy?
                 let msg_data = builder.build();
@@ -246,7 +247,7 @@ impl TurnServer {
                         };
                         Ok(Some(
                             Transmit::new(
-                                SData::from(channel.data()),
+                                Data::from(channel.data()),
                                 allocation.ttype,
                                 allocation.addr,
                                 existing.peer_addr,
@@ -303,7 +304,7 @@ impl TurnServer {
     }
 
     #[tracing::instrument(name = "turn_server_poll_transmit", skip(self))]
-    pub fn poll_transmit(&mut self, now: Instant) -> Option<Transmit<SData<'static>>> {
+    pub fn poll_transmit(&mut self, now: Instant) -> Option<Transmit<Data<'static>>> {
         if let Some(transmit) = self.pending_transmits.pop_back() {
             return Some(transmit);
         }
@@ -540,7 +541,7 @@ impl TurnServer {
         from: SocketAddr,
         to: SocketAddr,
         now: Instant,
-    ) -> Result<Transmit<SData<'a>>, MessageBuilder<'a>> {
+    ) -> Result<Transmit<Data<'a>>, MessageBuilder<'a>> {
         let response = if let Some(error_msg) =
             Message::check_attribute_types(msg, &[Fingerprint::TYPE], &[])
         {
@@ -642,7 +643,7 @@ impl TurnServer {
         from: SocketAddr,
         to: SocketAddr,
         now: Instant,
-    ) -> Result<Transmit<SData<'static>>, MessageBuilder<'a>> {
+    ) -> Result<Transmit<Data<'static>>, MessageBuilder<'a>> {
         let _credentials = self.validate_stun(msg, ttype, from, to, now)?;
 
         let Some(client) = self.mut_client_from_5tuple(ttype, to, from) else {
@@ -699,7 +700,7 @@ impl TurnServer {
         from: SocketAddr,
         to: SocketAddr,
         now: Instant,
-    ) -> Result<Transmit<SData<'static>>, MessageBuilder<'a>> {
+    ) -> Result<Transmit<Data<'static>>, MessageBuilder<'a>> {
         let credentials = self.validate_stun(msg, ttype, from, to, now)?;
 
         let Some(client) = self.mut_client_from_5tuple(ttype, to, from) else {
@@ -814,7 +815,7 @@ impl TurnServer {
         from: SocketAddr,
         to: SocketAddr,
         now: Instant,
-    ) -> Result<Transmit<SData<'static>>, MessageBuilder<'a>> {
+    ) -> Result<Transmit<Data<'static>>, MessageBuilder<'a>> {
         let credentials = self.validate_stun(msg, ttype, from, to, now)?;
 
         let Some(client) = self.mut_client_from_5tuple(ttype, to, from) else {
@@ -955,7 +956,7 @@ impl TurnServer {
         from: SocketAddr,
         to: SocketAddr,
         now: Instant,
-    ) -> Result<Transmit<SData<'a>>, ()> {
+    ) -> Result<Transmit<Data<'a>>, ()> {
         let peer_address = msg.attribute::<XorPeerAddress>().map_err(|_| ())?;
         let peer_address = peer_address.addr(msg.transaction_id());
 
@@ -995,10 +996,10 @@ impl TurnServer {
             return Err(());
         }
 
-        let data = msg.attribute::<Data>().map_err(|_| ())?;
+        let data = msg.attribute::<AData>().map_err(|_| ())?;
         trace!("have {} to send to {:?}", data.data().len(), peer_address);
         Ok(Transmit::new(
-            SData::from(data.data()),
+            Data::from(data.data()),
             permission.ttype,
             alloc.addr,
             peer_address,
@@ -1023,7 +1024,7 @@ impl TurnServer {
         from: SocketAddr,
         to: SocketAddr,
         now: Instant,
-    ) -> Result<Option<Transmit<SData<'a>>>, MessageBuilder<'a>> {
+    ) -> Result<Option<Transmit<Data<'a>>>, MessageBuilder<'a>> {
         trace!("received STUN message {msg}");
         let ret = if msg.has_class(stun_proto::types::message::MessageClass::Request) {
             match msg.method() {
@@ -1223,10 +1224,10 @@ struct Channel {
 
 fn transmit_send_build<T: DelayedTransmitBuild>(
     transmit: TransmitBuild<T>,
-) -> Transmit<SData<'static>> {
+) -> Transmit<Data<'static>> {
     let data = transmit.data.build().into_boxed_slice();
     Transmit::new(
-        SData::from(data),
+        Data::from(data),
         transmit.transport,
         transmit.from,
         transmit.to,
