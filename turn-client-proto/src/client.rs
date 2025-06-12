@@ -49,6 +49,7 @@ struct Channel {
     id: u16,
     peer_addr: SocketAddr,
     expires_at: Instant,
+    pending_refresh: Option<TransactionId>,
 }
 
 #[derive(Debug)]
@@ -251,7 +252,7 @@ impl TurnClient {
                     if alloc.pending_refresh.is_none() && expires_at <= now {
                         let mut refresh = Message::builder_request(REFRESH);
                         let transaction_id = refresh.transaction_id();
-                        let lifetime = Lifetime::new(600);
+                        let lifetime = Lifetime::new(1800);
                         refresh.add_attribute(&lifetime).unwrap();
                         let username = Username::new(credentials.username()).unwrap();
                         refresh.add_attribute(&username).unwrap();
@@ -270,7 +271,7 @@ impl TurnClient {
                             .stun_agent
                             .send_request(refresh, remote_addr, now)
                             .unwrap();
-                        alloc.pending_refresh = Some((transaction_id, 600));
+                        alloc.pending_refresh = Some((transaction_id, 1800));
                         self.pending_transmits.push_back(transmit.into_owned());
                         earliest_wait = now.min(earliest_wait);
                     }
@@ -283,14 +284,49 @@ impl TurnClient {
                             expires_at = earliest_wait;
                         }
                     }
-                    // TODO: rebind channel
-                    let channel_min = alloc
-                        .channels
-                        .iter()
-                        .map(|channel| channel.expires_at - Duration::from_secs(60))
-                        .min()
-                        .unwrap_or(expires_at);
-                    // TODO: rebind permission
+                    for channel in alloc.channels.iter_mut() {
+                        let refresh_time = channel.expires_at - Duration::from_secs(60);
+                        if let Some(pending) = channel.pending_refresh {
+                            if cancelled_transaction.is_some_and(|cancelled| cancelled == pending) {
+                                // TODO: need to eventually fail when the permission times out.
+                                warn!("{} channel {} from {} to {} refresh timed out or was cancelled", alloc.transport, channel.id, alloc.relayed_address, channel.peer_addr);
+                                expires_at = channel.expires_at;
+                            } else if channel.expires_at <= now {
+                                info!(
+                                    "{} channel {} from {} to {} has expired",
+                                    alloc.transport,
+                                    channel.id,
+                                    alloc.relayed_address,
+                                    channel.peer_addr
+                                );
+                            } else {
+                                expires_at = expires_at.min(channel.expires_at);
+                            }
+                        } else if refresh_time <= now {
+                            info!(
+                                "refreshing {} channel {} from {} to {}",
+                                alloc.transport,
+                                channel.id,
+                                alloc.relayed_address,
+                                channel.peer_addr
+                            );
+                            let (transmit, transaction_id) = Self::send_channel_bind_request(
+                                &mut self.stun_agent,
+                                credentials.clone(),
+                                nonce,
+                                channel.id,
+                                channel.peer_addr,
+                                now,
+                            );
+                            channel.pending_refresh = Some(transaction_id);
+                            self.pending_transmits.push_back(transmit);
+                            expires_at = expires_at.min(refresh_time);
+                        } else {
+                            expires_at = expires_at.min(refresh_time);
+                        }
+                    }
+
+                    // refresh permission if necessary
                     for permission in alloc.permissions.iter_mut() {
                         let refresh_time = permission.expires_at - Duration::from_secs(60);
                         if let Some(pending) = permission.pending_refresh {
@@ -333,8 +369,7 @@ impl TurnClient {
                             expires_at = expires_at.min(refresh_time);
                         }
                     }
-                    trace!("expires {expires_at:?}, channel: {channel_min:?}");
-                    earliest_wait = expires_at.min(channel_min).min(earliest_wait)
+                    earliest_wait = expires_at.min(earliest_wait)
                 }
                 return TurnPollRet::WaitUntil(earliest_wait.max(now));
             }
@@ -1147,10 +1182,34 @@ impl TurnClient {
             ip: peer_addr,
             pending_refresh: None,
         };
-        let mut builder = Message::builder_request(CREATE_PERMISSION);
-        let transaction_id = builder.transaction_id();
 
-        let xor_peer_address = XorPeerAddress::new(SocketAddr::new(peer_addr, 0), transaction_id);
+        let (transmit, transaction_id) = Self::send_create_permission_request(
+            &mut self.stun_agent,
+            credentials.clone(),
+            nonce,
+            peer_addr,
+            now,
+        );
+        info!("Creating {permission:?}");
+        allocation
+            .pending_permissions
+            .push_back((permission, transaction_id));
+        Ok(transmit)
+    }
+
+    fn send_channel_bind_request(
+        stun_agent: &mut StunAgent,
+        credentials: LongTermCredentials,
+        nonce: &str,
+        id: u16,
+        peer_addr: SocketAddr,
+        now: Instant,
+    ) -> (Transmit<Data<'static>>, TransactionId) {
+        let mut builder = Message::builder_request(CHANNEL_BIND);
+        let transaction_id = builder.transaction_id();
+        let channel_no = ChannelNumber::new(id);
+        builder.add_attribute(&channel_no).unwrap();
+        let xor_peer_address = XorPeerAddress::new(peer_addr, transaction_id);
         builder.add_attribute(&xor_peer_address).unwrap();
         let username = Username::new(credentials.username()).unwrap();
         builder.add_attribute(&username).unwrap();
@@ -1167,18 +1226,10 @@ impl TurnClient {
             )
             .unwrap();
 
-        let (transmit, transaction_id) = Self::send_create_permission_request(
-            &mut self.stun_agent,
-            credentials.clone(),
-            nonce.nonce(),
-            peer_addr,
-            now,
-        );
-        info!("Creating {permission:?}");
-        allocation
-            .pending_permissions
-            .push_back((permission, transaction_id));
-        Ok(transmit)
+        let transmit = stun_agent
+            .send_request(builder, stun_agent.remote_addr().unwrap(), now)
+            .unwrap();
+        (transmit.into_owned(), transaction_id)
     }
 
     pub fn bind_channel(
@@ -1234,32 +1285,16 @@ impl TurnClient {
             break;
         }
 
-        let mut builder = Message::builder_request(CHANNEL_BIND);
-        let transaction_id = builder.transaction_id();
-        let channel_no = ChannelNumber::new(channel_id);
-        builder.add_attribute(&channel_no).unwrap();
-        let xor_peer_address = XorPeerAddress::new(peer_addr, transaction_id);
-        builder.add_attribute(&xor_peer_address).unwrap();
-        let username = Username::new(credentials.username()).unwrap();
-        builder.add_attribute(&username).unwrap();
-        let realm = Realm::new(credentials.realm()).unwrap();
-        builder.add_attribute(&realm).unwrap();
-        let nonce = Nonce::new(nonce).unwrap();
-        builder.add_attribute(&nonce).unwrap();
-        builder
-            .add_message_integrity(
-                &stun_proto::types::message::MessageIntegrityCredentials::LongTerm(
-                    credentials.clone(),
-                ),
-                stun_proto::types::message::IntegrityAlgorithm::Sha1,
-            )
-            .unwrap();
+        let (transmit, transaction_id) = Self::send_channel_bind_request(
+            &mut self.stun_agent,
+            credentials.clone(),
+            nonce,
+            channel_id,
+            peer_addr,
+            now,
+        );
 
-        let transmit = self
-            .stun_agent
-            .send_request(builder, self.stun_agent.remote_addr().unwrap(), now)
-            .unwrap();
-
+        // FIXME: update any existing permission
         let permission = Permission {
             expired: false,
             expires_at: now,
@@ -1273,6 +1308,7 @@ impl TurnClient {
             id: channel_id,
             expires_at: now,
             peer_addr,
+            pending_refresh: None,
         };
         info!("Creating channel {channel:?}");
         allocation
@@ -1909,7 +1945,7 @@ mod tests {
             .client
             .create_permission(TransportType::Udp, test.peer_addr.ip(), now)
             .unwrap();
-        let now = now + Duration::from_secs(1000);
+        let now = now + Duration::from_secs(3000);
         let Ok(Some(transmit)) = test.server.recv(transmit, now) else {
             unreachable!();
         };
@@ -1935,7 +1971,7 @@ mod tests {
             unreachable!();
         };
         assert_eq!(relayed_address, test.turn_alloc_addr);
-        let now = now + Duration::from_secs(1000);
+        let now = now + Duration::from_secs(3000);
         let Err(CreatePermissionError::NoAllocation) =
             test.client
                 .create_permission(TransportType::Udp, test.peer_addr.ip(), now)
@@ -1963,7 +1999,7 @@ mod tests {
             unreachable!()
         };
         trace!("expiry: {expiry:?}");
-        assert!(expiry > now + Duration::from_secs(500));
+        assert!(expiry > now + Duration::from_secs(1000));
 
         test.refresh(expiry);
         test.create_permission(expiry);
@@ -2152,5 +2188,73 @@ mod tests {
             unreachable!();
         };
         assert_eq!(ip, test.peer_addr.ip());
+    }
+
+    #[test]
+    fn test_turn_channel_bind_refresh() {
+        let _log = crate::tests::test_init_log();
+
+        let mut test = TurnTest::builder().build();
+        let now = Instant::now();
+
+        test.allocate(now);
+        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
+            test.client.poll_event()
+        else {
+            unreachable!();
+        };
+        assert_eq!(relayed_address, test.turn_alloc_addr);
+
+        test.bind_channel(now);
+        let Some(TurnEvent::PermissionCreated(TransportType::Udp, permission_ip)) =
+            test.client.poll_event()
+        else {
+            unreachable!();
+        };
+        assert_eq!(permission_ip, test.peer_addr.ip());
+
+        // two permission refreshes
+        let mut permissions_done = now;
+        for _i in 0..2 {
+            let now = permissions_done;
+            let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
+                unreachable!()
+            };
+            assert_eq!(expiry, now + Duration::from_secs(240));
+            let TurnPollRet::WaitUntil(now) = test.client.poll(expiry) else {
+                unreachable!()
+            };
+            assert_eq!(now, expiry);
+
+            let transmit = test.client.poll_transmit(now).unwrap();
+            let msg = Message::from_bytes(&transmit.data).unwrap();
+            assert_eq!(msg.method(), CREATE_PERMISSION);
+            let Ok(Some(transmit)) = test.server.recv(transmit, now) else {
+                unreachable!();
+            };
+            test.client.recv(transmit, now);
+            test.validate_client_permission_state(now);
+            permissions_done = now;
+        }
+        let now = permissions_done;
+
+        let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
+            unreachable!()
+        };
+        assert_eq!(expiry, now + Duration::from_secs(60));
+        let TurnPollRet::WaitUntil(now) = test.client.poll(expiry) else {
+            unreachable!()
+        };
+        assert_eq!(now, expiry);
+        let transmit = test.client.poll_transmit(expiry).unwrap();
+        let msg = Message::from_bytes(&transmit.data).unwrap();
+        println!("message {msg}");
+        assert_eq!(msg.method(), CHANNEL_BIND);
+        let Ok(Some(transmit)) = test.server.recv(transmit, now) else {
+            unreachable!();
+        };
+        test.client.recv(transmit, expiry);
+
+        test.sendrecv_data_channel(expiry);
     }
 }
