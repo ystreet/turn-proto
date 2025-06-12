@@ -336,7 +336,7 @@ impl TurnServer {
             pending.client.allocations.push(Allocation {
                 addr: socket_addr,
                 ttype: TransportType::Udp,
-                expires_at: now + Duration::from_secs(600),
+                expires_at: now + Duration::from_secs(1800),
                 permissions: vec![],
                 channels: vec![],
             });
@@ -347,7 +347,7 @@ impl TurnServer {
             );
             let relayed_address = XorRelayedAddress::new(socket_addr, transaction_id);
             builder.add_attribute(&relayed_address).unwrap();
-            let lifetime = Lifetime::new(600);
+            let lifetime = Lifetime::new(1800);
             builder.add_attribute(&lifetime).unwrap();
             // TODO RESERVATION-TOKEN
             let mapped_address = XorMappedAddress::new(pending.client.remote_addr, transaction_id);
