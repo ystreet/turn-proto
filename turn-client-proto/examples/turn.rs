@@ -24,6 +24,8 @@ use std::time::Instant;
 
 use std::net::UdpSocket;
 
+use tracing::error;
+
 fn init_logs() {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::Layer;
@@ -197,10 +199,18 @@ fn main() -> io::Result<()> {
             TurnEvent::AllocationCreated(_, _) => {
                 client.create_permission(TransportType::Udp, peer_addr.ip());
             }
+            TurnEvent::AllocationCreateFailed => {
+                error!("Failed to create allocation");
+                client.close();
+            }
             TurnEvent::PermissionCreated(transport, _peer_addr) => {
                 let data = b"Hello from turn.\n";
                 client.send(transport, peer_addr, data);
                 client.close();
+            }
+            TurnEvent::PermissionCreateFailed(transport, peer_addr) => {
+                error!("Permission create failed for {transport:?}, {peer_addr}");
+                client.close()
             }
         }
     }
