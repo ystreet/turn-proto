@@ -343,13 +343,14 @@ impl TurnServer {
     #[tracing::instrument(name = "turn_server_allocated_udp_socket", skip(self))]
     pub fn allocated_udp_socket(
         &mut self,
+        transport: TransportType,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         socket_addr: Result<SocketAddr, ()>,
         now: Instant,
     ) {
         let Some(position) = self.pending_allocates.iter().position(|pending| {
-            pending.client.transport == TransportType::Udp
+            pending.client.transport == transport
                 && pending.client.local_addr == local_addr
                 && pending.client.remote_addr == remote_addr
         }) else {

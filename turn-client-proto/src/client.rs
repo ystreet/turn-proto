@@ -1670,6 +1670,11 @@ mod tests {
                 peer_addr: self.peer_addr,
             }
         }
+
+        fn client_transport(mut self, transport: TransportType) -> Self {
+            self.client_transport = transport;
+            self
+        }
     }
 
     struct TurnTest {
@@ -1732,16 +1737,18 @@ mod tests {
                 unreachable!();
             };
             let TurnServerPollRet::AllocateSocketUdp {
-                transport: TransportType::Udp,
+                transport,
                 local_addr: alloc_local_addr,
                 remote_addr: alloc_remote_addr,
             } = self.server.poll(now)
             else {
                 unreachable!();
             };
+            assert_eq!(transport, self.client.transport());
             assert_eq!(alloc_local_addr, self.server.listen_address());
             assert_eq!(alloc_remote_addr, self.client.local_addr());
             self.server.allocated_udp_socket(
+                transport,
                 alloc_local_addr,
                 alloc_remote_addr,
                 Ok(self.turn_alloc_addr),
@@ -1918,7 +1925,7 @@ mod tests {
             else {
                 unreachable!();
             };
-            assert_eq!(transmit.transport, TransportType::Udp);
+            assert_eq!(transmit.transport, self.client.transport());
             assert_eq!(transmit.from, self.server.listen_address());
             assert_eq!(transmit.to, self.client.local_addr());
             let msg = Message::from_bytes(&transmit.data).unwrap();
@@ -1991,11 +1998,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_turn_allocate_permission() {
-        let _log = crate::tests::test_init_log();
-
-        let mut test = TurnTest::builder().build();
+    fn turn_allocate_permission(client_transport: TransportType) {
+        let mut test = TurnTest::builder()
+            .client_transport(client_transport)
+            .build();
         let now = Instant::now();
 
         test.allocate(now);
@@ -2014,6 +2020,20 @@ mod tests {
         assert_eq!(permission_ip, test.peer_addr.ip());
 
         test.sendrecv_data(now);
+    }
+
+    #[test]
+    fn test_turn_udp_allocate_udp_permission() {
+        let _log = crate::tests::test_init_log();
+
+        turn_allocate_permission(TransportType::Udp);
+    }
+
+    #[test]
+    fn test_turn_tcp_allocate_udp_permission() {
+        let _log = crate::tests::test_init_log();
+
+        turn_allocate_permission(TransportType::Tcp);
     }
 
     #[test]
