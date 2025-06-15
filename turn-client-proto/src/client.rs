@@ -1538,6 +1538,30 @@ mod tests {
     use super::*;
     use turn_server_proto::{TurnServer, TurnServerPollRet};
 
+    #[test]
+    fn test_turn_client_new_properties() {
+        let _log = crate::tests::test_init_log();
+
+        let local_addr = "192.168.0.1:31234".parse().unwrap();
+        let remote_addr = "10.0.0.1:3478".parse().unwrap();
+        let credentials = TurnCredentials::new("tuser", "tpass");
+
+        let mut client =
+            TurnClient::allocate(TransportType::Udp, local_addr, remote_addr, credentials);
+        assert_eq!(client.transport(), TransportType::Udp);
+        assert_eq!(client.local_addr(), local_addr);
+        assert_eq!(client.remote_addr(), remote_addr);
+
+        let now = Instant::now();
+        let TurnPollRet::WaitUntil(new_now) = client.poll(now) else {
+            unreachable!();
+        };
+        assert_eq!(now, new_now);
+        assert!(client.poll_event().is_none());
+
+        assert_eq!(client.relayed_addresses().count(), 0);
+    }
+
     fn transmit_send_build<T: DelayedTransmitBuild>(
         transmit: TransmitBuild<T>,
     ) -> Transmit<Data<'static>> {
