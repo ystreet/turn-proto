@@ -6,6 +6,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![deny(missing_debug_implementations)]
+
 pub use stun_proto as stun;
 pub use turn_types as types;
 mod client;
