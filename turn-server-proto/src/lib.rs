@@ -6,7 +6,17 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+//! # turn-server-proto
+//!
+//! `turn-server-proto` provides a sans-IO API for a TURN server communicating with many TURN client.
+//!
+//! Relevant standards:
+//! - [RFC5766]
+//!
+//! [RFC5766]: https://datatracker.ietf.org/doc/html/rfc5766
+
 #![deny(missing_debug_implementations)]
+#![deny(missing_docs)]
 
 mod server;
 

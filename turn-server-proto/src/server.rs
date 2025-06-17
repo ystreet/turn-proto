@@ -35,6 +35,7 @@ use turn_types::TurnCredentials;
 
 use tracing::{debug, error, info, trace, warn};
 
+/// A TURN server.
 #[derive(Debug)]
 pub struct TurnServer {
     realm: String,
@@ -67,17 +68,34 @@ struct NonceData {
     local_addr: SocketAddr,
 }
 
+/// Return value for [poll](TurnServer::poll).
 #[derive(Debug)]
 pub enum TurnServerPollRet {
+    /// Wait until the specified time before calling poll() again.
     WaitUntil(Instant),
+    /// Allocate a UDP socket for a client specified by the client's network 5-tuple.
     AllocateSocketUdp {
+        /// The transport of the client asking for an allocation.
         transport: TransportType,
+        /// The TURN server address of the client asking for an allocation.
         local_addr: SocketAddr,
+        /// The client local address of the client asking for an allocation.
         remote_addr: SocketAddr,
     },
 }
 
 impl TurnServer {
+    /// Construct a new [`TurnServer`]
+    ///
+    /// # Examples
+    /// ```
+    /// # use turn_server_proto::TurnServer;
+    /// # use stun_proto::types::TransportType;
+    /// let realm = String::from("realm");
+    /// let listen_addr = "10.0.0.1:3478".parse().unwrap();
+    /// let server = TurnServer::new(TransportType::Udp, listen_addr, realm);
+    /// assert_eq!(server.listen_address(), listen_addr);
+    /// ```
     pub fn new(ttype: TransportType, listen_addr: SocketAddr, realm: String) -> Self {
         let stun = StunAgent::builder(ttype, listen_addr).build();
         Self {
@@ -91,14 +109,19 @@ impl TurnServer {
         }
     }
 
+    /// Add a user credentials that would be accepted by this [`TurnServer`].
     pub fn add_user(&mut self, username: String, password: String) {
         self.users.insert(username, password);
     }
 
+    /// The address that the [`TurnServer`] is listening on for incoming client connections.
     pub fn listen_address(&self) -> SocketAddr {
         self.stun.local_addr()
     }
 
+    /// Provide received data to the [`TurnServer`].
+    ///
+    /// Any returned Transmit should be forwarded to the appropriate socket.
     #[tracing::instrument(
         name = "turn_server_recv",
         skip(self, transmit),
@@ -269,6 +292,9 @@ impl TurnServer {
         }
     }
 
+    /// Poll the [`TurnServer`] in order to make further progress.
+    ///
+    /// The returned value indicates what the caller should do.
     #[tracing::instrument(name = "turn_server_poll", skip(self), ret)]
     pub fn poll(&mut self, now: Instant) -> TurnServerPollRet {
         for pending in self.pending_allocates.iter_mut() {
@@ -303,6 +329,7 @@ impl TurnServer {
         TurnServerPollRet::WaitUntil(now + Duration::from_secs(60))
     }
 
+    /// Poll for a new Transmit to send over a socket.
     #[tracing::instrument(name = "turn_server_poll_transmit", skip(self))]
     pub fn poll_transmit(&mut self, now: Instant) -> Option<Transmit<Data<'static>>> {
         if let Some(transmit) = self.pending_transmits.pop_back() {
@@ -311,6 +338,8 @@ impl TurnServer {
         None
     }
 
+    /// Notify the [`TurnServer`] that a UDP socket has been allocated (or an error) in response to
+    /// [TurnServerPollRet::AllocateSocketUdp].
     #[tracing::instrument(name = "turn_server_allocated_udp_socket", skip(self))]
     pub fn allocated_udp_socket(
         &mut self,
