@@ -21,3 +21,4 @@ turn-types = { path = "../turn-types", version = "0.1.0" }
 [dev-dependencies]
 tracing-subscriber.workspace = true
 turn-server-proto = { path = "../turn-server-proto" }
+clap = {version = "4", features = ["derive"]}
