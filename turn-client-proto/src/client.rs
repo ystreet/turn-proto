@@ -36,11 +36,17 @@ use turn_types::TurnCredentials;
 
 use tracing::{error, info, trace, warn};
 
+/// A set of events that can occur within a TURN client's connection to a TURN server.
 #[derive(Debug)]
 pub enum TurnEvent {
+    /// An allocation was created on the server for the client.  The allocation as the associated
+    /// transport and address.
     AllocationCreated(TransportType, SocketAddr),
+    /// Allocation failed to be created.
     AllocationCreateFailed,
+    /// A permission was created for the provided transport and IP address.
     PermissionCreated(TransportType, IpAddr),
+    /// A permission could not be installed for the provided transport and IP address.
     PermissionCreateFailed(TransportType, IpAddr),
 }
 
@@ -77,6 +83,7 @@ struct Allocation {
     expired_channels: Vec<Channel>,
 }
 
+/// A TURN client.
 #[derive(Debug)]
 pub struct TurnClient {
     stun_agent: StunAgent,
@@ -106,20 +113,31 @@ enum AuthState {
     Error,
 }
 
+/// Return value from calling [poll](TurnClient::poll)().
 #[derive(Debug)]
 pub enum TurnPollRet {
+    /// The caller should wait until the provided time. Other events may cause this value to
+    /// modified and poll() should be rechecked.
     WaitUntil(Instant),
+    /// The connection is closed and no further progress will be made.
     Closed,
 }
 
+/// Return value from call [recv](TurnClient::recv).
 #[derive(Debug)]
 pub enum TurnRecvRet<T: AsRef<[u8]> + std::fmt::Debug> {
+    /// The data has been handled internally and should not be forwarded any further.
     Handled,
+    /// The data is not directed at this [TurnClient].
     Ignored(Transmit<T>),
+    /// Data has been received from a peer of the TURN server.
     // TODO: try to return existing data without a copy
     PeerData {
+        /// The data received.
         data: Vec<u8>,
+        /// The transport the data was received over.
         transport: TransportType,
+        /// The address of the peer that sent the data.
         peer: SocketAddr,
     },
 }
@@ -135,9 +153,12 @@ enum InternalHandleStunReply {
     },
 }
 
+/// Errors produced when attempting to create a permission for a peer address.
 #[derive(Debug)]
 pub enum CreatePermissionError {
+    /// The permission already exists and cannot be recreated.
     AlreadyExists,
+    /// There is no connection to the TURN server that can handle this channel.
     NoAllocation,
 }
 
@@ -147,9 +168,12 @@ impl std::fmt::Display for CreatePermissionError {
     }
 }
 
+/// Errors produced when attempting to bind a channel.
 #[derive(Debug)]
 pub enum BindChannelError {
+    /// The channel identifier already exists and cannot be recreated.
     AlreadyExists,
+    /// There is no connection to the TURN server that can handle this channel.
     NoAllocation,
 }
 
@@ -160,8 +184,24 @@ impl std::fmt::Display for BindChannelError {
 }
 
 impl TurnClient {
+    /// Allocate an address on a TURN server to relay data to and from peers.
+    ///
+    /// # Examples
+    /// ```
+    /// # use turn_types::TurnCredentials;
+    /// # use turn_client_proto::TurnClient;
+    /// # use stun_proto::types::TransportType;
+    /// let credentials = TurnCredentials::new("tuser", "tpass");
+    /// let transport = TransportType::Udp;
+    /// let local_addr = "192.168.0.1:4000".parse().unwrap();
+    /// let remote_addr = "10.0.0.1:3478".parse().unwrap();
+    /// let client = TurnClient::allocate(transport, local_addr, remote_addr, credentials);
+    /// assert_eq!(client.transport(), transport);
+    /// assert_eq!(client.local_addr(), local_addr);
+    /// assert_eq!(client.remote_addr(), remote_addr);
+    /// ```
     #[tracing::instrument(
-        name = "turn_agent_new"
+        name = "turn_client_allocate"
         skip(credentials)
     )]
     pub fn allocate(
@@ -186,19 +226,23 @@ impl TurnClient {
         }
     }
 
+    /// The transport of the connection to the TURN server.
     pub fn transport(&self) -> TransportType {
         self.stun_agent.transport()
     }
 
+    /// The local address of this TURN client.
     pub fn local_addr(&self) -> SocketAddr {
         self.stun_agent.local_addr()
     }
 
+    /// The remote TURN server's address.
     pub fn remote_addr(&self) -> SocketAddr {
         self.stun_agent.remote_addr().unwrap()
     }
 
-    #[tracing::instrument(name = "turn_agent_poll", ret, skip(self))]
+    /// Poll the client for further progress.
+    #[tracing::instrument(name = "turn_client_poll", ret, skip(self))]
     pub fn poll(&mut self, now: Instant) -> TurnPollRet {
         trace!("polling at {now:?}");
         if !self.pending_events.is_empty() || !self.pending_transmits.is_empty() {
@@ -376,6 +420,7 @@ impl TurnClient {
         }
     }
 
+    /// The list of allocated relayed addresses on the TURN server.
     pub fn relayed_addresses(&self) -> impl Iterator<Item = (TransportType, SocketAddr)> + '_ {
         self.allocations
             .iter()
@@ -383,6 +428,7 @@ impl TurnClient {
             .map(|allocation| (allocation.transport, allocation.relayed_address))
     }
 
+    /// The list of permissions available for the provided relayed address.
     pub fn permissions(
         &self,
         transport: TransportType,
@@ -404,8 +450,9 @@ impl TurnClient {
             })
     }
 
+    /// Poll for a packet to send.
     #[tracing::instrument(
-        name = "turn_agent_poll_transmit"
+        name = "turn_client_poll_transmit"
         skip(self)
     )]
     pub fn poll_transmit(&mut self, now: Instant) -> Option<Transmit<Data<'static>>> {
@@ -439,6 +486,7 @@ impl TurnClient {
         }
     }
 
+    /// Poll for an event that has occurred.
     #[tracing::instrument(name = "turn_client_poll_event", ret, skip(self))]
     pub fn poll_event(&mut self) -> Option<TurnEvent> {
         self.pending_events.pop_back()
@@ -573,6 +621,9 @@ impl TurnClient {
         }
     }
 
+    /// Provide received data to the TURN client for handling.
+    ///
+    /// The returned data outlines what to do with this data.
     #[tracing::instrument(
         name = "turn_client_recv",
         skip(self, transmit),
@@ -1065,6 +1116,7 @@ impl TurnClient {
         }
     }
 
+    /// Remove the allocation/s on the server.
     pub fn delete(&mut self, now: Instant) -> Option<Transmit<Data<'static>>> {
         let mut builder = Message::builder_request(REFRESH);
         let transaction_id = builder.transaction_id();
@@ -1137,6 +1189,7 @@ impl TurnClient {
         (transmit.into_owned(), transaction_id)
     }
 
+    /// Create a permission address to allow sending/receiving data to/from.
     #[tracing::instrument(name = "turn_client_create_permission", skip(self, now), err)]
     pub fn create_permission(
         &mut self,
@@ -1232,6 +1285,7 @@ impl TurnClient {
         (transmit.into_owned(), transaction_id)
     }
 
+    /// Bind a channel for sending/receiving data to/from a particular peer.
     pub fn bind_channel(
         &mut self,
         transport: TransportType,
@@ -1328,6 +1382,11 @@ impl TurnClient {
         })
     }
 
+    /// Send data to a peer through the TURN server.
+    ///
+    /// The provided transport, address and data are the data to send to the peer.
+    ///
+    /// The returned value will instruct the caller to send a message to the turn server.
     pub fn send_to<T: AsRef<[u8]> + std::fmt::Debug>(
         &mut self,
         transport: TransportType,
@@ -1389,6 +1448,7 @@ impl TurnClient {
     }
 }
 
+/// A `Transmit` where the data is some subset of the provided region.
 #[derive(Debug)]
 pub struct DelayedTransmit<T: AsRef<[u8]> + std::fmt::Debug> {
     data: T,
@@ -1416,6 +1476,7 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedTransmit<
     }
 }
 
+/// A `Transmit` that will construct a STUN message towards a client with the relevant data.
 #[derive(Debug)]
 pub struct DelayedMessageSend<T: AsRef<[u8]> + std::fmt::Debug> {
     data: T,
@@ -1461,6 +1522,7 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedMessageSe
     }
 }
 
+/// A `Transmit` that will construct a channel message towards a TURN client.
 #[derive(Debug)]
 pub struct DelayedChannelSend<T: AsRef<[u8]> + std::fmt::Debug> {
     data: T,
@@ -1487,9 +1549,12 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedChannelSe
     }
 }
 
+/// A delayed `Transmit` that will produce data for a TURN client.
 #[derive(Debug)]
 pub enum DelayedMessageOrChannelSend<T: AsRef<[u8]> + std::fmt::Debug> {
+    /// A [`DelayedChannelSend`].
     Channel(DelayedChannelSend<T>),
+    /// A [`DelayedMessageSend`].
     Message(DelayedMessageSend<T>),
 }
 

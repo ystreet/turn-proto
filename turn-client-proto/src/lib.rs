@@ -6,7 +6,17 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+//! # turn-client-proto
+//!
+//! `turn-client-proto` provides a sans-IO API for a TURN client communicating with a TURN server.
+//!
+//! Relevant standards:
+//! - [RFC5766]
+//!
+//! [RFC5766]: https://datatracker.ietf.org/doc/html/rfc5766
+
 #![deny(missing_debug_implementations)]
+#![deny(missing_docs)]
 
 pub use stun_proto as stun;
 pub use turn_types as types;
