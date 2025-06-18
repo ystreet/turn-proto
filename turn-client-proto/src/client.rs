@@ -1486,7 +1486,8 @@ pub struct DelayedMessageSend<T: AsRef<[u8]> + std::fmt::Debug> {
 impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedMessageSend<T> {
     fn len(&self) -> usize {
         let xor_peer_addr = XorPeerAddress::new(self.peer_addr, 0.into());
-        MessageHeader::LENGTH + xor_peer_addr.padded_len() + self.data.as_ref().len()
+        let data = AData::new(self.data.as_ref());
+        MessageHeader::LENGTH + xor_peer_addr.padded_len() + data.padded_len()
     }
 
     fn build(self) -> Vec<u8> {
@@ -1531,7 +1532,7 @@ pub struct DelayedChannelSend<T: AsRef<[u8]> + std::fmt::Debug> {
 
 impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedChannelSend<T> {
     fn len(&self) -> usize {
-        self.data.as_ref().len() + 2
+        self.data.as_ref().len() + 4
     }
 
     fn build(self) -> Vec<u8> {
@@ -1638,6 +1639,51 @@ mod tests {
             transmit.to,
         )
         .into_owned()
+    }
+
+    #[test]
+    fn test_delayed_message() {
+        let data = [5; 5];
+        let peer_addr = "127.0.0.1:1".parse().unwrap();
+        let transmit = DelayedMessageOrChannelSend::Message(DelayedMessageSend { data, peer_addr });
+        let len = transmit.len();
+        let out = transmit.build();
+        assert_eq!(len, out.len());
+        let msg = Message::from_bytes(&out).unwrap();
+        let addr = msg.attribute::<XorPeerAddress>().unwrap();
+        assert_eq!(addr.addr(msg.transaction_id()), peer_addr);
+        let out_data = msg.attribute::<AData>().unwrap();
+        assert_eq!(out_data.data(), data.as_ref());
+        let transmit = DelayedMessageOrChannelSend::Message(DelayedMessageSend { data, peer_addr });
+        let mut out2 = vec![0; len];
+        transmit.write_into(&mut out2);
+        let msg = Message::from_bytes(&out2).unwrap();
+        let addr = msg.attribute::<XorPeerAddress>().unwrap();
+        assert_eq!(addr.addr(msg.transaction_id()), peer_addr);
+        let out_data = msg.attribute::<AData>().unwrap();
+        assert_eq!(out_data.data(), data.as_ref());
+    }
+
+    #[test]
+    fn test_delayed_channel() {
+        let data = [5; 5];
+        let channel_id = 0x4567;
+        let transmit =
+            DelayedMessageOrChannelSend::Channel(DelayedChannelSend { data, channel_id });
+        let len = transmit.len();
+        let out = transmit.build();
+        assert_eq!(len, out.len());
+        let channel = ChannelData::parse(&out).unwrap();
+        assert_eq!(channel.id(), channel_id);
+        assert_eq!(channel.data(), data.as_ref());
+        let transmit =
+            DelayedMessageOrChannelSend::Channel(DelayedChannelSend { data, channel_id });
+        let mut out2 = vec![0; len];
+        transmit.write_into(&mut out2);
+        assert_eq!(len, out.len());
+        let channel = ChannelData::parse(&out).unwrap();
+        assert_eq!(channel.id(), channel_id);
+        assert_eq!(channel.data(), data.as_ref());
     }
 
     struct TurnTestBuilder {
