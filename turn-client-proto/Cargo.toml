@@ -1,7 +1,7 @@
 [package]
 name = "turn-client-proto"
 description = "TURN protocol in a sans-IO fashion"
-version.workspace = true
+version = "0.2.0"
 authors = ["Matthew Waters <matthew@centricular.com>"]
 license = "MIT OR Apache-2.0"
 keywords = ["TURN"]
