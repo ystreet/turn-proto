@@ -258,7 +258,7 @@ impl TurnServer {
                         // A packet from the client needs to be sent to the peer referenced by the
                         // configured channel.
                         let Some(_permission) = allocation.permissions_from_5tuple(
-                            transmit.transport,
+                            allocation.ttype,
                             allocation.addr,
                             existing.peer_addr,
                         ) else {
