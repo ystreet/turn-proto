@@ -1947,6 +1947,9 @@ mod tests {
                 DelayedMessageOrChannelSend::Message(_)
             ));
             let transmit = transmit_send_build(transmit);
+            assert_eq!(transmit.transport, self.client.transport());
+            assert_eq!(transmit.from, self.client.local_addr());
+            assert_eq!(transmit.to, self.server.listen_address());
             let Ok(Some(transmit)) = self.server.recv(transmit, now) else {
                 unreachable!();
             };
@@ -2012,6 +2015,9 @@ mod tests {
                 transmit.data,
                 DelayedMessageOrChannelSend::Channel(_)
             ));
+            assert_eq!(transmit.transport, self.client.transport());
+            assert_eq!(transmit.from, self.client.local_addr());
+            assert_eq!(transmit.to, self.server.listen_address());
             let transmit = transmit_send_build(transmit);
             let Ok(Some(transmit)) = self.server.recv(transmit, now) else {
                 unreachable!();
