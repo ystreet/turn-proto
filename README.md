@@ -16,7 +16,7 @@ A couple of reasons: reusability, and testability.
 Without being bogged down in the details of how IO happens, the same sans-IO
 implementation can be used without prescribing the IO pattern that an application
 must follow. Instead, the application (or parent library) has much more freedom
-in how bytes are transferred between peers. It's also possible to us a sans-IO
+in how bytes are transferred between peers. It is possible to use a sans-IO
 library in either a synchronous or within an asynchronous runtime.
 
 sans-IO also allows easy testing of any specific state the sans-IO
@@ -50,6 +50,12 @@ Message parsing is zero-copy by default.
 
 ### [turn-client-proto](https://github.com/ystreet/turn-proto/tree/main/turn-client-proto)
 
-`turn-proto` builds on top of `turn-types` and implements some of the
+`turn-client-proto` builds on top of `turn-types` and implements some of the
 TURN protocol requirements when communicating with a peer. It does this using a
 sans-IO API and thus does no networking calls of its own.
+
+### [turn-server-proto](https://github.com/ystreet/turn-proto/tree/main/turn-server-proto)
+
+`turn-server-proto` builds on top of `turn-types` and implements a TURN server
+for communicating with TURN clients. It does this using a sans-IO API and thus
+does no networking calls of its own.
