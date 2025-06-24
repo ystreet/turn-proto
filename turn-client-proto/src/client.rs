@@ -2019,7 +2019,13 @@ mod tests {
             assert_eq!(transmit.from, self.client.local_addr());
             assert_eq!(transmit.to, self.server.listen_address());
             let transmit = transmit_send_build(transmit);
-            let Ok(Some(transmit)) = self.server.recv(transmit, now) else {
+            let Some(transmit) = self
+                .server
+                .recv(transmit, now)
+                .ok()
+                .flatten()
+                .or_else(|| self.server.poll_transmit(now))
+            else {
                 unreachable!();
             };
             assert_eq!(transmit.transport, TransportType::Udp);
@@ -2042,7 +2048,7 @@ mod tests {
             else {
                 unreachable!();
             };
-            assert_eq!(transmit.transport, TransportType::Udp);
+            assert_eq!(transmit.transport, self.client.transport());
             assert_eq!(transmit.from, self.server.listen_address());
             assert_eq!(transmit.to, self.client.local_addr());
             let cd = ChannelData::parse(&transmit.data).unwrap();
@@ -2072,6 +2078,8 @@ mod tests {
         assert_eq!(permission_ip, test.peer_addr.ip());
 
         test.sendrecv_data(now);
+        test.bind_channel(now);
+        test.sendrecv_data_channel(now);
     }
 
     #[test]
