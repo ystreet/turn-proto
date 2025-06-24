@@ -656,6 +656,7 @@ impl TurnServer {
             allocations: vec![],
             credentials,
         };
+        debug!("have new pending ALLOCATE from client {ttype} from {from} to {to}");
 
         self.pending_allocates.push_front(PendingClient {
             client,
@@ -720,6 +721,8 @@ impl TurnServer {
             return Err(response.into_owned());
         };
 
+        info!("Successfully refreshed allocation {ttype}, from {from} to {to}");
+
         Ok(transmit_send_build(transmit))
     }
 
@@ -742,6 +745,7 @@ impl TurnServer {
             return Err(builder.into_owned());
         };
 
+        let mut peer_addresses = vec![];
         let mut at_least_one_peer_addr = false;
         for peer_addr in msg
             .iter_attributes()
@@ -803,6 +807,7 @@ impl TurnServer {
                     expires_at: now + Duration::from_secs(300),
                 });
             }
+            peer_addresses.push(peer_addr.ip());
         }
 
         if !at_least_one_peer_addr {
@@ -834,6 +839,10 @@ impl TurnServer {
             response.add_fingerprint().unwrap();
             return Err(response.into_owned());
         };
+        debug!(
+            "allocation {ttype} from {from} to {to} successfully created permission for {:?}",
+            peer_addresses
+        );
 
         Ok(transmit_send_build(transmit))
     }
@@ -917,20 +926,20 @@ impl TurnServer {
             .attribute::<ChannelNumber>()
             .ok()
             .map(|channel| channel.channel());
-        if let Some(channel_no) = channel_no {
-            if !(0x4000..=0x7fff).contains(&channel_no) {
-                trace!("Channel id out of range");
-                return Err(bad_request(msg, credentials));
-            }
-            if existing
-                .as_ref()
-                .is_some_and(|existing| existing.id != channel_no)
-            {
-                trace!("channel peer address does not match channel ID");
-                return Err(bad_request(msg, credentials));
-            }
-        } else {
+        let Some(channel_no) = channel_no else {
             debug!("Bad request: no requested channel id");
+            return Err(bad_request(msg, credentials));
+        };
+
+        if !(0x4000..=0x7fff).contains(&channel_no) {
+            trace!("Channel id out of range");
+            return Err(bad_request(msg, credentials));
+        }
+        if existing
+            .as_ref()
+            .is_some_and(|existing| existing.id != channel_no)
+        {
+            trace!("channel peer address does not match channel ID");
             return Err(bad_request(msg, credentials));
         }
 
@@ -938,7 +947,7 @@ impl TurnServer {
             existing.expires_at = now + Duration::from_secs(600);
         } else {
             alloc.channels.push(Channel {
-                id: channel_no.unwrap(),
+                id: channel_no,
                 peer_addr,
                 peer_transport: TransportType::Udp,
                 expires_at: now + Duration::from_secs(600),
@@ -975,6 +984,8 @@ impl TurnServer {
             response.add_fingerprint().unwrap();
             return Err(response.into_owned());
         };
+
+        debug!("allocation {ttype} from {from} to {to} successfully created channel {channel_no} for {:?}", peer_addr.ip());
 
         Ok(transmit_send_build(transmit))
     }
