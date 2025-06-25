@@ -33,7 +33,7 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::Layer;
 
-    pub fn test_init_log() -> DefaultGuard {
+    pub(crate) fn test_init_log() -> DefaultGuard {
         turn_types::debug_init();
         let level_filter = std::env::var("TURN_LOG")
             .or(std::env::var("RUST_LOG"))
