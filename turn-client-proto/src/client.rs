@@ -1686,6 +1686,7 @@ mod tests {
         assert_eq!(channel.data(), data.as_ref());
     }
 
+    #[derive(Debug)]
     struct TurnTestBuilder {
         turn_listen_addr: SocketAddr,
         credentials: TurnCredentials,
@@ -1723,6 +1724,7 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
     struct TurnTest {
         client: TurnClient,
         server: TurnServer,
@@ -2056,11 +2058,10 @@ mod tests {
         }
     }
 
-    fn turn_allocate_permission(client_transport: TransportType) {
+    fn turn_allocate_permission(client_transport: TransportType, now: Instant) -> TurnTest {
         let mut test = TurnTest::builder()
             .client_transport(client_transport)
             .build();
-        let now = Instant::now();
 
         test.allocate(now);
         let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
@@ -2080,20 +2081,23 @@ mod tests {
         test.sendrecv_data(now);
         test.bind_channel(now);
         test.sendrecv_data_channel(now);
+        test
     }
 
     #[test]
     fn test_turn_udp_allocate_udp_permission() {
         let _log = crate::tests::test_init_log();
 
-        turn_allocate_permission(TransportType::Udp);
+        let now = Instant::now();
+        turn_allocate_permission(TransportType::Udp, now);
     }
 
     #[test]
     fn test_turn_tcp_allocate_udp_permission() {
         let _log = crate::tests::test_init_log();
 
-        turn_allocate_permission(TransportType::Tcp);
+        let now = Instant::now();
+        turn_allocate_permission(TransportType::Tcp, now);
     }
 
     #[test]
@@ -2425,5 +2429,53 @@ mod tests {
         test.client.recv(transmit, expiry);
 
         test.sendrecv_data_channel(expiry);
+    }
+
+    #[test]
+    fn test_client_receive_offpath_data() {
+        let _log = crate::tests::test_init_log();
+
+        let now = Instant::now();
+
+        let mut test = turn_allocate_permission(TransportType::Udp, now);
+        let data = [3; 9];
+        let TurnRecvRet::Ignored(transmit) = test.client.recv(
+            Transmit::new(
+                &data,
+                TransportType::Udp,
+                test.peer_addr,
+                test.client.local_addr(),
+            ),
+            now,
+        ) else {
+            unreachable!();
+        };
+        assert_eq!(transmit.data, &data);
+        assert_eq!(transmit.transport, TransportType::Udp);
+        assert_eq!(transmit.from, test.peer_addr);
+        assert_eq!(transmit.to, test.client.local_addr());
+    }
+
+    #[test]
+    fn test_server_receive_offpath_data() {
+        let _log = crate::tests::test_init_log();
+
+        let now = Instant::now();
+
+        let mut test = turn_allocate_permission(TransportType::Udp, now);
+        let data = [3; 9];
+        assert!(test
+            .server
+            .recv(
+                Transmit::new(
+                    &data,
+                    TransportType::Udp,
+                    test.peer_addr,
+                    test.client.local_addr(),
+                ),
+                now,
+            )
+            .unwrap()
+            .is_none());
     }
 }
