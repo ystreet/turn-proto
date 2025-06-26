@@ -29,7 +29,7 @@ impl Attribute for RequestedTransport {
 }
 
 impl AttributeWrite for RequestedTransport {
-    fn to_raw(&self) -> RawAttribute {
+    fn to_raw(&self) -> RawAttribute<'_> {
         RawAttribute::new(self.get_type(), &[self.protocol, 0, 0, 0]).into_owned()
     }
 

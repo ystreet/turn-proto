@@ -26,7 +26,7 @@ impl Attribute for DontFragment {
 }
 
 impl AttributeWrite for DontFragment {
-    fn to_raw(&self) -> RawAttribute {
+    fn to_raw(&self) -> RawAttribute<'_> {
         RawAttribute::new(self.get_type(), &[])
     }
     fn write_into_unchecked(&self, dest: &mut [u8]) {

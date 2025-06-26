@@ -31,7 +31,7 @@ impl Attribute for Lifetime {
 }
 
 impl AttributeWrite for Lifetime {
-    fn to_raw(&self) -> RawAttribute {
+    fn to_raw(&self) -> RawAttribute<'_> {
         let mut buf = [0; 4];
         BigEndian::write_u32(&mut buf[..4], self.seconds);
         RawAttribute::new(self.get_type(), &buf).into_owned()

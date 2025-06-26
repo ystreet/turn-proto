@@ -31,7 +31,7 @@ impl Attribute for ReservationToken {
 }
 
 impl AttributeWrite for ReservationToken {
-    fn to_raw(&self) -> RawAttribute {
+    fn to_raw(&self) -> RawAttribute<'_> {
         let mut data = vec![0; 8];
         BigEndian::write_u64(&mut data, self.token);
         RawAttribute::new(self.get_type(), &data).into_owned()
