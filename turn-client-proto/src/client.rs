@@ -651,7 +651,7 @@ impl TurnClient {
             );
             return TurnRecvRet::Ignored(transmit);
         }
-        let (credentials, nonce) = match &mut self.state {
+        let (credentials, _nonce) = match &mut self.state {
             AuthState::Error | AuthState::Initial => return TurnRecvRet::Ignored(transmit),
             AuthState::InitialSent(transaction_id) => {
                 let msg = if self.stun_agent.transport() == TransportType::Tcp {
