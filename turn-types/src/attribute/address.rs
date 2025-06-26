@@ -35,7 +35,7 @@ impl Attribute for XorPeerAddress {
 }
 
 impl AttributeWrite for XorPeerAddress {
-    fn to_raw(&self) -> RawAttribute {
+    fn to_raw(&self) -> RawAttribute<'_> {
         self.addr.to_raw(self.get_type())
     }
     fn write_into_unchecked(&self, dest: &mut [u8]) {
@@ -124,7 +124,7 @@ impl Attribute for XorRelayedAddress {
 }
 
 impl AttributeWrite for XorRelayedAddress {
-    fn to_raw(&self) -> RawAttribute {
+    fn to_raw(&self) -> RawAttribute<'_> {
         self.addr.to_raw(self.get_type())
     }
     fn write_into_unchecked(&self, dest: &mut [u8]) {

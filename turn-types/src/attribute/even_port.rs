@@ -28,7 +28,7 @@ impl Attribute for EvenPort {
 }
 
 impl AttributeWrite for EvenPort {
-    fn to_raw(&self) -> RawAttribute {
+    fn to_raw(&self) -> RawAttribute<'_> {
         RawAttribute::new(self.get_type(), &[self.bits]).into_owned()
     }
 

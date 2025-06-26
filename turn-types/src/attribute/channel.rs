@@ -31,7 +31,7 @@ impl Attribute for ChannelNumber {
 }
 
 impl AttributeWrite for ChannelNumber {
-    fn to_raw(&self) -> RawAttribute {
+    fn to_raw(&self) -> RawAttribute<'_> {
         let mut buf = [0; 4];
         BigEndian::write_u16(&mut buf[..2], self.channel);
         RawAttribute::new(self.get_type(), &buf).into_owned()
