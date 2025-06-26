@@ -154,33 +154,25 @@ enum InternalHandleStunReply {
 }
 
 /// Errors produced when attempting to create a permission for a peer address.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum CreatePermissionError {
     /// The permission already exists and cannot be recreated.
+    #[error("The permission already exists and cannot be recreated.")]
     AlreadyExists,
-    /// There is no connection to the TURN server that can handle this channel.
+    /// There is no connection to the TURN server that can handle this permission.
+    #[error("There is no connection to the TURN server that can handle this permission")]
     NoAllocation,
-}
-
-impl std::fmt::Display for CreatePermissionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
 }
 
 /// Errors produced when attempting to bind a channel.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum BindChannelError {
     /// The channel identifier already exists and cannot be recreated.
+    #[error("The channel identifier already exists and cannot be recreated.")]
     AlreadyExists,
     /// There is no connection to the TURN server that can handle this channel.
+    #[error("There is no connection to the TURN server that can handle this channel.")]
     NoAllocation,
-}
-
-impl std::fmt::Display for BindChannelError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
 }
 
 impl TurnClient {
