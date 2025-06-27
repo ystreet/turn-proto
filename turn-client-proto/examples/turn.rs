@@ -8,6 +8,8 @@
 
 //! An example showing how a TURN client can be implemented.
 
+#![cfg(not(tarpaulin))]
+
 use turn_client_proto::types::TurnCredentials;
 use turn_client_proto::{CreatePermissionError, TurnClient, TurnEvent, TurnPollRet, TurnRecvRet};
 
