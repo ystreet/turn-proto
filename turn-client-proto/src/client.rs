@@ -36,6 +36,11 @@ use turn_types::TurnCredentials;
 
 use tracing::{error, info, trace, warn};
 
+static EXPIRY_BUFFER: Duration = Duration::from_secs(60);
+static PERMISSION_DURATION: Duration = Duration::from_secs(300);
+static CHANNEL_DURATION: Duration = Duration::from_secs(600);
+static CHANNEL_REMOVE_DURATION: Duration = Duration::from_secs(300);
+
 /// A set of events that can occur within a TURN client's connection to a TURN server.
 #[derive(Debug)]
 pub enum TurnEvent {
@@ -277,8 +282,8 @@ impl TurnClient {
                 for alloc in self.allocations.iter_mut() {
                     let mut expires_at = alloc.expires_at
                         - if alloc.pending_refresh.is_none() {
-                            if alloc.lifetime > Duration::from_secs(120) {
-                                Duration::from_secs(60)
+                            if alloc.lifetime > EXPIRY_BUFFER * 2 {
+                                EXPIRY_BUFFER
                             } else {
                                 alloc.lifetime / 2
                             }
@@ -321,7 +326,7 @@ impl TurnClient {
                         }
                     }
                     for channel in alloc.channels.iter_mut() {
-                        let refresh_time = channel.expires_at - Duration::from_secs(60);
+                        let refresh_time = channel.expires_at - EXPIRY_BUFFER;
                         if let Some(pending) = channel.pending_refresh {
                             if cancelled_transaction.is_some_and(|cancelled| cancelled == pending) {
                                 // TODO: need to eventually fail when the permission times out.
@@ -364,7 +369,7 @@ impl TurnClient {
 
                     // refresh permission if necessary
                     for permission in alloc.permissions.iter_mut() {
-                        let refresh_time = permission.expires_at - Duration::from_secs(60);
+                        let refresh_time = permission.expires_at - EXPIRY_BUFFER;
                         if let Some(pending) = permission.pending_refresh {
                             if cancelled_transaction.is_some_and(|cancelled| cancelled == pending) {
                                 warn!(
@@ -566,7 +571,7 @@ impl TurnClient {
                     self.allocations[alloc_idx].transport,
                     permission.ip,
                 ));
-                permission.expires_at = now + Duration::from_secs(300);
+                permission.expires_at = now + PERMISSION_DURATION;
                 permission.expired = false;
                 self.allocations[alloc_idx].permissions.push(permission);
             }
@@ -605,7 +610,7 @@ impl TurnClient {
                 self.pending_events
                     .push_back(TurnEvent::PermissionCreateFailed(transport, permission.ip));
             } else {
-                permission.expires_at = now + Duration::from_secs(300);
+                permission.expires_at = now + PERMISSION_DURATION;
             }
             true
         } else {
@@ -1067,9 +1072,9 @@ impl TurnClient {
                             })
                         {
                             self.allocations[alloc_idx].channels[existing_idx].expires_at =
-                                now + Duration::from_secs(600);
+                                now + CHANNEL_DURATION;
                         } else {
-                            channel.expires_at = now + Duration::from_secs(600);
+                            channel.expires_at = now + CHANNEL_DURATION;
                             self.allocations[alloc_idx].channels.push(channel);
                         }
                         return InternalHandleStunReply::Handled;
@@ -1323,7 +1328,7 @@ impl TurnClient {
                 )
                 .chain(allocation.expired_channels.iter())
                 .any(|channel| {
-                    channel.expires_at + Duration::from_secs(300) <= now && channel.id == channel_id
+                    channel.expires_at + CHANNEL_REMOVE_DURATION <= now && channel.id == channel_id
                 })
             {
                 continue;
@@ -1895,7 +1900,7 @@ mod tests {
             else {
                 unreachable!();
             };
-            assert_eq!(permision.expires_at, now + Duration::from_secs(300));
+            assert_eq!(permision.expires_at, now + PERMISSION_DURATION);
             assert!(self
                 .client
                 .permissions(TransportType::Udp, self.turn_alloc_addr)
@@ -1922,11 +1927,11 @@ mod tests {
             else {
                 unreachable!();
             };
-            assert_eq!(permision.expires_at, now + Duration::from_secs(300));
+            assert_eq!(permision.expires_at, now + PERMISSION_DURATION);
             let Some(channel) = self.client.channel(TransportType::Udp, self.peer_addr) else {
                 unreachable!();
             };
-            assert_eq!(channel.expires_at, now + Duration::from_secs(600));
+            assert_eq!(channel.expires_at, now + CHANNEL_DURATION);
         }
 
         fn sendrecv_data(&mut self, now: Instant) {
@@ -2278,7 +2283,7 @@ mod tests {
         let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
             unreachable!()
         };
-        assert_eq!(expiry, now + Duration::from_secs(240));
+        assert_eq!(expiry, now + PERMISSION_DURATION - EXPIRY_BUFFER);
         let TurnPollRet::WaitUntil(now) = test.client.poll(expiry) else {
             unreachable!()
         };
@@ -2322,7 +2327,7 @@ mod tests {
         let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
             unreachable!()
         };
-        assert_eq!(expiry, now + Duration::from_secs(240));
+        assert_eq!(expiry, now + PERMISSION_DURATION - EXPIRY_BUFFER);
         let TurnPollRet::WaitUntil(now) = test.client.poll(expiry) else {
             unreachable!()
         };
@@ -2340,7 +2345,7 @@ mod tests {
             let _ = test.client.poll_transmit(new_now);
             expiry = new_now;
         }
-        assert_eq!(expiry, now + Duration::from_secs(60));
+        assert_eq!(expiry, now + EXPIRY_BUFFER);
         let TurnPollRet::WaitUntil(now) = test.client.poll(expiry) else {
             unreachable!()
         };
@@ -2385,7 +2390,7 @@ mod tests {
             let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
                 unreachable!()
             };
-            assert_eq!(expiry, now + Duration::from_secs(240));
+            assert_eq!(expiry, now + PERMISSION_DURATION - EXPIRY_BUFFER);
             let TurnPollRet::WaitUntil(now) = test.client.poll(expiry) else {
                 unreachable!()
             };
