@@ -35,11 +35,16 @@ use turn_types::TurnCredentials;
 
 use tracing::{debug, error, info, trace, warn};
 
+static MINIMUM_NONCE_EXPIRY_DURATION: Duration = Duration::from_secs(30);
+static DEFAULT_NONCE_EXPIRY_DURATION: Duration = Duration::from_secs(3600);
+static DEFAULT_ALLOCATION_DURATION: Duration = Duration::from_secs(1800);
+static PERMISSION_DURATION: Duration = Duration::from_secs(300);
+static CHANNEL_DURATION: Duration = Duration::from_secs(600);
+
 /// A TURN server.
 #[derive(Debug)]
 pub struct TurnServer {
     realm: String,
-    // FIXME: remove
     stun: StunAgent,
 
     clients: Vec<Client>,
@@ -49,6 +54,7 @@ pub struct TurnServer {
 
     // username -> password mapping.
     users: HashMap<String, String>,
+    nonce_expiry_duration: Duration,
 }
 
 #[derive(Debug)]
@@ -106,6 +112,7 @@ impl TurnServer {
             pending_transmits: VecDeque::default(),
             pending_allocates: VecDeque::default(),
             users: HashMap::default(),
+            nonce_expiry_duration: DEFAULT_NONCE_EXPIRY_DURATION,
         }
     }
 
@@ -117,6 +124,15 @@ impl TurnServer {
     /// The address that the [`TurnServer`] is listening on for incoming client connections.
     pub fn listen_address(&self) -> SocketAddr {
         self.stun.local_addr()
+    }
+
+    /// Set the amount of time that a Nonce (used for authentication) will expire and a new Nonce
+    /// will need to be acquired by a client.
+    pub fn set_nonce_expiry_duration(&mut self, expiry_duration: Duration) {
+        if expiry_duration < MINIMUM_NONCE_EXPIRY_DURATION {
+            panic!("Attempted to set a nonce expiry duration ({expiry_duration:?}) of less than the allowed minimum ({MINIMUM_NONCE_EXPIRY_DURATION:?})");
+        }
+        self.nonce_expiry_duration = expiry_duration;
     }
 
     /// Provide received data to the [`TurnServer`].
@@ -366,7 +382,7 @@ impl TurnServer {
             pending.client.allocations.push(Allocation {
                 addr: socket_addr,
                 ttype: TransportType::Udp,
-                expires_at: now + Duration::from_secs(1800),
+                expires_at: now + DEFAULT_ALLOCATION_DURATION,
                 permissions: vec![],
                 channels: vec![],
             });
@@ -439,7 +455,7 @@ impl TurnServer {
                     local_addr: to,
                     // FIXME: use an actual random source.
                     nonce: String::from("random"),
-                    expires_at: now + Duration::from_secs(3600),
+                    expires_at: now + self.nonce_expiry_duration,
                 });
                 self.nonces.last().unwrap()
             };
@@ -479,12 +495,13 @@ impl TurnServer {
         //      USERNAME or MESSAGE-INTEGRITY attribute.  Servers can invalidate
         //      nonces in order to provide additional security.  See Section 4.3
         //      of [RFC2617] for guidelines.
+        let nonce_expiry_duration = self.nonce_expiry_duration;
         let nonce_data = self.mut_nonce_from_5tuple(ttype, to, from);
         let mut stale_nonce = false;
         let nonce_value = if let Some(nonce_data) = nonce_data {
             if nonce_data.expires_at < now {
                 nonce_data.nonce = String::from("random");
-                nonce_data.expires_at = now + Duration::from_secs(3600);
+                nonce_data.expires_at = now + nonce_expiry_duration;
                 stale_nonce = true;
             } else if nonce_data.nonce != nonce.nonce() {
                 stale_nonce = true;
@@ -498,7 +515,7 @@ impl TurnServer {
                 local_addr: to,
                 // FIXME: use an actual random source.
                 nonce: nonce_value.clone(),
-                expires_at: now + Duration::from_secs(3600),
+                expires_at: now + self.nonce_expiry_duration,
             });
             stale_nonce = true;
             nonce_value
@@ -799,12 +816,12 @@ impl TurnServer {
                 .iter()
                 .position(|perm| perm.ttype == TransportType::Udp && perm.addr == peer_addr.ip())
             {
-                alloc.permissions[position].expires_at = now + Duration::from_secs(300);
+                alloc.permissions[position].expires_at = now + PERMISSION_DURATION;
             } else {
                 alloc.permissions.push(Permission {
                     addr: peer_addr.ip(),
                     ttype: TransportType::Udp,
-                    expires_at: now + Duration::from_secs(300),
+                    expires_at: now + PERMISSION_DURATION,
                 });
             }
             peer_addresses.push(peer_addr.ip());
@@ -944,13 +961,13 @@ impl TurnServer {
         }
 
         if let Some(existing) = existing.as_mut() {
-            existing.expires_at = now + Duration::from_secs(600);
+            existing.expires_at = now + CHANNEL_DURATION;
         } else {
             alloc.channels.push(Channel {
                 id: channel_no,
                 peer_addr,
                 peer_transport: TransportType::Udp,
-                expires_at: now + Duration::from_secs(600),
+                expires_at: now + CHANNEL_DURATION,
             });
         }
 
@@ -959,12 +976,12 @@ impl TurnServer {
             .iter_mut()
             .find(|perm| perm.ttype == TransportType::Udp && perm.addr == peer_addr.ip())
         {
-            existing.expires_at = now + Duration::from_secs(300);
+            existing.expires_at = now + PERMISSION_DURATION;
         } else {
             alloc.permissions.push(Permission {
                 addr: peer_addr.ip(),
                 ttype: TransportType::Udp,
-                expires_at: now + Duration::from_secs(300),
+                expires_at: now + PERMISSION_DURATION,
             });
         }
 
