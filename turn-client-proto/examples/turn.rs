@@ -7,6 +7,32 @@
 // except according to those terms.
 
 //! An example showing how a TURN client can be implemented.
+//!
+//! ## Requirements
+//!  - A TURN server e.g. [coturn](https://github.com/coturn/coturn)
+//!  - A peer to send data to e.g `netcat`
+//!
+//! ## Example
+//!
+//! Shell 1 (`netcat`):
+//! ```sh
+//! # listen for udp data on the specified address and port. Once the first packet is received by
+//! # `nc`, data can be sent back to the TURN server which will be displayed in this example in Shell 3.
+//! $ nc -lu 127.0.0.1 9100
+//! ```
+//!
+//! Shell 2 (`coturn`)
+//! ```sh
+//! # only needs to be completed once to add the relevant TURN username and password
+//! turnadmin --userdb userdb.sqlite --add --user coturn --realm realm --password password
+//! # Do not use in production, adapt for your use case
+//! turnserver --user not-important --cli-password not-important --realm realm --lt-cred-mech --userdb userdb.sqlite -v --allow-loopback-peers --listening-ip 127.0.0.1 --relay-ip 127.0.0.1
+//! ```
+//!
+//! Shell 3 (this example)
+//! ```sh
+//! ./turn --transport udp --server 127.0.0.1:3478 --user coturn --password password --peer 127.0.0.1:9100 --count 2 --delay 5
+//! ```
 
 #![cfg(not(tarpaulin))]
 
@@ -108,10 +134,12 @@ impl TurnClientUdp {
                         transport,
                         peer,
                     } => {
-                        println!(
-                            "received {} bytes from {peer:?} using {transport:?}",
-                            data.len()
-                        );
+                        let len = data.len();
+                        let s = match String::from_utf8(data) {
+                            Ok(s) => s,
+                            Err(e) => format!("{:x?}", e.into_bytes()),
+                        };
+                        println!("received {len} bytes from {peer:?} using {transport:?}: '{s:?}'");
                         continue;
                     }
                 }
@@ -246,10 +274,12 @@ impl TurnClientTcp {
                         transport,
                         peer,
                     } => {
-                        println!(
-                            "received {} bytes from {peer:?} using {transport:?}",
-                            data.len()
-                        );
+                        let len = data.len();
+                        let s = match String::from_utf8(data) {
+                            Ok(s) => s,
+                            Err(e) => format!("{:x?}", e.into_bytes()),
+                        };
+                        println!("received {len} bytes from {peer:?} using {transport:?}: {s:?}",);
                         continue;
                     }
                 }
@@ -403,6 +433,15 @@ struct Cli {
         help = "The network address of the peer to send data to through the TURN server"
     )]
     peer: SocketAddr,
+    #[arg(long, default_value = "1", help = "Number of messages to send")]
+    count: u64,
+    #[arg(
+        short,
+        long,
+        default_value = "10",
+        help = "number of seconds to wait between messages"
+    )]
+    delay: u64,
 }
 
 fn main() -> io::Result<()> {
@@ -440,8 +479,14 @@ fn main() -> io::Result<()> {
                 client.close();
             }
             TurnEvent::PermissionCreated(transport, _peer_addr) => {
-                let data = b"Hello from turn.\n";
-                client.send(transport, peer_addr, data).unwrap();
+                for i in 0..cli.count {
+                    let data = format!("Hello from turn {}s.\n", i * cli.delay);
+                    println!("sending {data:?} to {peer_addr}");
+                    client.send(transport, peer_addr, data).unwrap();
+                    if i + 1 != cli.count {
+                        std::thread::sleep(std::time::Duration::from_secs(cli.delay));
+                    }
+                }
                 client.close();
             }
             TurnEvent::PermissionCreateFailed(transport, peer_addr) => {
