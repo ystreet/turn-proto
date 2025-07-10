@@ -367,15 +367,41 @@ impl From<Transport> for TransportType {
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Cli {
-    #[arg(short, long, value_enum)]
+    #[arg(
+        short,
+        long,
+        value_enum,
+        default_value = "udp",
+        help = "The network transport to use when connecting to the TURN server"
+    )]
     transport: Transport,
-    #[arg(short, long)]
+    #[arg(
+        short,
+        long,
+        required = true,
+        help = "The network address of the turn server to connect to"
+    )]
     server: SocketAddr,
-    #[arg(short, long)]
+    #[arg(
+        short,
+        long,
+        required = true,
+        help = "The user name for access to the TURN server"
+    )]
     user: String,
-    #[arg(short, long)]
+    #[arg(
+        short,
+        long,
+        required = true,
+        help = "The password for access to the TURN server"
+    )]
     password: String,
-    #[arg(short = 'a', long)]
+    #[arg(
+        short = 'a',
+        long,
+        required = true,
+        help = "The network address of the peer to send data to through the TURN server"
+    )]
     peer: SocketAddr,
 }
 
