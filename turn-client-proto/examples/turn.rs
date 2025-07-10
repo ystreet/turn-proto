@@ -141,7 +141,7 @@ impl TurnClientUdp {
             if sent {
                 continue;
             }
-            let _ = inner_s.1.wait_timeout(inner, now - lowest_wait);
+            let _ = inner_s.1.wait_timeout(inner, lowest_wait - now);
         });
         Self { socket, inner }
     }
@@ -287,7 +287,7 @@ impl TurnClientTcp {
             if sent {
                 continue;
             }
-            let _ = inner_s.1.wait_timeout(inner, now - lowest_wait);
+            let _ = inner_s.1.wait_timeout(inner, lowest_wait - now);
         });
         Self { send_sender, inner }
     }
