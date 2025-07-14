@@ -10,15 +10,13 @@ use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use stun_proto::agent::{StunAgent, StunError, Transmit, TransmitBuild};
-use stun_proto::prelude::*;
+use stun_proto::agent::{StunAgent, StunError, Transmit};
 use stun_proto::types::attribute::{
     ErrorCode, Fingerprint, MessageIntegrity, Nonce, Realm, Username, XorMappedAddress,
 };
-use stun_proto::types::data::Data;
 use stun_proto::types::message::{
-    LongTermCredentials, Message, MessageBuilder, MessageClass, MessageIntegrityCredentials,
-    MessageType, TransactionId, BINDING,
+    LongTermCredentials, Message, MessageClass, MessageIntegrityCredentials, MessageType,
+    MessageWrite, MessageWriteExt, MessageWriteVec, TransactionId, BINDING,
 };
 use stun_proto::types::prelude::{Attribute, AttributeFromRaw, AttributeStaticType};
 use stun_proto::types::TransportType;
@@ -49,7 +47,7 @@ pub struct TurnServer {
 
     clients: Vec<Client>,
     nonces: Vec<NonceData>,
-    pending_transmits: VecDeque<Transmit<Data<'static>>>,
+    pending_transmits: VecDeque<Transmit<Vec<u8>>>,
     pending_allocates: VecDeque<PendingClient>,
 
     // username -> password mapping.
@@ -154,7 +152,7 @@ impl TurnServer {
         &mut self,
         transmit: Transmit<T>,
         now: Instant,
-    ) -> Result<Option<Transmit<Data<'static>>>, StunError> {
+    ) -> Result<Option<Transmit<Vec<u8>>>, StunError> {
         if let Some((client, allocation)) =
             self.allocation_from_public_5tuple(transmit.transport, transmit.to, transmit.from)
         {
@@ -198,13 +196,14 @@ impl TurnServer {
                 let mut builder = Message::builder(
                     MessageType::from_class_method(MessageClass::Indication, DATA),
                     transaction_id,
+                    MessageWriteVec::new(),
                 );
                 let peer_address = XorPeerAddress::new(transmit.from, transaction_id);
                 builder.add_attribute(&peer_address).unwrap();
                 let data = AData::new(transmit.data.as_ref());
                 builder.add_attribute(&data).unwrap();
                 // XXX: try to avoid copy?
-                let msg_data = builder.build();
+                let msg_data = builder.finish();
 
                 Ok(Some(Transmit::new(
                     msg_data.into_boxed_slice().into(),
@@ -226,15 +225,15 @@ impl TurnServer {
                         now,
                     ) {
                         Err(builder) => {
-                            let data = builder.build();
+                            let data = builder.finish();
                             return Ok(Some(Transmit::new(
-                                data.into_boxed_slice().into(),
+                                data,
                                 transmit.transport,
                                 transmit.to,
                                 transmit.from,
                             )));
                         }
-                        Ok(Some(transmit)) => Ok(Some(transmit.into_owned())),
+                        Ok(Some(transmit)) => Ok(Some(transmit)),
                         Ok(None) => Ok(None),
                     }
                 }
@@ -284,15 +283,12 @@ impl TurnServer {
                             );
                             return Ok(None);
                         };
-                        Ok(Some(
-                            Transmit::new(
-                                Data::from(channel.data()),
-                                allocation.ttype,
-                                allocation.addr,
-                                existing.peer_addr,
-                            )
-                            .into_owned(),
-                        ))
+                        Ok(Some(Transmit::new(
+                            channel.data().to_vec(),
+                            allocation.ttype,
+                            allocation.addr,
+                            existing.peer_addr,
+                        )))
                     } else {
                         trace!(
                             "No handler for {} bytes over {:?} from {:?}, to {:?}. Ignoring",
@@ -347,7 +343,7 @@ impl TurnServer {
 
     /// Poll for a new Transmit to send over a socket.
     #[tracing::instrument(name = "turn_server_poll_transmit", skip(self))]
-    pub fn poll_transmit(&mut self, now: Instant) -> Option<Transmit<Data<'static>>> {
+    pub fn poll_transmit(&mut self, now: Instant) -> Option<Transmit<Vec<u8>>> {
         if let Some(transmit) = self.pending_transmits.pop_back() {
             return Some(transmit);
         }
@@ -390,6 +386,7 @@ impl TurnServer {
             let mut builder = Message::builder(
                 MessageType::from_class_method(MessageClass::Success, ALLOCATE),
                 transaction_id,
+                MessageWriteVec::new(),
             );
             let relayed_address = XorRelayedAddress::new(socket_addr, transaction_id);
             builder.add_attribute(&relayed_address).unwrap();
@@ -399,17 +396,18 @@ impl TurnServer {
             let mapped_address = XorMappedAddress::new(pending.client.remote_addr, transaction_id);
             builder.add_attribute(&mapped_address).unwrap();
 
-            builder.into_owned()
+            builder
         } else {
             let mut builder = Message::builder(
                 MessageType::from_class_method(MessageClass::Error, ALLOCATE),
                 transaction_id,
+                MessageWriteVec::new(),
             );
             let error = ErrorCode::builder(ErrorCode::INSUFFICIENT_CAPACITY)
                 .build()
                 .unwrap();
             builder.add_attribute(&error).unwrap();
-            builder.into_owned()
+            builder
         };
         builder
             .add_message_integrity(
@@ -417,25 +415,25 @@ impl TurnServer {
                 stun_proto::types::message::IntegrityAlgorithm::Sha1,
             )
             .unwrap();
+        let msg = builder.finish();
 
-        let Ok(transmit) = self.stun.send(builder, to, now) else {
+        let Ok(transmit) = self.stun.send(msg, to, now) else {
             return;
         };
         if socket_addr.is_ok() {
             self.clients.push(pending.client);
         }
-        self.pending_transmits
-            .push_back(transmit_send_build(transmit));
+        self.pending_transmits.push_back(transmit);
     }
 
-    fn validate_stun<'a>(
+    fn validate_stun(
         &mut self,
         msg: &Message<'_>,
         ttype: TransportType,
         from: SocketAddr,
         to: SocketAddr,
         now: Instant,
-    ) -> Result<LongTermCredentials, MessageBuilder<'a>> {
+    ) -> Result<LongTermCredentials, MessageWriteVec> {
         let integrity = msg.attribute::<MessageIntegrity>().ok();
         // TODO: check for SHA256 integrity
         if integrity.is_none() {
@@ -463,14 +461,14 @@ impl TurnServer {
                 "no message-integrity, returning unauthorized with nonce: {}",
                 nonce.nonce
             );
-            let mut builder = Message::builder_error(msg);
+            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let nonce = Nonce::new(&nonce.nonce).unwrap();
             builder.add_attribute(&nonce).unwrap();
             let realm = Realm::new(&self.realm).unwrap();
             builder.add_attribute(&realm).unwrap();
             let error = ErrorCode::builder(ErrorCode::UNAUTHORIZED).build().unwrap();
             builder.add_attribute(&error).unwrap();
-            return Err(builder.into_owned());
+            return Err(builder);
         }
 
         //  o  If the message contains a MESSAGE-INTEGRITY attribute, but is
@@ -484,9 +482,9 @@ impl TurnServer {
         let Some(((username, _realm), nonce)) = username.zip(realm).zip(nonce) else {
             trace!("bad request due to missing username, realm, nonce");
             let error = ErrorCode::builder(ErrorCode::BAD_REQUEST).build().unwrap();
-            let mut builder = Message::builder_error(msg);
+            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             builder.add_attribute(&error).unwrap();
-            return Err(builder.into_owned());
+            return Err(builder);
         };
 
         //   o  If the NONCE is no longer valid, the server MUST generate an error
@@ -522,7 +520,7 @@ impl TurnServer {
         };
 
         if stale_nonce {
-            let mut builder = Message::builder_error(msg);
+            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::STALE_NONCE).build().unwrap();
             builder.add_attribute(&error).unwrap();
             let realm = Realm::new(&self.realm).unwrap();
@@ -530,7 +528,7 @@ impl TurnServer {
             let nonce = Nonce::new(&nonce_value).unwrap();
             builder.add_attribute(&nonce).unwrap();
 
-            return Err(builder.into_owned());
+            return Err(builder);
         };
 
         //   o  Using the password associated with the username in the USERNAME
@@ -551,19 +549,19 @@ impl TurnServer {
             msg.validate_integrity(&MessageIntegrityCredentials::LongTerm(credentials.clone()))
                 .is_err()
         }) {
-            let mut builder = Message::builder_error(msg);
+            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::UNAUTHORIZED).build().unwrap();
             builder.add_attribute(&error).unwrap();
             let realm = Realm::new(&self.realm).unwrap();
             builder.add_attribute(&realm).unwrap();
             let nonce = Nonce::new(&nonce_value).unwrap();
             builder.add_attribute(&nonce).unwrap();
-            return Err(builder.into_owned());
+            return Err(builder);
         }
 
         if let Some(client) = self.client_from_5tuple(ttype, to, from) {
             if client.credentials.username() != username.username() {
-                let mut builder = Message::builder_error(msg);
+                let mut builder = Message::builder_error(msg, MessageWriteVec::new());
                 let error = ErrorCode::builder(ErrorCode::WRONG_CREDENTIALS)
                     .build()
                     .unwrap();
@@ -574,66 +572,67 @@ impl TurnServer {
                         stun_proto::types::message::IntegrityAlgorithm::Sha1,
                     )
                     .unwrap();
-                return Err(builder.into_owned());
+                return Err(builder);
             }
         }
 
         Ok(credentials)
     }
 
-    fn handle_stun_binding<'a>(
+    fn handle_stun_binding(
         &mut self,
         msg: &Message<'_>,
         _ttype: TransportType,
         from: SocketAddr,
         to: SocketAddr,
         now: Instant,
-    ) -> Result<Transmit<Data<'a>>, MessageBuilder<'a>> {
+    ) -> Result<Transmit<Vec<u8>>, MessageWriteVec> {
         let response = if let Some(error_msg) =
-            Message::check_attribute_types(msg, &[Fingerprint::TYPE], &[])
+            Message::check_attribute_types(msg, &[Fingerprint::TYPE], &[], MessageWriteVec::new())
         {
             error_msg
         } else {
-            let mut response = Message::builder_success(msg);
+            let mut response = Message::builder_success(msg, MessageWriteVec::new());
             let xor_addr = XorMappedAddress::new(from, msg.transaction_id());
             response.add_attribute(&xor_addr).unwrap();
             response.add_fingerprint().unwrap();
-            response.into_owned()
+            response
         };
+        let response = response.finish();
 
         let Ok(transmit) = self.stun.send(response, to, now) else {
             error!("Failed to send");
-            let mut response = Message::builder_error(msg);
+            let mut response = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::SERVER_ERROR).build().unwrap();
             response.add_attribute(&error).unwrap();
             response.add_fingerprint().unwrap();
-            return Err(response.into_owned());
+            return Err(response);
         };
 
-        Ok(transmit_send_build(transmit))
+        Ok(transmit)
     }
 
-    fn handle_stun_allocate<'a>(
+    fn handle_stun_allocate(
         &mut self,
         msg: &Message<'_>,
         ttype: TransportType,
         from: SocketAddr,
         to: SocketAddr,
         now: Instant,
-    ) -> Result<(), MessageBuilder<'a>> {
+    ) -> Result<(), MessageWriteVec> {
         let credentials = self.validate_stun(msg, ttype, from, to, now)?;
 
         if let Some(_client) = self.mut_client_from_5tuple(ttype, to, from) {
-            let mut builder = Message::builder_error(msg);
+            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
                 .build()
                 .unwrap();
             builder.add_attribute(&error).unwrap();
-            return Err(builder.into_owned());
+            return Err(builder);
         };
 
         let Ok(requested_transport) = msg.attribute::<RequestedTransport>() else {
-            let mut builder = Message::builder_error(msg);
+            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::BAD_REQUEST).build().unwrap();
             builder.add_attribute(&error).unwrap();
             builder
@@ -642,11 +641,11 @@ impl TurnServer {
                     stun_proto::types::message::IntegrityAlgorithm::Sha1,
                 )
                 .unwrap();
-            return Err(builder.into_owned());
+            return Err(builder);
         };
 
         if requested_transport.protocol() != RequestedTransport::UDP {
-            let mut builder = Message::builder_error(msg);
+            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::UNSUPPORTED_TRANSPORT_PROTOCOL)
                 .build()
                 .unwrap();
@@ -657,7 +656,7 @@ impl TurnServer {
                     stun_proto::types::message::IntegrityAlgorithm::Sha1,
                 )
                 .unwrap();
-            return Err(builder.into_owned());
+            return Err(builder);
         }
 
         // TODO: DONT-FRAGMENT
@@ -684,23 +683,23 @@ impl TurnServer {
         Ok(())
     }
 
-    fn handle_stun_refresh<'a>(
+    fn handle_stun_refresh(
         &mut self,
         msg: &Message<'_>,
         ttype: TransportType,
         from: SocketAddr,
         to: SocketAddr,
         now: Instant,
-    ) -> Result<Transmit<Data<'static>>, MessageBuilder<'a>> {
+    ) -> Result<Transmit<Vec<u8>>, MessageWriteVec> {
         let _credentials = self.validate_stun(msg, ttype, from, to, now)?;
 
         let Some(client) = self.mut_client_from_5tuple(ttype, to, from) else {
-            let mut builder = Message::builder_error(msg);
+            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
                 .build()
                 .unwrap();
             builder.add_attribute(&error).unwrap();
-            return Err(builder.into_owned());
+            return Err(builder);
         };
 
         // TODO: proper lifetime handling
@@ -720,7 +719,7 @@ impl TurnServer {
             client.credentials.clone()
         };
 
-        let mut builder = Message::builder_success(msg);
+        let mut builder = Message::builder_success(msg, MessageWriteVec::new());
         let lifetime = Lifetime::new(request_lifetime);
         builder.add_attribute(&lifetime).unwrap();
         builder
@@ -729,47 +728,48 @@ impl TurnServer {
                 stun_proto::types::message::IntegrityAlgorithm::Sha1,
             )
             .unwrap();
-        let Ok(transmit) = self.stun.send(builder, from, now) else {
+        let response = builder.finish();
+        let Ok(transmit) = self.stun.send(response, from, now) else {
             error!("Failed to send");
-            let mut response = Message::builder_error(msg);
+            let mut response = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::SERVER_ERROR).build().unwrap();
             response.add_attribute(&error).unwrap();
             response.add_fingerprint().unwrap();
-            return Err(response.into_owned());
+            return Err(response);
         };
 
         info!("Successfully refreshed allocation {ttype}, from {from} to {to}");
 
-        Ok(transmit_send_build(transmit))
+        Ok(transmit)
     }
 
-    fn handle_stun_create_permission<'a>(
+    fn handle_stun_create_permission(
         &mut self,
         msg: &Message<'_>,
         ttype: TransportType,
         from: SocketAddr,
         to: SocketAddr,
         now: Instant,
-    ) -> Result<Transmit<Data<'static>>, MessageBuilder<'a>> {
+    ) -> Result<Transmit<Vec<u8>>, MessageWriteVec> {
         let credentials = self.validate_stun(msg, ttype, from, to, now)?;
 
         let Some(client) = self.mut_client_from_5tuple(ttype, to, from) else {
-            let mut builder = Message::builder_error(msg);
+            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
                 .build()
                 .unwrap();
             builder.add_attribute(&error).unwrap();
-            return Err(builder.into_owned());
+            return Err(builder);
         };
 
         let mut peer_addresses = vec![];
         let mut at_least_one_peer_addr = false;
-        for peer_addr in msg
+        for (_offset, peer_addr) in msg
             .iter_attributes()
-            .filter(|a| a.get_type() == XorPeerAddress::TYPE)
+            .filter(|(_offset, a)| a.get_type() == XorPeerAddress::TYPE)
         {
             let Ok(peer_addr) = XorPeerAddress::from_raw(peer_addr) else {
-                let mut builder = Message::builder_error(msg);
+                let mut builder = Message::builder_error(msg, MessageWriteVec::new());
                 let error = ErrorCode::builder(ErrorCode::BAD_REQUEST).build().unwrap();
                 builder.add_attribute(&error).unwrap();
                 builder
@@ -778,7 +778,7 @@ impl TurnServer {
                         stun_proto::types::message::IntegrityAlgorithm::Sha1,
                     )
                     .unwrap();
-                return Err(builder.into_owned());
+                return Err(builder);
             };
             at_least_one_peer_addr = true;
             let peer_addr = peer_addr.addr(msg.transaction_id());
@@ -796,7 +796,7 @@ impl TurnServer {
             if now > alloc.expires_at {
                 trace!("allocation has expired");
                 // allocation has expired
-                let mut builder = Message::builder_error(msg);
+                let mut builder = Message::builder_error(msg, MessageWriteVec::new());
                 let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
                     .build()
                     .unwrap();
@@ -807,7 +807,7 @@ impl TurnServer {
                         stun_proto::types::message::IntegrityAlgorithm::Sha1,
                     )
                     .unwrap();
-                return Err(builder.into_owned());
+                return Err(builder);
             }
 
             // TODO: support TCP allocations
@@ -828,7 +828,7 @@ impl TurnServer {
         }
 
         if !at_least_one_peer_addr {
-            let mut builder = Message::builder_error(msg);
+            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::BAD_REQUEST).build().unwrap();
             builder.add_attribute(&error).unwrap();
             builder
@@ -837,54 +837,55 @@ impl TurnServer {
                     stun_proto::types::message::IntegrityAlgorithm::Sha1,
                 )
                 .unwrap();
-            return Err(builder.into_owned());
+            return Err(builder);
         }
 
-        let mut builder = Message::builder_success(msg);
+        let mut builder = Message::builder_success(msg, MessageWriteVec::new());
         builder
             .add_message_integrity(
                 &MessageIntegrityCredentials::LongTerm(credentials),
                 stun_proto::types::message::IntegrityAlgorithm::Sha1,
             )
             .unwrap();
+        let response = builder.finish();
 
-        let Ok(transmit) = self.stun.send(builder, from, now) else {
+        let Ok(transmit) = self.stun.send(response, from, now) else {
             error!("Failed to send");
-            let mut response = Message::builder_error(msg);
+            let mut response = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::SERVER_ERROR).build().unwrap();
             response.add_attribute(&error).unwrap();
             response.add_fingerprint().unwrap();
-            return Err(response.into_owned());
+            return Err(response);
         };
         debug!(
             "allocation {ttype} from {from} to {to} successfully created permission for {:?}",
             peer_addresses
         );
 
-        Ok(transmit_send_build(transmit))
+        Ok(transmit)
     }
 
-    fn handle_stun_channel_bind<'a>(
+    fn handle_stun_channel_bind(
         &mut self,
         msg: &Message<'_>,
         ttype: TransportType,
         from: SocketAddr,
         to: SocketAddr,
         now: Instant,
-    ) -> Result<Transmit<Data<'static>>, MessageBuilder<'a>> {
+    ) -> Result<Transmit<Vec<u8>>, MessageWriteVec> {
         let credentials = self.validate_stun(msg, ttype, from, to, now)?;
 
         let Some(client) = self.mut_client_from_5tuple(ttype, to, from) else {
-            let mut builder = Message::builder_error(msg);
+            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
                 .build()
                 .unwrap();
             builder.add_attribute(&error).unwrap();
-            return Err(builder.into_owned());
+            return Err(builder);
         };
 
         let bad_request = move |msg: &Message<'_>, credentials: LongTermCredentials| {
-            let mut builder = Message::builder_error(msg);
+            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::BAD_REQUEST).build().unwrap();
             builder.add_attribute(&error).unwrap();
             builder
@@ -893,7 +894,7 @@ impl TurnServer {
                     stun_proto::types::message::IntegrityAlgorithm::Sha1,
                 )
                 .unwrap();
-            builder.into_owned()
+            builder
         };
 
         let peer_addr = msg
@@ -910,18 +911,18 @@ impl TurnServer {
             .iter_mut()
             .find(|allocation| allocation.addr.is_ipv4() == peer_addr.is_ipv4())
         else {
-            let mut builder = Message::builder_error(msg);
+            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
                 .build()
                 .unwrap();
             builder.add_attribute(&error).unwrap();
-            return Err(builder.into_owned());
+            return Err(builder);
         };
 
         if now > alloc.expires_at {
             trace!("allocation has expired");
             // allocation has expired
-            let mut builder = Message::builder_error(msg);
+            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
                 .build()
                 .unwrap();
@@ -932,7 +933,7 @@ impl TurnServer {
                     stun_proto::types::message::IntegrityAlgorithm::Sha1,
                 )
                 .unwrap();
-            return Err(builder.into_owned());
+            return Err(builder);
         }
 
         let mut existing = alloc.channels.iter_mut().find(|channel| {
@@ -985,26 +986,27 @@ impl TurnServer {
             });
         }
 
-        let mut builder = Message::builder_success(msg);
+        let mut builder = Message::builder_success(msg, MessageWriteVec::new());
         builder
             .add_message_integrity(
                 &MessageIntegrityCredentials::LongTerm(credentials),
                 stun_proto::types::message::IntegrityAlgorithm::Sha1,
             )
             .unwrap();
+        let response = builder.finish();
 
-        let Ok(transmit) = self.stun.send(builder, from, now) else {
+        let Ok(transmit) = self.stun.send(response, from, now) else {
             error!("Failed to send");
-            let mut response = Message::builder_error(msg);
+            let mut response = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::SERVER_ERROR).build().unwrap();
             response.add_attribute(&error).unwrap();
             response.add_fingerprint().unwrap();
-            return Err(response.into_owned());
+            return Err(response);
         };
 
         debug!("allocation {ttype} from {from} to {to} successfully created channel {channel_no} for {:?}", peer_addr.ip());
 
-        Ok(transmit_send_build(transmit))
+        Ok(transmit)
     }
 
     fn handle_stun_send_indication<'a>(
@@ -1014,7 +1016,7 @@ impl TurnServer {
         from: SocketAddr,
         to: SocketAddr,
         now: Instant,
-    ) -> Result<Transmit<Data<'a>>, ()> {
+    ) -> Result<Transmit<Vec<u8>>, ()> {
         let peer_address = msg.attribute::<XorPeerAddress>().map_err(|_| ())?;
         let peer_address = peer_address.addr(msg.transaction_id());
 
@@ -1057,12 +1059,11 @@ impl TurnServer {
         let data = msg.attribute::<AData>().map_err(|_| ())?;
         trace!("have {} to send to {:?}", data.data().len(), peer_address);
         Ok(Transmit::new(
-            Data::from(data.data()),
+            data.data().to_vec(),
             permission.ttype,
             alloc.addr,
             peer_address,
-        )
-        .into_owned())
+        ))
         // XXX: copies the data.  Try to figure out a way to not do this
         /*
         self.pending_transmits.push_back(Transmit::new_owned(
@@ -1082,7 +1083,7 @@ impl TurnServer {
         from: SocketAddr,
         to: SocketAddr,
         now: Instant,
-    ) -> Result<Option<Transmit<Data<'a>>>, MessageBuilder<'a>> {
+    ) -> Result<Option<Transmit<Vec<u8>>>, MessageWriteVec> {
         trace!("received STUN message {msg}");
         let ret = if msg.has_class(stun_proto::types::message::MessageClass::Request) {
             match msg.method() {
@@ -1102,10 +1103,10 @@ impl TurnServer {
                     .handle_stun_channel_bind(msg, ttype, from, to, now)
                     .map(Some),
                 _ => {
-                    let mut builder = Message::builder_error(msg);
+                    let mut builder = Message::builder_error(msg, MessageWriteVec::new());
                     let error = ErrorCode::builder(ErrorCode::BAD_REQUEST).build().unwrap();
                     builder.add_attribute(&error).unwrap();
-                    Err(builder.into_owned())
+                    Err(builder)
                 }
             }
         } else if msg.has_class(stun_proto::types::message::MessageClass::Indication) {
@@ -1278,17 +1279,4 @@ struct Channel {
     peer_transport: TransportType,
 
     expires_at: Instant,
-}
-
-fn transmit_send_build<T: DelayedTransmitBuild>(
-    transmit: TransmitBuild<T>,
-) -> Transmit<Data<'static>> {
-    let data = transmit.data.build().into_boxed_slice();
-    Transmit::new(
-        Data::from(data),
-        transmit.transport,
-        transmit.from,
-        transmit.to,
-    )
-    .into_owned()
 }

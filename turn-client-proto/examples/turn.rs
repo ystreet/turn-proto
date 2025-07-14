@@ -37,9 +37,11 @@
 #![cfg(not(tarpaulin))]
 
 use turn_client_proto::types::TurnCredentials;
-use turn_client_proto::{CreatePermissionError, TurnClient, TurnEvent, TurnPollRet, TurnRecvRet};
+use turn_client_proto::{
+    CreatePermissionError, DelayedTransmitBuild, TurnClient, TurnEvent, TurnPollRet, TurnRecvRet,
+};
 
-use stun_proto::agent::{DelayedTransmitBuild, StunError, Transmit};
+use stun_proto::agent::{StunError, Transmit};
 use turn_types::stun::data::Data;
 use turn_types::stun::TransportType;
 
@@ -363,7 +365,7 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for TurnClientTcp {
                 .client
                 .send_to(transport, peer_addr, data, Instant::now())?;
             Transmit::new(
-                Data::from(transmit.data.build().as_ref()).into_owned(),
+                Data::from(transmit.data.build().into_boxed_slice()).into_owned(),
                 transmit.transport,
                 transmit.from,
                 transmit.to,
