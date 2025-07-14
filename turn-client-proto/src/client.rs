@@ -1527,22 +1527,34 @@ pub struct DelayedChannelSend<T: AsRef<[u8]> + std::fmt::Debug> {
     channel_id: u16,
 }
 
+impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedChannelSend<T> {
+    fn write_header_into(&self, len: u16, dest: &mut [u8]) {
+        BigEndian::write_u16(&mut dest[..2], self.channel_id);
+        BigEndian::write_u16(&mut dest[2..4], len);
+    }
+}
+
 impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedChannelSend<T> {
     fn len(&self) -> usize {
         self.data.as_ref().len() + 4
     }
 
     fn build(self) -> Vec<u8> {
-        let mut data = vec![0; self.data.as_ref().len() + 4];
-        self.write_into(&mut data);
-        data
+        let data = self.data.as_ref();
+        let data_len = data.len();
+        let mut header = [0; 4];
+        self.write_header_into(data_len as u16, &mut header);
+        let mut out = Vec::with_capacity(4 + data_len);
+        out.extend(header.as_slice());
+        out.extend_from_slice(data);
+        out
     }
 
     fn write_into(self, dest: &mut [u8]) -> usize {
-        let data_len = self.data.as_ref().len();
-        BigEndian::write_u16(&mut dest[..2], self.channel_id);
-        BigEndian::write_u16(&mut dest[2..4], data_len as u16);
-        dest[4..].copy_from_slice(self.data.as_ref());
+        let data = self.data.as_ref();
+        let data_len = data.len();
+        self.write_header_into(data_len as u16, dest);
+        dest[4..4 + data_len].copy_from_slice(data);
         data_len + 4
     }
 }
