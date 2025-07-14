@@ -12,10 +12,7 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use byteorder::{BigEndian, ByteOrder};
-use stun_proto::agent::{
-    DelayedTransmitBuild, HandleStunReply, StunAgent, StunAgentPollRet, StunError, Transmit,
-    TransmitBuild,
-};
+use stun_proto::agent::{HandleStunReply, StunAgent, StunAgentPollRet, StunError, Transmit};
 use stun_proto::types::attribute::{ErrorCode, Nonce, Realm, Username};
 use stun_proto::types::data::Data;
 use stun_proto::types::message::{
@@ -32,6 +29,8 @@ use turn_types::attribute::{
     ChannelNumber, DontFragment, Lifetime, RequestedTransport, XorPeerAddress, XorRelayedAddress,
 };
 use turn_types::message::*;
+use turn_types::stun::message::{MessageWriteMutSlice, MessageWriteVec};
+use turn_types::stun::prelude::{MessageWrite, MessageWriteExt};
 use turn_types::TurnCredentials;
 
 use tracing::{error, info, trace, warn};
@@ -293,7 +292,7 @@ impl TurnClient {
                             Duration::ZERO
                         };
                     if alloc.pending_refresh.is_none() && expires_at <= now {
-                        let mut refresh = Message::builder_request(REFRESH);
+                        let mut refresh = Message::builder_request(REFRESH, MessageWriteVec::new());
                         let transaction_id = refresh.transaction_id();
                         let lifetime = Lifetime::new(1800);
                         refresh.add_attribute(&lifetime).unwrap();
@@ -310,6 +309,7 @@ impl TurnClient {
                             )
                             .unwrap();
                         let remote_addr = self.stun_agent.remote_addr().unwrap();
+                        let refresh = refresh.finish();
                         let transmit = self
                             .stun_agent
                             .send_request(refresh, remote_addr, now)
@@ -461,7 +461,7 @@ impl TurnClient {
         if let Some(transmit) = self
             .stun_agent
             .poll_transmit(now)
-            .map(|transmit| transmit_send(&transmit))
+            .map(|transmit| transmit.reinterpret_data(|data| Data::from(data).into_owned()))
         {
             return Some(transmit);
         }
@@ -492,7 +492,7 @@ impl TurnClient {
     }
 
     fn send_initial_request(&mut self, now: Instant) -> (Transmit<Data<'static>>, TransactionId) {
-        let mut msg = Message::builder_request(ALLOCATE);
+        let mut msg = Message::builder_request(ALLOCATE, MessageWriteVec::new());
         let lifetime = Lifetime::new(3600);
         msg.add_attribute(&lifetime).unwrap();
         let requested = RequestedTransport::new(RequestedTransport::UDP);
@@ -500,9 +500,13 @@ impl TurnClient {
         let dont_fragment = DontFragment::new();
         msg.add_attribute(&dont_fragment).unwrap();
         let transaction_id = msg.transaction_id();
+        let msg = msg.finish();
 
         let remote_addr = self.stun_agent.remote_addr().unwrap();
-        let transmit = self.stun_agent.send_request(msg, remote_addr, now).unwrap();
+        let transmit = self
+            .stun_agent
+            .send_request(&msg, remote_addr, now)
+            .unwrap();
         (transmit.into_owned(), transaction_id)
     }
 
@@ -512,7 +516,7 @@ impl TurnClient {
         nonce: &str,
         now: Instant,
     ) -> (Transmit<Data<'static>>, TransactionId) {
-        let mut builder = Message::builder_request(ALLOCATE);
+        let mut builder = Message::builder_request(ALLOCATE, MessageWriteVec::new());
         let requested_transport = RequestedTransport::new(RequestedTransport::UDP);
         builder.add_attribute(&requested_transport).unwrap();
         let username = Username::new(credentials.username()).unwrap();
@@ -528,9 +532,10 @@ impl TurnClient {
             )
             .unwrap();
         let transaction_id = builder.transaction_id();
+        let msg = builder.finish();
         let transmit = self
             .stun_agent
-            .send_request(builder, self.stun_agent.remote_addr().unwrap(), now)
+            .send_request(&msg, self.stun_agent.remote_addr().unwrap(), now)
             .unwrap();
         (transmit.into_owned(), transaction_id)
     }
@@ -675,7 +680,10 @@ impl TurnClient {
                 let msg = match self.stun_agent.handle_stun(msg, transmit.from) {
                     HandleStunReply::Drop => return TurnRecvRet::Handled,
                     HandleStunReply::IncomingStun(_) => return TurnRecvRet::Ignored(transmit),
-                    HandleStunReply::StunResponse(msg) => msg,
+                    HandleStunReply::ValidatedStunResponse(msg) => msg,
+                    HandleStunReply::UnvalidatedStunResponse(_msg) => {
+                        return TurnRecvRet::Ignored(transmit)
+                    }
                 };
                 if !msg.is_response() || &msg.transaction_id() != transaction_id {
                     return TurnRecvRet::Ignored(transmit);
@@ -766,7 +774,10 @@ impl TurnClient {
                 let msg = match self.stun_agent.handle_stun(msg, transmit.from) {
                     HandleStunReply::Drop => return TurnRecvRet::Handled,
                     HandleStunReply::IncomingStun(_) => return TurnRecvRet::Ignored(transmit),
-                    HandleStunReply::StunResponse(msg) => msg,
+                    HandleStunReply::ValidatedStunResponse(msg) => msg,
+                    HandleStunReply::UnvalidatedStunResponse(_msg) => {
+                        return TurnRecvRet::Ignored(transmit)
+                    }
                 };
                 if !msg.is_response() || &msg.transaction_id() != transaction_id {
                     return TurnRecvRet::Ignored(transmit);
@@ -970,7 +981,10 @@ impl TurnClient {
         let msg = match self.stun_agent.handle_stun(msg, from) {
             HandleStunReply::Drop => return InternalHandleStunReply::Ignored,
             HandleStunReply::IncomingStun(msg) => msg,
-            HandleStunReply::StunResponse(msg) => msg,
+            HandleStunReply::ValidatedStunResponse(msg) => msg,
+            HandleStunReply::UnvalidatedStunResponse(_msg) => {
+                return InternalHandleStunReply::Ignored;
+            }
         };
         if msg.is_response() {
             let Ok(_) = msg.validate_integrity(&MessageIntegrityCredentials::LongTerm(credentials))
@@ -1117,7 +1131,7 @@ impl TurnClient {
 
     /// Remove the allocation/s on the server.
     pub fn delete(&mut self, now: Instant) -> Option<Transmit<Data<'static>>> {
-        let mut builder = Message::builder_request(REFRESH);
+        let mut builder = Message::builder_request(REFRESH, MessageWriteVec::new());
         let transaction_id = builder.transaction_id();
 
         let AuthState::Authenticated { credentials, nonce } = &self.state else {
@@ -1140,10 +1154,11 @@ impl TurnClient {
                 stun_proto::types::message::IntegrityAlgorithm::Sha1,
             )
             .unwrap();
+        let msg = builder.finish();
 
         let transmit = self
             .stun_agent
-            .send_request(builder, self.stun_agent.remote_addr().unwrap(), now)
+            .send_request(&msg, self.stun_agent.remote_addr().unwrap(), now)
             .unwrap();
         info!("Deleting allocations");
         for alloc in self.allocations.iter_mut() {
@@ -1163,7 +1178,7 @@ impl TurnClient {
         peer_addr: IpAddr,
         now: Instant,
     ) -> (Transmit<Data<'static>>, TransactionId) {
-        let mut builder = Message::builder_request(CREATE_PERMISSION);
+        let mut builder = Message::builder_request(CREATE_PERMISSION, MessageWriteVec::new());
         let transaction_id = builder.transaction_id();
 
         let xor_peer_address = XorPeerAddress::new(SocketAddr::new(peer_addr, 0), transaction_id);
@@ -1182,8 +1197,9 @@ impl TurnClient {
                 stun_proto::types::message::IntegrityAlgorithm::Sha1,
             )
             .unwrap();
+        let msg = builder.finish();
         let transmit = stun_agent
-            .send_request(builder, stun_agent.remote_addr().unwrap(), now)
+            .send_request(&msg, stun_agent.remote_addr().unwrap(), now)
             .unwrap();
         (transmit.into_owned(), transaction_id)
     }
@@ -1257,7 +1273,7 @@ impl TurnClient {
         peer_addr: SocketAddr,
         now: Instant,
     ) -> (Transmit<Data<'static>>, TransactionId) {
-        let mut builder = Message::builder_request(CHANNEL_BIND);
+        let mut builder = Message::builder_request(CHANNEL_BIND, MessageWriteVec::new());
         let transaction_id = builder.transaction_id();
         let channel_no = ChannelNumber::new(id);
         builder.add_attribute(&channel_no).unwrap();
@@ -1277,9 +1293,10 @@ impl TurnClient {
                 stun_proto::types::message::IntegrityAlgorithm::Sha1,
             )
             .unwrap();
+        let msg = builder.finish();
 
         let transmit = stun_agent
-            .send_request(builder, stun_agent.remote_addr().unwrap(), now)
+            .send_request(&msg, stun_agent.remote_addr().unwrap(), now)
             .unwrap();
         (transmit.into_owned(), transaction_id)
     }
@@ -1447,6 +1464,66 @@ impl TurnClient {
     }
 }
 
+/// A piece of data that needs to be built before it can be transmitted.
+#[derive(Debug)]
+pub struct TransmitBuild<T: DelayedTransmitBuild + std::fmt::Debug> {
+    /// The data blob
+    pub data: T,
+    /// The transport for the transmission
+    pub transport: TransportType,
+    /// The source address of the transmission
+    pub from: SocketAddr,
+    /// The destination address of the transmission
+    pub to: SocketAddr,
+}
+
+impl<T: DelayedTransmitBuild + std::fmt::Debug> TransmitBuild<T> {
+    /// Construct a new [`Transmit`] with the specifid data and 5-tuple.
+    pub fn new(data: T, transport: TransportType, from: SocketAddr, to: SocketAddr) -> Self {
+        Self {
+            data,
+            transport,
+            from,
+            to,
+        }
+    }
+
+    /// Write the [`TransmitBuild`] to a new `Vec<u8>`.
+    pub fn build(self) -> Transmit<Vec<u8>> {
+        Transmit {
+            data: self.data.build(),
+            transport: self.transport,
+            from: self.from,
+            to: self.to,
+        }
+    }
+
+    /// Write the [`TransmitBuild`] into the provided destination buffer.
+    pub fn write_into(self, dest: &mut [u8]) -> Transmit<&mut [u8]> {
+        let len = self.data.write_into(dest);
+        Transmit {
+            data: &mut dest[..len],
+            transport: self.transport,
+            from: self.from,
+            to: self.to,
+        }
+    }
+}
+
+/// A trait for delaying building a byte sequence for transmission
+pub trait DelayedTransmitBuild {
+    /// Write the packet in to a new Vec.
+    fn build(self) -> Vec<u8>;
+    /// The length of any generated data
+    fn len(&self) -> usize;
+    /// Whether the resulting data would be empty
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// Write the data into a provided output buffer. Returns the number of bytes written.
+    fn write_into(self, data: &mut [u8]) -> usize;
+}
+
 /// A `Transmit` where the data is some subset of the provided region.
 #[derive(Debug)]
 pub struct DelayedTransmit<T: AsRef<[u8]> + std::fmt::Debug> {
@@ -1497,12 +1574,13 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedMessageSe
                 SEND,
             ),
             transaction_id,
+            MessageWriteVec::with_capacity(self.len()),
         );
         let xor_peer_address = XorPeerAddress::new(self.peer_addr, transaction_id);
         msg.add_attribute(&xor_peer_address).unwrap();
         let data = AData::new(self.data.as_ref());
         msg.add_attribute(&data).unwrap();
-        msg.build()
+        msg.finish()
     }
 
     fn write_into(self, dest: &mut [u8]) -> usize {
@@ -1513,12 +1591,13 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedMessageSe
                 SEND,
             ),
             transaction_id,
+            MessageWriteMutSlice::new(dest),
         );
         let xor_peer_address = XorPeerAddress::new(self.peer_addr, transaction_id);
         msg.add_attribute(&xor_peer_address).unwrap();
         let data = AData::new(self.data.as_ref());
         msg.add_attribute(&data).unwrap();
-        msg.write_into(dest)
+        msg.finish()
     }
 }
 
@@ -1593,22 +1672,11 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedMessageOr
     }
 }
 
-fn transmit_send<T: AsRef<[u8]> + std::fmt::Debug>(
-    transmit: &Transmit<T>,
-) -> Transmit<Data<'static>> {
-    Transmit::new(
-        Data::from(transmit.data.as_ref()),
-        transmit.transport,
-        transmit.from,
-        transmit.to,
-    )
-    .into_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use stun_proto::types::{
         attribute::{MessageIntegrity, MessageIntegritySha256, XorMappedAddress},
+        message::Method,
         prelude::AttributeStaticType,
     };
 
@@ -1639,17 +1707,12 @@ mod tests {
         assert_eq!(client.relayed_addresses().count(), 0);
     }
 
-    fn transmit_send_build<T: DelayedTransmitBuild>(
+    fn transmit_send_build<T: DelayedTransmitBuild + std::fmt::Debug>(
         transmit: TransmitBuild<T>,
     ) -> Transmit<Data<'static>> {
-        let data = transmit.data.build().into_boxed_slice();
-        Transmit::new(
-            Data::from(data),
-            transmit.transport,
-            transmit.from,
-            transmit.to,
-        )
-        .into_owned()
+        transmit
+            .build()
+            .reinterpret_data(|data| Data::from(data.into_boxed_slice()))
     }
 
     #[test]
@@ -1824,7 +1887,10 @@ mod tests {
             assert!(msg.has_attribute(Lifetime::TYPE));
             assert!(msg.has_attribute(XorMappedAddress::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
-            self.client.recv(transmit, now);
+            assert!(matches!(
+                self.client.recv(transmit, now),
+                TurnRecvRet::Handled
+            ));
             assert!(self
                 .client
                 .relayed_addresses()
@@ -1855,7 +1921,10 @@ mod tests {
             assert!(msg.has_class(stun_proto::types::message::MessageClass::Success));
             assert!(msg.has_attribute(Lifetime::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
-            self.client.recv(transmit, now);
+            assert!(matches!(
+                self.client.recv(transmit, now),
+                TurnRecvRet::Handled
+            ));
             assert!(self
                 .client
                 .relayed_addresses()
@@ -1903,7 +1972,10 @@ mod tests {
             let Ok(Some(transmit)) = self.server.recv(transmit, now) else {
                 unreachable!();
             };
-            self.client.recv(transmit, now);
+            assert!(matches!(
+                self.client.recv(transmit, now),
+                TurnRecvRet::Handled
+            ));
             self.validate_client_permission_state(now);
         }
 
@@ -1935,16 +2007,15 @@ mod tests {
                 unreachable!();
             };
             self.client.recv(transmit, now);
-            let Some(permision) = self
+            let permision = self
                 .client
                 .permission(TransportType::Udp, self.peer_addr.ip())
-            else {
-                unreachable!();
-            };
+                .unwrap();
             assert_eq!(permision.expires_at, now + PERMISSION_DURATION);
-            let Some(channel) = self.client.channel(TransportType::Udp, self.peer_addr) else {
-                unreachable!();
-            };
+            let channel = self
+                .client
+                .channel(TransportType::Udp, self.peer_addr)
+                .unwrap();
             assert_eq!(channel.expires_at, now + CHANNEL_DURATION);
         }
 
@@ -2262,12 +2333,13 @@ mod tests {
         assert_eq!(permission_ip, test.peer_addr.ip());
 
         let mut msg = Message::builder(
-            MessageType::from_class_method(MessageClass::Indication, 0x1432),
+            MessageType::from_class_method(MessageClass::Indication, Method::new(0x1432)),
             TransactionId::generate(),
+            MessageWriteVec::new(),
         );
         let realm = Realm::new("realm").unwrap();
         msg.add_attribute(&realm).unwrap();
-        let data = msg.build();
+        let data = msg.finish();
         test.sendrecv_data_channel_with_data(&data, &data, now);
     }
 

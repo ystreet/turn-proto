@@ -24,8 +24,14 @@ mod client;
 
 pub use client::{
     BindChannelError, CreatePermissionError, DelayedChannelSend, DelayedMessageOrChannelSend,
-    DelayedMessageSend, TurnClient, TurnEvent, TurnPollRet, TurnRecvRet,
+    DelayedMessageSend, DelayedTransmitBuild, TransmitBuild, TurnClient, TurnEvent, TurnPollRet,
+    TurnRecvRet,
 };
+
+/// Public prelude
+pub mod prelude {
+    pub use crate::client::DelayedTransmitBuild;
+}
 
 #[cfg(test)]
 mod tests {

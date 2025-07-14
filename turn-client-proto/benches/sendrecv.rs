@@ -153,7 +153,7 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
             BenchmarkId::new("Indication/Build", size),
             &data,
             |b, data| {
-                b.iter_with_large_drop(|| {
+                b.iter(|| {
                     let transmit = test
                         .client
                         .send_to(TransportType::Udp, test.peer_addr, data, now)
@@ -198,7 +198,7 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
             })
         });
         group.bench_with_input(BenchmarkId::new("Channel/Build", size), &data, |b, data| {
-            b.iter_with_large_drop(|| {
+            b.iter(|| {
                 let transmit = test
                     .client
                     .send_to(TransportType::Udp, test.peer_addr, data, now)
@@ -233,9 +233,18 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
         let data = vec![9; *size];
         let transmit = Transmit::new(data, TransportType::Udp, test.peer_addr, test.relayed_addr);
         let transmit = test.server.recv(transmit, now).unwrap().unwrap();
-        assert!(
-            matches!(test.client.recv(Transmit::new(transmit.data.clone(), transmit.transport, transmit.from, transmit.to), now), TurnRecvRet::PeerData { data: _, transport, peer} if transport == TransportType::Udp && peer == test.peer_addr)
-        );
+        assert!(matches!(
+            test.client.recv(
+                Transmit::new(
+                    transmit.data.clone(),
+                    transmit.transport,
+                    transmit.from,
+                    transmit.to
+                ),
+                now
+            ),
+            TurnRecvRet::PeerData { data: _, transport: TransportType::Udp, peer } if peer == test.peer_addr,
+        ));
         group.bench_with_input(
             BenchmarkId::new("Indication", size),
             &transmit,
@@ -263,9 +272,18 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
         let data = vec![9; *size];
         let transmit = Transmit::new(data, TransportType::Udp, test.peer_addr, test.relayed_addr);
         let transmit = test.server.recv(transmit, now).unwrap().unwrap();
-        assert!(
-            matches!(test.client.recv(Transmit::new(transmit.data.clone(), transmit.transport, transmit.from, transmit.to), now), TurnRecvRet::PeerData { data: _, transport, peer} if transport == TransportType::Udp && peer == test.peer_addr)
-        );
+        assert!(matches!(
+            test.client.recv(
+                Transmit::new(
+                    transmit.data.clone(),
+                    transmit.transport,
+                    transmit.from,
+                    transmit.to
+                ),
+                now
+            ),
+            TurnRecvRet::PeerData { data: _, transport: TransportType::Udp, peer } if peer == test.peer_addr,
+        ));
         group.bench_with_input(
             BenchmarkId::new("Channel", size),
             &transmit,
