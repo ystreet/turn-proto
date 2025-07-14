@@ -243,7 +243,7 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
                 ),
                 now
             ),
-            TurnRecvRet::PeerData { data: _, transport: TransportType::Udp, peer } if peer == test.peer_addr,
+            TurnRecvRet::PeerData(peer) if peer.transport == TransportType::Udp && peer.peer == test.peer_addr
         ));
         group.bench_with_input(
             BenchmarkId::new("Indication", size),
@@ -282,7 +282,7 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
                 ),
                 now
             ),
-            TurnRecvRet::PeerData { data: _, transport: TransportType::Udp, peer } if peer == test.peer_addr,
+            TurnRecvRet::PeerData(peer) if peer.transport == TransportType::Udp && peer.peer == test.peer_addr
         ));
         group.bench_with_input(
             BenchmarkId::new("Channel", size),
