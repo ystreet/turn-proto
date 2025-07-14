@@ -135,15 +135,46 @@ pub enum TurnRecvRet<T: AsRef<[u8]> + std::fmt::Debug> {
     /// The data is not directed at this [TurnClient].
     Ignored(Transmit<T>),
     /// Data has been received from a peer of the TURN server.
-    // TODO: try to return existing data without a copy
-    PeerData {
+    PeerData(TurnPeerData<T>),
+}
+
+#[derive(Debug)]
+pub struct TurnPeerData<T: AsRef<[u8]> + std::fmt::Debug> {
+    /// The data received.
+    data: DataRangeOrOwned<T>,
+    /// The transport the data was received over.
+    pub transport: TransportType,
+    /// The address of the peer that sent the data.
+    pub peer: SocketAddr,
+}
+
+/// A slice range or an owned piece of data.
+#[derive(Debug)]
+pub enum DataRangeOrOwned<T: AsRef<[u8]> + std::fmt::Debug> {
+    /// A range of a provided data slice.
+    Range {
         /// The data received.
-        data: Vec<u8>,
-        /// The transport the data was received over.
-        transport: TransportType,
-        /// The address of the peer that sent the data.
-        peer: SocketAddr,
+        data: T,
+        /// The range of data to access.
+        range: Range<usize>,
     },
+    /// An owned piece of data.
+    Owned(Vec<u8>),
+}
+
+impl<T: AsRef<[u8]> + std::fmt::Debug> TurnPeerData<T> {
+    pub fn data(&self) -> &[u8] {
+        self.data.as_ref()
+    }
+}
+
+impl<T: AsRef<[u8]> + std::fmt::Debug> AsRef<[u8]> for DataRangeOrOwned<T> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Range { data, range } => &data.as_ref()[range.start..range.end],
+            Self::Owned(owned) => owned,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -151,7 +182,7 @@ enum InternalHandleStunReply {
     Handled,
     Ignored,
     PeerData {
-        data: Vec<u8>,
+        range: Range<usize>,
         transport: TransportType,
         peer: SocketAddr,
     },
@@ -540,9 +571,14 @@ impl TurnClient {
         (transmit.into_owned(), transaction_id)
     }
 
-    fn update_permission_state(&mut self, msg: Message<'_>, now: Instant) -> bool {
+    fn update_permission_state(
+        allocations: &mut [Allocation],
+        pending_events: &mut VecDeque<TurnEvent>,
+        msg: Message<'_>,
+        now: Instant,
+    ) -> bool {
         if let Some((alloc_idx, pending_idx)) =
-            self.allocations
+            allocations
                 .iter()
                 .enumerate()
                 .find_map(|(idx, allocation)| {
@@ -555,7 +591,7 @@ impl TurnClient {
                         .map(|pending_idx| (idx, pending_idx))
                 })
         {
-            let (mut permission, _transaction_id) = self.allocations[alloc_idx]
+            let (mut permission, _transaction_id) = allocations[alloc_idx]
                 .pending_permissions
                 .swap_remove_back(pending_idx)
                 .unwrap();
@@ -568,23 +604,22 @@ impl TurnClient {
                 permission.expired = true;
                 permission.expires_at = now;
                 permission.pending_refresh = None;
-                self.pending_events
-                    .push_back(TurnEvent::PermissionCreateFailed(
-                        self.allocations[alloc_idx].transport,
-                        permission.ip,
-                    ));
+                pending_events.push_back(TurnEvent::PermissionCreateFailed(
+                    allocations[alloc_idx].transport,
+                    permission.ip,
+                ));
             } else {
-                self.pending_events.push_front(TurnEvent::PermissionCreated(
-                    self.allocations[alloc_idx].transport,
+                pending_events.push_front(TurnEvent::PermissionCreated(
+                    allocations[alloc_idx].transport,
                     permission.ip,
                 ));
                 permission.expires_at = now + PERMISSION_DURATION;
                 permission.expired = false;
-                self.allocations[alloc_idx].permissions.push(permission);
+                allocations[alloc_idx].permissions.push(permission);
             }
             true
         } else if let Some((alloc_idx, existing_idx)) =
-            self.allocations
+            allocations
                 .iter()
                 .enumerate()
                 .find_map(|(idx, allocation)| {
@@ -604,8 +639,8 @@ impl TurnClient {
                         .map(|pending_idx| (idx, pending_idx))
                 })
         {
-            let transport = self.allocations[alloc_idx].transport;
-            let permission = &mut self.allocations[alloc_idx].permissions[existing_idx];
+            let transport = allocations[alloc_idx].transport;
+            let permission = &mut allocations[alloc_idx].permissions[existing_idx];
             permission.pending_refresh = None;
             if msg.has_class(stun_proto::types::message::MessageClass::Error) {
                 warn!(
@@ -614,7 +649,7 @@ impl TurnClient {
                 );
                 permission.expired = true;
                 permission.expires_at = now;
-                self.pending_events
+                pending_events
                     .push_back(TurnEvent::PermissionCreateFailed(transport, permission.ip));
             } else {
                 permission.expires_at = now + PERMISSION_DURATION;
@@ -658,15 +693,20 @@ impl TurnClient {
         let (credentials, _nonce) = match &mut self.state {
             AuthState::Error | AuthState::Initial => return TurnRecvRet::Ignored(transmit),
             AuthState::InitialSent(transaction_id) => {
+                let data_binding;
                 let msg = if self.stun_agent.transport() == TransportType::Tcp {
                     self.tcp_buffer.extend_from_slice(transmit.data.as_ref());
                     let Ok(hdr) = MessageHeader::from_bytes(&self.tcp_buffer) else {
                         return TurnRecvRet::Handled;
                     };
-                    if self.tcp_buffer.len() < MessageHeader::LENGTH + hdr.data_length() as usize {
+                    let msg_len = MessageHeader::LENGTH + hdr.data_length() as usize;
+                    if self.tcp_buffer.len() < msg_len {
                         return TurnRecvRet::Handled;
                     }
-                    let Ok(ret) = Message::from_bytes(transmit.data.as_ref()) else {
+                    let (data, remaining) = self.tcp_buffer.split_at(msg_len);
+                    data_binding = data.to_vec();
+                    self.tcp_buffer = remaining.to_vec();
+                    let Ok(ret) = Message::from_bytes(&data_binding) else {
                         return TurnRecvRet::Ignored(transmit);
                     };
                     ret
@@ -752,15 +792,20 @@ impl TurnClient {
                 nonce,
                 transaction_id,
             } => {
+                let data_binding;
                 let msg = if self.stun_agent.transport() == TransportType::Tcp {
                     self.tcp_buffer.extend_from_slice(transmit.data.as_ref());
                     let Ok(hdr) = MessageHeader::from_bytes(&self.tcp_buffer) else {
                         return TurnRecvRet::Handled;
                     };
-                    if self.tcp_buffer.len() < MessageHeader::LENGTH + hdr.data_length() as usize {
+                    let msg_len = MessageHeader::LENGTH + hdr.data_length() as usize;
+                    if self.tcp_buffer.len() < msg_len {
                         return TurnRecvRet::Handled;
                     }
-                    let Ok(ret) = Message::from_bytes(transmit.data.as_ref()) else {
+                    let (data, remaining) = self.tcp_buffer.split_at(msg_len);
+                    data_binding = data.to_vec();
+                    self.tcp_buffer = remaining.to_vec();
+                    let Ok(ret) = Message::from_bytes(&data_binding) else {
                         return TurnRecvRet::Ignored(transmit);
                     };
                     ret
@@ -886,22 +931,24 @@ impl TurnClient {
                     {
                         let data = data.to_vec();
                         self.tcp_buffer = self.tcp_buffer.split_at(data.len() + 2).1.to_vec();
-                        return TurnRecvRet::PeerData {
-                            data,
+                        return TurnRecvRet::PeerData(TurnPeerData {
+                            data: DataRangeOrOwned::Owned(data),
                             transport: alloc.transport,
                             peer: chan.peer_addr,
-                        };
+                        });
                     }
                 }
                 self.tcp_buffer = self.tcp_buffer.split_at(data.len() + 2).1.to_vec();
                 return TurnRecvRet::Handled;
             };
-            if self.tcp_buffer.len() < MessageHeader::LENGTH + hdr.data_length() as usize {
+            let msg_len = hdr.data_length() as usize + MessageHeader::LENGTH;
+            if self.tcp_buffer.len() < msg_len {
                 return TurnRecvRet::Handled;
             }
-            let Ok(msg) = Message::from_bytes(transmit.data.as_ref()) else {
+            let Ok(msg) = Message::from_bytes(&self.tcp_buffer) else {
                 return TurnRecvRet::Ignored(transmit);
             };
+            let (data, remainder) = self.tcp_buffer.split_at(msg_len);
 
             // FIXME: dual allocations
             let transport = self
@@ -911,22 +958,40 @@ impl TurnClient {
                 .next()
                 .unwrap();
 
-            match self.handle_stun(msg, transport, transmit.from, credentials, now) {
-                InternalHandleStunReply::Handled => TurnRecvRet::Handled,
+            match Self::handle_stun(
+                &mut self.stun_agent,
+                &mut self.state,
+                &mut self.allocations,
+                &mut self.pending_events,
+                msg,
+                transport,
+                transmit.from,
+                credentials,
+                now,
+            ) {
+                InternalHandleStunReply::Handled => {
+                    self.tcp_buffer = remainder.to_vec();
+                    TurnRecvRet::Handled
+                }
                 InternalHandleStunReply::Ignored => TurnRecvRet::Ignored(transmit),
                 InternalHandleStunReply::PeerData {
-                    data,
+                    range,
                     transport,
                     peer,
-                } => TurnRecvRet::PeerData {
-                    data,
-                    transport,
-                    peer,
-                },
+                } => {
+                    let data = data[range.start..range.end].to_vec();
+                    self.tcp_buffer = remainder.to_vec();
+                    TurnRecvRet::PeerData(TurnPeerData {
+                        data: DataRangeOrOwned::Owned(data),
+                        transport,
+                        peer,
+                    })
+                }
             }
         } else {
-            let Ok(msg) = Message::from_bytes(transmit.data.as_ref()) else {
-                let Ok(channel) = ChannelData::parse(transmit.data.as_ref()) else {
+            let data = transmit.data.as_ref();
+            let Ok(msg) = Message::from_bytes(data) else {
+                let Ok(channel) = ChannelData::parse(data) else {
                     return TurnRecvRet::Ignored(transmit);
                 };
                 for alloc in self.allocations.iter_mut() {
@@ -935,11 +1000,15 @@ impl TurnClient {
                         .iter_mut()
                         .find(|chan| chan.id == channel.id())
                     {
-                        return TurnRecvRet::PeerData {
-                            data: channel.data().to_vec(),
+                        let data_len = data.len();
+                        return TurnRecvRet::PeerData(TurnPeerData {
+                            data: DataRangeOrOwned::Range {
+                                data: transmit.data,
+                                range: 4..4 + data_len,
+                            },
                             transport: alloc.transport,
                             peer: chan.peer_addr,
-                        };
+                        });
                     }
                 }
                 return TurnRecvRet::Ignored(transmit);
@@ -953,24 +1022,41 @@ impl TurnClient {
                 .next()
                 .unwrap();
 
-            match self.handle_stun(msg, transport, transmit.from, credentials, now) {
+            match Self::handle_stun(
+                &mut self.stun_agent,
+                &mut self.state,
+                &mut self.allocations,
+                &mut self.pending_events,
+                msg,
+                transport,
+                transmit.from,
+                credentials,
+                now,
+            ) {
                 InternalHandleStunReply::Handled => TurnRecvRet::Handled,
                 InternalHandleStunReply::Ignored => TurnRecvRet::Ignored(transmit),
                 InternalHandleStunReply::PeerData {
-                    data,
+                    range,
                     transport,
                     peer,
-                } => TurnRecvRet::PeerData {
-                    data,
+                } => TurnRecvRet::PeerData(TurnPeerData {
+                    data: DataRangeOrOwned::Range {
+                        data: transmit.data,
+                        range,
+                    },
                     transport,
                     peer,
-                },
+                }),
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn handle_stun(
-        &mut self,
+        stun_agent: &mut StunAgent,
+        state: &mut AuthState,
+        allocations: &mut Vec<Allocation>,
+        pending_events: &mut VecDeque<TurnEvent>,
         msg: Message<'_>,
         transport: TransportType,
         from: SocketAddr,
@@ -978,7 +1064,7 @@ impl TurnClient {
         now: Instant,
     ) -> InternalHandleStunReply {
         trace!("received STUN message {msg}");
-        let msg = match self.stun_agent.handle_stun(msg, from) {
+        let msg = match stun_agent.handle_stun(msg, from) {
             HandleStunReply::Drop => return InternalHandleStunReply::Ignored,
             HandleStunReply::IncomingStun(msg) => msg,
             HandleStunReply::ValidatedStunResponse(msg) => msg,
@@ -1004,7 +1090,7 @@ impl TurnClient {
                     let mut remove_allocations = false;
                     let mut handled = false;
                     if is_success {
-                        for alloc in self.allocations.iter_mut() {
+                        for alloc in allocations.iter_mut() {
                             let Ok(lifetime) = msg.attribute::<Lifetime>() else {
                                 continue;
                             };
@@ -1028,8 +1114,8 @@ impl TurnClient {
                     }
 
                     if remove_allocations {
-                        self.allocations.clear();
-                        self.state = AuthState::Error;
+                        allocations.clear();
+                        *state = AuthState::Error;
                     }
                     if handled {
                         if remove_allocations {
@@ -1043,28 +1129,28 @@ impl TurnClient {
                     }
                 }
                 CREATE_PERMISSION => {
-                    if self.update_permission_state(msg, now) {
+                    if Self::update_permission_state(allocations, pending_events, msg, now) {
                         InternalHandleStunReply::Handled
                     } else {
                         InternalHandleStunReply::Ignored
                     }
                 }
                 CHANNEL_BIND => {
-                    if let Some((alloc_idx, channel_idx)) = self
-                        .allocations
-                        .iter()
-                        .enumerate()
-                        .find_map(|(idx, allocation)| {
-                            allocation
-                                .pending_channels
-                                .iter()
-                                .position(|(_channel, transaction_id)| {
-                                    transaction_id == &msg.transaction_id()
-                                })
-                                .map(|perm_idx| (idx, perm_idx))
-                        })
+                    if let Some((alloc_idx, channel_idx)) =
+                        allocations
+                            .iter()
+                            .enumerate()
+                            .find_map(|(idx, allocation)| {
+                                allocation
+                                    .pending_channels
+                                    .iter()
+                                    .position(|(_channel, transaction_id)| {
+                                        transaction_id == &msg.transaction_id()
+                                    })
+                                    .map(|perm_idx| (idx, perm_idx))
+                            })
                     {
-                        let (mut channel, _transaction_id) = self.allocations[alloc_idx]
+                        let (mut channel, _transaction_id) = allocations[alloc_idx]
                             .pending_channels
                             .swap_remove_back(channel_idx)
                             .unwrap();
@@ -1074,24 +1160,23 @@ impl TurnClient {
                             return InternalHandleStunReply::Handled;
                         }
                         info!("Succesfully created/refreshed {channel:?}");
-                        self.update_permission_state(msg, now);
-                        if let Some(existing_idx) = self.allocations[alloc_idx]
-                            .channels
-                            .iter()
-                            .enumerate()
-                            .find_map(|(idx, existing_channel)| {
-                                if channel.peer_addr == existing_channel.peer_addr {
-                                    Some(idx)
-                                } else {
-                                    None
-                                }
-                            })
+                        Self::update_permission_state(allocations, pending_events, msg, now);
+                        if let Some(existing_idx) =
+                            allocations[alloc_idx].channels.iter().enumerate().find_map(
+                                |(idx, existing_channel)| {
+                                    if channel.peer_addr == existing_channel.peer_addr {
+                                        Some(idx)
+                                    } else {
+                                        None
+                                    }
+                                },
+                            )
                         {
-                            self.allocations[alloc_idx].channels[existing_idx].expires_at =
+                            allocations[alloc_idx].channels[existing_idx].expires_at =
                                 now + CHANNEL_DURATION;
                         } else {
                             channel.expires_at = now + CHANNEL_DURATION;
-                            self.allocations[alloc_idx].channels.push(channel);
+                            allocations[alloc_idx].channels.push(channel);
                         }
                         return InternalHandleStunReply::Handled;
                     }
@@ -1115,11 +1200,11 @@ impl TurnClient {
                     let Ok(peer_addr) = msg.attribute::<XorPeerAddress>() else {
                         return InternalHandleStunReply::Ignored;
                     };
-                    let Ok(data) = msg.attribute::<AData>() else {
+                    let Ok((offset, data)) = msg.attribute_and_offset::<AData>() else {
                         return InternalHandleStunReply::Ignored;
                     };
                     InternalHandleStunReply::PeerData {
-                        data: data.data().to_vec(),
+                        range: offset + 4..offset + 4 + data.data().len(),
                         transport,
                         peer: peer_addr.addr(msg.transaction_id()),
                     }
@@ -2066,17 +2151,12 @@ mod tests {
             assert!(msg.has_method(DATA));
             let data = msg.attribute::<AData>().unwrap();
             assert_eq!(data.data(), sent_data);
-            let TurnRecvRet::PeerData {
-                data: recv_data,
-                transport,
-                peer,
-            } = self.client.recv(transmit, now)
-            else {
+            let TurnRecvRet::PeerData(peer_data) = self.client.recv(transmit, now) else {
                 unreachable!();
             };
-            assert_eq!(transport, TransportType::Udp);
-            assert_eq!(peer, self.peer_addr);
-            assert_eq!(recv_data, sent_data);
+            assert_eq!(peer_data.transport, TransportType::Udp);
+            assert_eq!(peer_data.peer, self.peer_addr);
+            assert_eq!(peer_data.data(), sent_data);
         }
 
         fn sendrecv_data_channel(&mut self, now: Instant) {

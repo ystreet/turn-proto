@@ -131,17 +131,17 @@ impl TurnClientUdp {
                         inner_s.1.notify_one();
                         continue;
                     }
-                    TurnRecvRet::PeerData {
-                        data,
-                        transport,
-                        peer,
-                    } => {
+                    TurnRecvRet::PeerData(peer_data) => {
+                        let data = peer_data.data();
                         let len = data.len();
-                        let s = match String::from_utf8(data) {
-                            Ok(s) => s,
-                            Err(e) => format!("{:x?}", e.into_bytes()),
+                        let s = match std::str::from_utf8(data) {
+                            Ok(s) => s.to_string(),
+                            Err(_e) => format!("{:x?}", data),
                         };
-                        println!("received {len} bytes from {peer:?} using {transport:?}: '{s:?}'");
+                        println!(
+                            "received {len} bytes from {:?} using {:?}: {s:?}",
+                            peer_data.peer, peer_data.transport
+                        );
                         continue;
                     }
                 }
@@ -271,17 +271,17 @@ impl TurnClientTcp {
                         inner_s.1.notify_one();
                         continue;
                     }
-                    TurnRecvRet::PeerData {
-                        data,
-                        transport,
-                        peer,
-                    } => {
+                    TurnRecvRet::PeerData(peer_data) => {
+                        let data = peer_data.data();
                         let len = data.len();
-                        let s = match String::from_utf8(data) {
-                            Ok(s) => s,
-                            Err(e) => format!("{:x?}", e.into_bytes()),
+                        let s = match std::str::from_utf8(data) {
+                            Ok(s) => s.to_string(),
+                            Err(_e) => format!("{:x?}", data),
                         };
-                        println!("received {len} bytes from {peer:?} using {transport:?}: {s:?}",);
+                        println!(
+                            "received {len} bytes from {:?} using {:?}: {s:?}",
+                            peer_data.peer, peer_data.transport
+                        );
                         continue;
                     }
                 }
