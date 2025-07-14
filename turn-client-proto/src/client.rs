@@ -323,29 +323,14 @@ impl TurnClient {
                             Duration::ZERO
                         };
                     if alloc.pending_refresh.is_none() && expires_at <= now {
-                        let mut refresh = Message::builder_request(REFRESH, MessageWriteVec::new());
-                        let transaction_id = refresh.transaction_id();
-                        let lifetime = Lifetime::new(1800);
-                        refresh.add_attribute(&lifetime).unwrap();
-                        let username = Username::new(credentials.username()).unwrap();
-                        refresh.add_attribute(&username).unwrap();
-                        let realm = Realm::new(credentials.realm()).unwrap();
-                        refresh.add_attribute(&realm).unwrap();
-                        let nonce = Nonce::new(nonce).unwrap();
-                        refresh.add_attribute(&nonce).unwrap();
-                        refresh
-                            .add_message_integrity(
-                                &MessageIntegrityCredentials::LongTerm(credentials.clone()),
-                                stun_proto::types::message::IntegrityAlgorithm::Sha1,
-                            )
-                            .unwrap();
-                        let remote_addr = self.stun_agent.remote_addr().unwrap();
-                        let refresh = refresh.finish();
-                        let transmit = self
-                            .stun_agent
-                            .send_request(refresh, remote_addr, now)
-                            .unwrap();
-                        alloc.pending_refresh = Some((transaction_id, 1800));
+                        let (transmit, transaction_id, lifetime) = Self::send_refresh(
+                            &mut self.stun_agent,
+                            credentials.clone(),
+                            nonce,
+                            1800,
+                            now,
+                        );
+                        alloc.pending_refresh = Some((transaction_id, lifetime));
                         self.pending_transmits.push_back(transmit.into_owned());
                         earliest_wait = now.min(earliest_wait);
                     }
@@ -962,6 +947,7 @@ impl TurnClient {
                 &mut self.stun_agent,
                 &mut self.state,
                 &mut self.allocations,
+                &mut self.pending_transmits,
                 &mut self.pending_events,
                 msg,
                 transport,
@@ -1026,6 +1012,7 @@ impl TurnClient {
                 &mut self.stun_agent,
                 &mut self.state,
                 &mut self.allocations,
+                &mut self.pending_transmits,
                 &mut self.pending_events,
                 msg,
                 transport,
@@ -1051,11 +1038,137 @@ impl TurnClient {
         }
     }
 
+    fn handle_unvalidated_stun(
+        stun_agent: &mut StunAgent,
+        state: &mut AuthState,
+        allocations: &mut [Allocation],
+        pending_transmits: &mut VecDeque<Transmit<Data<'static>>>,
+        msg: Message<'_>,
+        credentials: LongTermCredentials,
+        now: Instant,
+    ) -> InternalHandleStunReply {
+        // only handle STALE_NONCE errors here as that is the only unvalidated case that we have.
+        if !msg.has_class(MessageClass::Error) {
+            return InternalHandleStunReply::Ignored;
+        }
+        let Ok(error) = msg.attribute::<ErrorCode>() else {
+            return InternalHandleStunReply::Ignored;
+        };
+        if error.code() != ErrorCode::STALE_NONCE {
+            return InternalHandleStunReply::Ignored;
+        }
+        let Ok(nonce) = msg
+            .attribute::<Nonce>()
+            .map(|nonce| nonce.nonce().to_string())
+        else {
+            return InternalHandleStunReply::Ignored;
+        };
+        let Ok(realm) = msg
+            .attribute::<Realm>()
+            .map(|realm| realm.realm().to_string())
+        else {
+            return InternalHandleStunReply::Ignored;
+        };
+
+        let mut new_credentials = None;
+
+        'outer: for alloc in allocations.iter_mut() {
+            if let Some((pending, _lifetime)) = alloc.pending_refresh {
+                if pending == msg.transaction_id() {
+                    let credentials = LongTermCredentials::new(
+                        credentials.username().to_string(),
+                        credentials.password().to_string(),
+                        realm,
+                    );
+                    info!("Received STALE_NONCE in response to REFRESH for transaction {pending}, resending");
+                    let (transmit, transaction_id, lifetime) =
+                        Self::send_refresh(stun_agent, credentials.clone(), &nonce, 1800, now);
+                    pending_transmits.push_back(transmit);
+                    new_credentials = Some(credentials);
+                    alloc.pending_refresh = Some((transaction_id, lifetime));
+                    stun_agent.remove_outstanding_request(msg.transaction_id());
+                    break 'outer;
+                }
+            }
+            for permission in alloc.permissions.iter_mut() {
+                if permission
+                    .pending_refresh
+                    .is_some_and(|pending| pending == msg.transaction_id())
+                {
+                    info!("Received STALE_NONCE in response to CREATE_PERMISSION {} for transaction {}, resending", permission.ip, msg.transaction_id());
+                    let credentials = LongTermCredentials::new(
+                        credentials.username().to_string(),
+                        credentials.password().to_string(),
+                        realm,
+                    );
+                    let peer_addr = permission.ip;
+                    let (transmit, transaction_id) = Self::send_create_permission_request(
+                        stun_agent,
+                        credentials.clone(),
+                        &nonce,
+                        peer_addr,
+                        now,
+                    );
+                    permission.pending_refresh = Some(transaction_id);
+                    pending_transmits.push_back(transmit);
+                    new_credentials = Some(credentials);
+                    stun_agent.remove_outstanding_request(msg.transaction_id());
+                    break 'outer;
+                }
+            }
+            for channel in alloc.channels.iter_mut() {
+                if channel
+                    .pending_refresh
+                    .is_some_and(|pending| pending == msg.transaction_id())
+                {
+                    info!("Received STALE_NONCE in response to BIND_CHANNEL {} for transaction {}, resending", channel.peer_addr, msg.transaction_id());
+                    let credentials = LongTermCredentials::new(
+                        credentials.username().to_string(),
+                        credentials.password().to_string(),
+                        realm,
+                    );
+                    let (transmit, transaction_id) = Self::send_channel_bind_request(
+                        stun_agent,
+                        credentials.clone(),
+                        &nonce,
+                        channel.id,
+                        channel.peer_addr,
+                        now,
+                    );
+                    channel.pending_refresh = Some(transaction_id);
+                    pending_transmits.push_back(transmit);
+                    new_credentials = Some(credentials);
+                    stun_agent.remove_outstanding_request(msg.transaction_id());
+                    break 'outer;
+                }
+            }
+        }
+
+        if let Some(credentials) = new_credentials {
+            match state {
+                AuthState::Error | AuthState::Initial | AuthState::InitialSent(_) => unreachable!(),
+                AuthState::Authenticating {
+                    credentials: _,
+                    nonce: _,
+                    transaction_id: _,
+                } => unreachable!(),
+                AuthState::Authenticated {
+                    credentials: _,
+                    nonce: _,
+                } => *state = AuthState::Authenticated { credentials, nonce },
+            }
+            InternalHandleStunReply::Handled
+        } else {
+            InternalHandleStunReply::Ignored
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn handle_stun(
         stun_agent: &mut StunAgent,
         state: &mut AuthState,
         allocations: &mut Vec<Allocation>,
+        pending_transmits: &mut VecDeque<Transmit<Data<'static>>>,
         pending_events: &mut VecDeque<TurnEvent>,
         msg: Message<'_>,
         transport: TransportType,
@@ -1068,8 +1181,16 @@ impl TurnClient {
             HandleStunReply::Drop => return InternalHandleStunReply::Ignored,
             HandleStunReply::IncomingStun(msg) => msg,
             HandleStunReply::ValidatedStunResponse(msg) => msg,
-            HandleStunReply::UnvalidatedStunResponse(_msg) => {
-                return InternalHandleStunReply::Ignored;
+            HandleStunReply::UnvalidatedStunResponse(msg) => {
+                return Self::handle_unvalidated_stun(
+                    stun_agent,
+                    state,
+                    allocations,
+                    pending_transmits,
+                    msg,
+                    credentials,
+                    now,
+                )
             }
         };
         if msg.is_response() {
@@ -1212,6 +1333,35 @@ impl TurnClient {
                 _ => InternalHandleStunReply::Ignored, // All other indications should be ignored
             }
         }
+    }
+
+    fn send_refresh(
+        stun_agent: &mut StunAgent,
+        credentials: LongTermCredentials,
+        nonce: &str,
+        lifetime: u32,
+        now: Instant,
+    ) -> (Transmit<Data<'static>>, TransactionId, u32) {
+        let mut refresh = Message::builder_request(REFRESH, MessageWriteVec::new());
+        let transaction_id = refresh.transaction_id();
+        let lt = Lifetime::new(lifetime);
+        refresh.add_attribute(&lt).unwrap();
+        let username = Username::new(credentials.username()).unwrap();
+        refresh.add_attribute(&username).unwrap();
+        let realm = Realm::new(credentials.realm()).unwrap();
+        refresh.add_attribute(&realm).unwrap();
+        let nonce = Nonce::new(nonce).unwrap();
+        refresh.add_attribute(&nonce).unwrap();
+        refresh
+            .add_message_integrity(
+                &MessageIntegrityCredentials::LongTerm(credentials.clone()),
+                stun_proto::types::message::IntegrityAlgorithm::Sha1,
+            )
+            .unwrap();
+        let remote_addr = stun_agent.remote_addr().unwrap();
+        let refresh = refresh.finish();
+        let transmit = stun_agent.send_request(&refresh, remote_addr, now).unwrap();
+        (transmit.into_owned(), transaction_id, lifetime)
     }
 
     /// Remove the allocation/s on the server.
@@ -1863,6 +2013,7 @@ mod tests {
                 self.credentials.username().to_owned(),
                 self.credentials.password().to_owned(),
             );
+            server.set_nonce_expiry_duration(Duration::from_secs(30));
             let client = TurnClient::allocate(
                 self.client_transport,
                 self.client_addr,
@@ -2001,6 +2152,10 @@ mod tests {
             let Ok(Some(transmit)) = self.server.recv(transmit, now) else {
                 unreachable!();
             };
+            let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
+                self.refresh(now);
+                return;
+            };
             let msg = Message::from_bytes(&transmit.data).unwrap();
             assert!(msg.has_method(REFRESH));
             assert!(msg.has_class(stun_proto::types::message::MessageClass::Success));
@@ -2019,7 +2174,15 @@ mod tests {
 
         fn delete_allocation(&mut self, now: Instant) {
             let transmit = self.client.delete(now).unwrap();
-            let msg = Message::from_bytes(&transmit.data).unwrap();
+            self.handle_delete_allocation(transmit, now);
+        }
+
+        fn handle_delete_allocation<T: AsRef<[u8]> + std::fmt::Debug>(
+            &mut self,
+            transmit: Transmit<T>,
+            now: Instant,
+        ) {
+            let msg = Message::from_bytes(transmit.data.as_ref()).unwrap();
             assert!(msg.has_method(REFRESH));
             assert!(msg.has_class(stun_proto::types::message::MessageClass::Request));
             assert!(msg.has_attribute(Lifetime::TYPE));
@@ -2030,6 +2193,11 @@ mod tests {
             // ok reply
             let Ok(Some(transmit)) = self.server.recv(transmit, now) else {
                 unreachable!();
+            };
+            let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
+                let transmit = self.client.poll_transmit(now).unwrap();
+                self.handle_delete_allocation(transmit, now);
+                return;
             };
             let msg = Message::from_bytes(&transmit.data).unwrap();
             assert!(msg.has_method(REFRESH));
@@ -2049,7 +2217,15 @@ mod tests {
                 .client
                 .create_permission(TransportType::Udp, self.peer_addr.ip(), now)
                 .unwrap();
-            let msg = Message::from_bytes(&transmit.data).unwrap();
+            self.handle_create_permission(transmit, now);
+        }
+
+        fn handle_create_permission<T: AsRef<[u8]> + std::fmt::Debug>(
+            &mut self,
+            transmit: Transmit<T>,
+            now: Instant,
+        ) {
+            let msg = Message::from_bytes(transmit.data.as_ref()).unwrap();
             assert!(msg.has_method(CREATE_PERMISSION));
             assert!(msg.has_class(stun_proto::types::message::MessageClass::Request));
             assert!(msg.has_attribute(XorPeerAddress::TYPE));
@@ -2057,11 +2233,35 @@ mod tests {
             let Ok(Some(transmit)) = self.server.recv(transmit, now) else {
                 unreachable!();
             };
+            let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
+                let transmit = self.client.poll_transmit(now).unwrap();
+                self.handle_create_permission(transmit, now);
+                return;
+            };
             assert!(matches!(
                 self.client.recv(transmit, now),
                 TurnRecvRet::Handled
             ));
             self.validate_client_permission_state(now);
+        }
+
+        fn maybe_handles_stale_nonce<T: AsRef<[u8]> + std::fmt::Debug>(
+            &mut self,
+            transmit: Transmit<T>,
+            now: Instant,
+        ) -> Option<Transmit<T>> {
+            let msg = Message::from_bytes(transmit.data.as_ref()).unwrap();
+            if msg.has_class(stun_proto::types::message::MessageClass::Error) {
+                let error = msg.attribute::<ErrorCode>().unwrap();
+                assert_eq!(error.code(), ErrorCode::STALE_NONCE);
+                assert!(matches!(
+                    self.client.recv(transmit, now),
+                    TurnRecvRet::Handled
+                ));
+                None
+            } else {
+                Some(transmit)
+            }
         }
 
         fn validate_client_permission_state(&self, now: Instant) {
@@ -2083,13 +2283,26 @@ mod tests {
                 .client
                 .bind_channel(TransportType::Udp, self.peer_addr, now)
                 .unwrap();
-            let msg = Message::from_bytes(&transmit.data).unwrap();
+            self.handle_bind_channel(transmit, now);
+        }
+
+        fn handle_bind_channel<T: AsRef<[u8]> + std::fmt::Debug>(
+            &mut self,
+            transmit: Transmit<T>,
+            now: Instant,
+        ) {
+            let msg = Message::from_bytes(transmit.data.as_ref()).unwrap();
             assert!(msg.has_method(CHANNEL_BIND));
             assert!(msg.has_class(stun_proto::types::message::MessageClass::Request));
             assert!(msg.has_attribute(XorPeerAddress::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
             let Ok(Some(transmit)) = self.server.recv(transmit, now) else {
                 unreachable!();
+            };
+            let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
+                let transmit = self.client.poll_transmit(now).unwrap();
+                self.handle_create_permission(transmit, now);
+                return;
             };
             self.client.recv(transmit, now);
             let permision = self
@@ -2267,6 +2480,8 @@ mod tests {
         let _log = crate::tests::test_init_log();
 
         let mut test = TurnTest::builder().build();
+        test.server
+            .set_nonce_expiry_duration(Duration::from_secs(9000));
         let now = Instant::now();
 
         test.allocate(now);
@@ -2455,11 +2670,21 @@ mod tests {
         };
         assert_eq!(now, expiry);
 
-        let transmit = test.client.poll_transmit(expiry).unwrap();
-        let msg = Message::from_bytes(&transmit.data).unwrap();
-        assert_eq!(msg.method(), CREATE_PERMISSION);
-        let Ok(Some(transmit)) = test.server.recv(transmit, now) else {
-            unreachable!();
+        let create_permission = |test: &mut TurnTest, now: Instant| -> Transmit<Vec<u8>> {
+            let transmit = test.client.poll_transmit(now).unwrap();
+            let msg = Message::from_bytes(&transmit.data).unwrap();
+            assert_eq!(msg.method(), CREATE_PERMISSION);
+            let Ok(Some(transmit)) = test.server.recv(transmit, now) else {
+                unreachable!();
+            };
+            transmit
+        };
+
+        let transmit = create_permission(&mut test, now);
+        let transmit = if let Some(transmit) = test.maybe_handles_stale_nonce(transmit, now) {
+            transmit
+        } else {
+            create_permission(&mut test, now)
         };
         test.client.recv(transmit, expiry);
         test.validate_client_permission_state(expiry);
@@ -2562,11 +2787,21 @@ mod tests {
             };
             assert_eq!(now, expiry);
 
-            let transmit = test.client.poll_transmit(now).unwrap();
-            let msg = Message::from_bytes(&transmit.data).unwrap();
-            assert_eq!(msg.method(), CREATE_PERMISSION);
-            let Ok(Some(transmit)) = test.server.recv(transmit, now) else {
-                unreachable!();
+            let create_permission = move |test: &mut TurnTest, now: Instant| -> Transmit<Vec<u8>> {
+                let transmit = test.client.poll_transmit(now).unwrap();
+                let msg = Message::from_bytes(&transmit.data).unwrap();
+                assert_eq!(msg.method(), CREATE_PERMISSION);
+                let Ok(Some(transmit)) = test.server.recv(transmit, now) else {
+                    unreachable!();
+                };
+                transmit
+            };
+
+            let transmit = create_permission(&mut test, now);
+            let transmit = if let Some(transmit) = test.maybe_handles_stale_nonce(transmit, now) {
+                transmit
+            } else {
+                create_permission(&mut test, now)
             };
             test.client.recv(transmit, now);
             test.validate_client_permission_state(now);
