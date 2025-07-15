@@ -160,6 +160,7 @@ enum InternalHandleStunReply {
 
 /// Errors produced when attempting to create a permission for a peer address.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CreatePermissionError {
     /// The permission already exists and cannot be recreated.
     #[error("The permission already exists and cannot be recreated.")]
@@ -171,6 +172,7 @@ pub enum CreatePermissionError {
 
 /// Errors produced when attempting to bind a channel.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum BindChannelError {
     /// The channel identifier already exists and cannot be recreated.
     #[error("The channel identifier already exists and cannot be recreated.")]
