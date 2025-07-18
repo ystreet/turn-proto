@@ -6,26 +6,29 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::{net::SocketAddr, time::Instant};
+use std::net::SocketAddr;
+use std::time::Instant;
 
 #[cfg(not(tarpaulin))]
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use stun_proto::agent::Transmit;
-use turn_client_proto::{
-    DelayedMessageOrChannelSend, DelayedTransmitBuild, TurnClient, TurnEvent, TurnRecvRet,
+use turn_client_proto::common::{
+    DelayedMessageOrChannelSend, DelayedTransmitBuild, TurnEvent, TurnRecvRet,
 };
+use turn_client_proto::prelude::*;
+use turn_client_proto::udp::TurnClientUdp;
 use turn_server_proto::{TurnServer, TurnServerPollRet};
 use turn_types::{stun::TransportType, TurnCredentials};
 
-struct TurnTest {
-    client: TurnClient,
+struct TurnTest<T: TurnClientApi> {
+    client: T,
     server: TurnServer,
     relayed_addr: SocketAddr,
     peer_addr: SocketAddr,
 }
 
-impl TurnTest {
-    fn new() -> Self {
+impl<T: TurnClientApi> TurnTest<T> {
+    fn new<F: FnOnce(SocketAddr, SocketAddr, TurnCredentials) -> T>(init: F) -> Self {
         let local_addr = "192.168.0.2:2000".parse().unwrap();
         let turn_addr = "192.168.0.10:3478".parse().unwrap();
         let relayed_addr = "10.0.0.2:9000".parse().unwrap();
@@ -40,12 +43,7 @@ impl TurnTest {
             credentials.username().to_string(),
             credentials.password().to_string(),
         );
-        let client = TurnClient::allocate(
-            turn_types::stun::TransportType::Udp,
-            local_addr,
-            turn_addr,
-            credentials,
-        );
+        let client = init(local_addr, turn_addr, credentials);
 
         Self {
             client,
@@ -94,10 +92,10 @@ impl TurnTest {
             Some(TurnEvent::AllocationCreated(TransportType::Udp, _))
         ));
 
-        let transmit = self
-            .client
+        self.client
             .create_permission(TransportType::Udp, self.peer_addr.ip(), now)
             .unwrap();
+        let transmit = self.client.poll_transmit(now).unwrap();
         let transmit = self.server.recv(transmit, now).unwrap().unwrap();
         assert!(matches!(
             self.client.recv(transmit, now),
@@ -110,10 +108,10 @@ impl TurnTest {
     }
 
     fn channel_bind(&mut self, now: Instant) {
-        let transmit = self
-            .client
+        self.client
             .bind_channel(TransportType::Udp, self.peer_addr, now)
             .unwrap();
+        let transmit = self.client.poll_transmit(now).unwrap();
         let transmit = self.server.recv(transmit, now).unwrap().unwrap();
         assert!(matches!(
             self.client.recv(transmit, now),
@@ -125,7 +123,11 @@ impl TurnTest {
 static SIZES: [usize; 3] = [32, 1024, 16000];
 
 fn bench_turn_client_sendrecv(c: &mut Criterion) {
-    let mut test = TurnTest::new();
+    let mut test = TurnTest::new(
+        |local_addr: SocketAddr, remote_addr: SocketAddr, credentials: TurnCredentials| {
+            TurnClientUdp::allocate(local_addr, remote_addr, credentials)
+        },
+    );
 
     let now = Instant::now();
     test.allocate(now);
@@ -138,6 +140,7 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
         let transmit = test
             .client
             .send_to(TransportType::Udp, test.peer_addr, &data, now)
+            .unwrap()
             .unwrap();
         assert!(matches!(
             transmit.data,
@@ -157,6 +160,7 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
                     let transmit = test
                         .client
                         .send_to(TransportType::Udp, test.peer_addr, data, now)
+                        .unwrap()
                         .unwrap();
                     transmit.data.build()
                 })
@@ -171,6 +175,7 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
                     let transmit = test
                         .client
                         .send_to(TransportType::Udp, test.peer_addr, data, now)
+                        .unwrap()
                         .unwrap();
                     transmit.data.write_into(&mut output);
                 })
@@ -186,6 +191,7 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
         let transmit = test
             .client
             .send_to(TransportType::Udp, test.peer_addr, &data, now)
+            .unwrap()
             .unwrap();
         assert!(matches!(
             transmit.data,
@@ -202,6 +208,7 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
                 let transmit = test
                     .client
                     .send_to(TransportType::Udp, test.peer_addr, data, now)
+                    .unwrap()
                     .unwrap();
                 transmit.data.build()
             })
@@ -215,6 +222,7 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
                     let transmit = test
                         .client
                         .send_to(TransportType::Udp, test.peer_addr, data, now)
+                        .unwrap()
                         .unwrap();
                     transmit.data.write_into(&mut output);
                 })
@@ -224,7 +232,11 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
     drop(group);
 
     let mut group = c.benchmark_group("Turn/Recv");
-    let mut test = TurnTest::new();
+    let mut test = TurnTest::new(
+        |local_addr: SocketAddr, remote_addr: SocketAddr, credentials: TurnCredentials| {
+            TurnClientUdp::allocate(local_addr, remote_addr, credentials)
+        },
+    );
     let now = Instant::now();
     test.allocate(now);
 
