@@ -14,7 +14,7 @@
 use stun_types::message::StunParseError;
 
 /// A [`ChannelData`] message.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ChannelData<'a> {
     id: u16,
     data: &'a [u8],
@@ -94,6 +94,12 @@ impl std::fmt::Display for ChannelData<'_> {
             self.id,
             self.data.len()
         )
+    }
+}
+
+impl AsRef<[u8]> for ChannelData<'_> {
+    fn as_ref(&self) -> &[u8] {
+        self.data
     }
 }
 
