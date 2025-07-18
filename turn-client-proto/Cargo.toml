@@ -18,11 +18,19 @@ thiserror.workspace = true
 tracing.workspace = true
 turn-types = { path = "../turn-types", version = "0.1.0" }
 
+rustls = { workspace = true, optional = true }
+
 [dev-dependencies]
 tracing-subscriber.workspace = true
 turn-server-proto = { path = "../turn-server-proto" }
 clap = {version = "4", features = ["derive"]}
 criterion.workspace = true
+rustls.workspace = true
+rustls-platform-verifier.workspace = true
+
+[features]
+default = ["rustls"]
+rustls = ["dep:rustls"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }

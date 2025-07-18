@@ -25,6 +25,8 @@ pub mod protocol;
 pub mod tcp;
 pub mod udp;
 
+#[cfg(feature = "rustls")]
+pub mod rustls;
 
 /// Public prelude
 pub mod prelude {
