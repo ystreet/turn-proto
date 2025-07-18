@@ -97,6 +97,12 @@ impl std::fmt::Display for ChannelData<'_> {
     }
 }
 
+impl AsRef<[u8]> for ChannelData<'_> {
+    fn as_ref(&self) -> &[u8] {
+        self.data
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
