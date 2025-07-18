@@ -20,17 +20,15 @@
 
 pub use stun_proto as stun;
 pub use turn_types as types;
-mod client;
+pub mod common;
+pub mod protocol;
+pub mod tcp;
+pub mod udp;
 
-pub use client::{
-    BindChannelError, CreatePermissionError, DelayedChannelSend, DelayedMessageOrChannelSend,
-    DelayedMessageSend, DelayedTransmitBuild, TransmitBuild, TurnClient, TurnEvent, TurnPollRet,
-    TurnRecvRet,
-};
 
 /// Public prelude
 pub mod prelude {
-    pub use crate::client::DelayedTransmitBuild;
+    pub use crate::common::{DelayedTransmitBuild, TurnClientApi};
 }
 
 #[cfg(test)]
