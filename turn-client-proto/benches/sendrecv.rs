@@ -6,10 +6,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![cfg(not(tarpaulin))]
+
 use std::net::SocketAddr;
 use std::time::Instant;
 
-#[cfg(not(tarpaulin))]
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use stun_proto::agent::Transmit;
 use turn_client_proto::common::{

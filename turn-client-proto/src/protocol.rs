@@ -31,8 +31,8 @@ use turn_types::stun::prelude::{MessageWrite, MessageWriteExt};
 use turn_types::TurnCredentials;
 
 use crate::common::{
-    BindChannelError, CreatePermissionError, DataRangeOrOwned, DelayedMessageOrChannelSend,
-    DeleteError, TransmitBuild, TurnEvent, TurnPeerData, TurnPollRet, TurnRecvRet,
+    BindChannelError, CreatePermissionError, DelayedMessageOrChannelSend, DeleteError,
+    TransmitBuild, TurnEvent, TurnPollRet,
 };
 
 /// Buffer before an expiration time before sending a refresh packet.
@@ -684,48 +684,34 @@ impl TurnClientProtocol {
 
     #[tracing::instrument(
         name = "turn_handle_message",
-        skip(self, transmit),
+        skip(self, data),
         fields(
-            transport = ?transmit.transport,
-            from = ?transmit.from,
-            to = ?transmit.to,
-            data_len = transmit.data.as_ref().len(),
+            data_len = data.as_ref().len(),
         )
     )]
     pub(crate) fn handle_message<T: AsRef<[u8]> + std::fmt::Debug>(
         &mut self,
-        transmit: Transmit<T>,
+        data: T,
         now: Instant,
     ) -> TurnProtocolRecv<T> {
-        /* is this data for our client? */
-        if transmit.to != self.stun_agent.local_addr()
-            || self.stun_agent.transport() != transmit.transport
-            || transmit.from != self.stun_agent.remote_addr().unwrap()
-        {
-            trace!(
-                "received data not directed at us ({:?}) but for {:?}!",
-                self.stun_agent.local_addr(),
-                transmit.to
-            );
-            return TurnProtocolRecv::Ignored(transmit);
-        }
-        let Ok(msg) = Message::from_bytes(transmit.data.as_ref()) else {
-            return TurnProtocolRecv::Ignored(transmit);
+        let Ok(msg) = Message::from_bytes(data.as_ref()) else {
+            return TurnProtocolRecv::Ignored(data);
         };
+        let remote_addr = self.remote_addr();
         let (credentials, _nonce) = match &mut self.state {
-            AuthState::Error | AuthState::Initial => return TurnProtocolRecv::Ignored(transmit),
+            AuthState::Error | AuthState::Initial => return TurnProtocolRecv::Ignored(data),
             AuthState::InitialSent(transaction_id) => {
                 trace!("received STUN message {msg}");
-                let msg = match self.stun_agent.handle_stun(msg, transmit.from) {
+                let msg = match self.stun_agent.handle_stun(msg, remote_addr) {
                     HandleStunReply::Drop => return TurnProtocolRecv::Handled,
-                    HandleStunReply::IncomingStun(_) => return TurnProtocolRecv::Ignored(transmit),
+                    HandleStunReply::IncomingStun(_) => return TurnProtocolRecv::Ignored(data),
                     HandleStunReply::ValidatedStunResponse(msg) => msg,
                     HandleStunReply::UnvalidatedStunResponse(_msg) => {
-                        return TurnProtocolRecv::Ignored(transmit)
+                        return TurnProtocolRecv::Ignored(data)
                     }
                 };
                 if !msg.is_response() || &msg.transaction_id() != transaction_id {
-                    return TurnProtocolRecv::Ignored(transmit);
+                    return TurnProtocolRecv::Ignored(data);
                 }
                 /* The Initial stun request should result in an unauthorized error as there were
                  * no credentials in the initial request */
@@ -733,25 +719,25 @@ impl TurnClientProtocol {
                     self.state = AuthState::Error;
                     self.pending_events
                         .push_front(TurnEvent::AllocationCreateFailed);
-                    return TurnProtocolRecv::Ignored(transmit);
+                    return TurnProtocolRecv::Ignored(data);
                 }
                 let Ok(error_code) = msg.attribute::<ErrorCode>() else {
                     self.state = AuthState::Error;
                     self.pending_events
                         .push_front(TurnEvent::AllocationCreateFailed);
-                    return TurnProtocolRecv::Ignored(transmit);
+                    return TurnProtocolRecv::Ignored(data);
                 };
                 let Ok(realm) = msg.attribute::<Realm>() else {
                     self.state = AuthState::Error;
                     self.pending_events
                         .push_front(TurnEvent::AllocationCreateFailed);
-                    return TurnProtocolRecv::Ignored(transmit);
+                    return TurnProtocolRecv::Ignored(data);
                 };
                 let Ok(nonce) = msg.attribute::<Nonce>() else {
                     self.state = AuthState::Error;
                     self.pending_events
                         .push_front(TurnEvent::AllocationCreateFailed);
-                    return TurnProtocolRecv::Ignored(transmit);
+                    return TurnProtocolRecv::Ignored(data);
                 };
                 match error_code.code() {
                     ErrorCode::UNAUTHORIZED => {
@@ -784,7 +770,7 @@ impl TurnClientProtocol {
                             .push_front(TurnEvent::AllocationCreateFailed);
                     }
                 }
-                return TurnProtocolRecv::Ignored(transmit);
+                return TurnProtocolRecv::Ignored(data);
             }
             AuthState::Authenticating {
                 credentials,
@@ -792,32 +778,32 @@ impl TurnClientProtocol {
                 transaction_id,
             } => {
                 trace!("received STUN message {msg}");
-                let msg = match self.stun_agent.handle_stun(msg, transmit.from) {
+                let msg = match self.stun_agent.handle_stun(msg, remote_addr) {
                     HandleStunReply::Drop => return TurnProtocolRecv::Handled,
-                    HandleStunReply::IncomingStun(_) => return TurnProtocolRecv::Ignored(transmit),
+                    HandleStunReply::IncomingStun(_) => return TurnProtocolRecv::Ignored(data),
                     HandleStunReply::ValidatedStunResponse(msg) => msg,
                     HandleStunReply::UnvalidatedStunResponse(_msg) => {
-                        return TurnProtocolRecv::Ignored(transmit)
+                        return TurnProtocolRecv::Ignored(data)
                     }
                 };
                 if !msg.is_response() || &msg.transaction_id() != transaction_id {
-                    return TurnProtocolRecv::Ignored(transmit);
+                    return TurnProtocolRecv::Ignored(data);
                 }
                 match msg.class() {
                     stun_proto::types::message::MessageClass::Error => {
                         let Ok(error_code) = msg.attribute::<ErrorCode>() else {
                             self.state = AuthState::Error;
-                            return TurnProtocolRecv::Ignored(transmit);
+                            return TurnProtocolRecv::Ignored(data);
                         };
                         match error_code.code() {
                             ErrorCode::STALE_NONCE => {
                                 let Ok(realm) = msg.attribute::<Realm>() else {
                                     self.state = AuthState::Error;
-                                    return TurnProtocolRecv::Ignored(transmit);
+                                    return TurnProtocolRecv::Ignored(data);
                                 };
                                 let Ok(nonce) = msg.attribute::<Nonce>() else {
                                     self.state = AuthState::Error;
-                                    return TurnProtocolRecv::Ignored(transmit);
+                                    return TurnProtocolRecv::Ignored(data);
                                 };
                                 let credentials = self
                                     .credentials
@@ -846,7 +832,7 @@ impl TurnClientProtocol {
                         let Ok(_) = msg.validate_integrity(&MessageIntegrityCredentials::LongTerm(
                             credentials.clone(),
                         )) else {
-                            return TurnProtocolRecv::Ignored(transmit);
+                            return TurnProtocolRecv::Ignored(data);
                         };
                         let xor_relayed_address = msg.attribute::<XorRelayedAddress>();
                         let lifetime = msg.attribute::<Lifetime>();
@@ -854,7 +840,7 @@ impl TurnClientProtocol {
                             (xor_relayed_address, lifetime)
                         else {
                             self.state = AuthState::Error;
-                            return TurnProtocolRecv::Ignored(transmit);
+                            return TurnProtocolRecv::Ignored(data);
                         };
                         let relayed_address = xor_relayed_address.addr(msg.transaction_id());
                         let lifetime = Duration::from_secs(lifetime.seconds() as u64);
@@ -886,7 +872,7 @@ impl TurnClientProtocol {
                     }
                     _ => (),
                 }
-                return TurnProtocolRecv::Ignored(transmit);
+                return TurnProtocolRecv::Ignored(data);
             }
             AuthState::Authenticated { credentials, nonce } => (credentials.clone(), nonce),
         };
@@ -907,18 +893,18 @@ impl TurnClientProtocol {
             &mut self.pending_events,
             msg,
             transport,
-            transmit.from,
+            remote_addr,
             credentials,
             now,
         ) {
             InternalHandleStunReply::Handled => TurnProtocolRecv::Handled,
-            InternalHandleStunReply::Ignored => TurnProtocolRecv::Ignored(transmit),
+            InternalHandleStunReply::Ignored => TurnProtocolRecv::Ignored(data),
             InternalHandleStunReply::PeerData {
                 range,
                 transport,
                 peer,
             } => TurnProtocolRecv::PeerData {
-                transmit,
+                data,
                 range,
                 transport,
                 peer,
@@ -1472,35 +1458,13 @@ enum InternalHandleStunReply {
 #[derive(Debug)]
 pub(crate) enum TurnProtocolRecv<T: AsRef<[u8]> + std::fmt::Debug> {
     Handled,
-    Ignored(Transmit<T>),
+    Ignored(T),
     PeerData {
-        transmit: Transmit<T>,
+        data: T,
         range: Range<usize>,
         transport: TransportType,
         peer: SocketAddr,
     },
-}
-
-impl<T: AsRef<[u8]> + std::fmt::Debug> From<TurnProtocolRecv<T>> for TurnRecvRet<T> {
-    fn from(value: TurnProtocolRecv<T>) -> Self {
-        match value {
-            TurnProtocolRecv::Handled => Self::Handled,
-            TurnProtocolRecv::Ignored(transmit) => Self::Ignored(transmit),
-            TurnProtocolRecv::PeerData {
-                transmit,
-                range,
-                transport,
-                peer,
-            } => Self::PeerData(TurnPeerData {
-                data: DataRangeOrOwned::Range {
-                    data: transmit.data,
-                    range,
-                },
-                transport,
-                peer,
-            }),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -1644,7 +1608,7 @@ mod tests {
             let err = msg.attribute::<ErrorCode>().unwrap();
             assert_eq!(err.code(), ErrorCode::UNAUTHORIZED);
             assert!(msg.has_attribute(Nonce::TYPE));
-            self.client.handle_message(transmit, now);
+            self.client.handle_message(transmit.data, now);
 
             // authenticated allocate
             let transmit = self.client.poll_transmit(now).unwrap();
@@ -1689,7 +1653,7 @@ mod tests {
             assert!(msg.has_attribute(XorMappedAddress::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
             assert!(matches!(
-                self.client.handle_message(transmit, now),
+                self.client.handle_message(transmit.data, now),
                 TurnProtocolRecv::Handled
             ));
             assert!(self
@@ -1727,7 +1691,7 @@ mod tests {
             assert!(msg.has_attribute(Lifetime::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
             assert!(matches!(
-                self.client.handle_message(transmit, now),
+                self.client.handle_message(transmit.data, now),
                 TurnProtocolRecv::Handled
             ));
             assert!(self
@@ -1770,7 +1734,7 @@ mod tests {
             assert!(msg.has_class(stun_proto::types::message::MessageClass::Success));
             assert!(msg.has_attribute(Lifetime::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
-            self.client.handle_message(transmit, now);
+            self.client.handle_message(transmit.data, now);
             assert!(!self
                 .client
                 .relayed_addresses()
@@ -1805,7 +1769,7 @@ mod tests {
                 return;
             };
             assert!(matches!(
-                self.client.handle_message(transmit, now),
+                self.client.handle_message(transmit.data, now),
                 TurnProtocolRecv::Handled
             ));
             self.validate_client_permission_state(now);
@@ -1821,7 +1785,7 @@ mod tests {
                 let error = msg.attribute::<ErrorCode>().unwrap();
                 assert_eq!(error.code(), ErrorCode::STALE_NONCE);
                 assert!(matches!(
-                    self.client.handle_message(transmit, now),
+                    self.client.handle_message(transmit.data, now),
                     TurnProtocolRecv::Handled
                 ));
                 None
@@ -1870,7 +1834,7 @@ mod tests {
                 self.handle_create_permission(transmit, now);
                 return;
             };
-            self.client.handle_message(transmit, now);
+            self.client.handle_message(transmit.data, now);
             let permision = self
                 .client
                 .permission(TransportType::Udp, self.peer_addr.ip())
@@ -1931,16 +1895,16 @@ mod tests {
             let data = msg.attribute::<AData>().unwrap();
             assert_eq!(data.data(), sent_data);
             let TurnProtocolRecv::PeerData {
-                transmit,
+                data,
                 range,
                 transport: TransportType::Udp,
                 peer,
-            } = self.client.handle_message(transmit, now)
+            } = self.client.handle_message(transmit.data, now)
             else {
                 unreachable!();
             };
             assert_eq!(peer, self.peer_addr);
-            assert_eq!(&transmit.data[range.start..range.end], sent_data);
+            assert_eq!(&data[range.start..range.end], sent_data);
         }
 
         fn sendrecv_data_channel(&mut self, now: Instant) {
@@ -2075,7 +2039,7 @@ mod tests {
         assert!(msg.has_class(stun_proto::types::message::MessageClass::Error));
         let err = msg.attribute::<ErrorCode>().unwrap();
         assert_eq!(err.code(), ErrorCode::ALLOCATION_MISMATCH);
-        test.client.handle_message(transmit, now);
+        test.client.handle_message(transmit.data, now);
     }
 
     #[test]
@@ -2257,7 +2221,7 @@ mod tests {
         } else {
             create_permission(&mut test, now)
         };
-        test.client.handle_message(transmit, expiry);
+        test.client.handle_message(transmit.data, expiry);
         test.validate_client_permission_state(expiry);
 
         test.sendrecv_data(expiry);
@@ -2374,7 +2338,7 @@ mod tests {
             } else {
                 create_permission(&mut test, now)
             };
-            test.client.handle_message(transmit, now);
+            test.client.handle_message(transmit.data, now);
             test.validate_client_permission_state(now);
             permissions_done = now;
         }
@@ -2395,7 +2359,7 @@ mod tests {
         let Ok(Some(transmit)) = test.server.recv(transmit, now) else {
             unreachable!();
         };
-        test.client.handle_message(transmit, expiry);
+        test.client.handle_message(transmit.data, expiry);
 
         test.sendrecv_data_channel(expiry);
     }
@@ -2408,22 +2372,11 @@ mod tests {
 
         let mut test = turn_allocate_permission(TransportType::Udp, now);
         let data = [0x40, 0, 0, 14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let TurnProtocolRecv::Ignored(transmit) = test.client.handle_message(
-            Transmit::new(
-                &data,
-                TransportType::Udp,
-                test.peer_addr,
-                test.client.local_addr(),
-            ),
-            now,
-        ) else {
+        let TurnProtocolRecv::Ignored(ignored) = test.client.handle_message(&data, now) else {
             unreachable!();
         };
-        assert_eq!(transmit.data, &data);
-        assert_eq!(transmit.transport, TransportType::Udp);
-        assert_eq!(transmit.from, test.peer_addr);
-        assert_eq!(transmit.to, test.client.local_addr());
-        let channel = ChannelData::parse(transmit.data).unwrap();
+        assert_eq!(ignored, &data);
+        let channel = ChannelData::parse(ignored).unwrap();
         let TurnProtocolChannelRecv::Ignored = test.client.handle_channel(
             Transmit::new(
                 channel,

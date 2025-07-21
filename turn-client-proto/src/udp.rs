@@ -22,12 +22,12 @@ use turn_types::channel::ChannelData;
 use turn_types::stun::message::MessageHeader;
 use turn_types::TurnCredentials;
 
-use tracing::warn;
+use tracing::{trace, warn};
 
 use crate::common::{
     DataRangeOrOwned, DelayedMessageOrChannelSend, TransmitBuild, TurnClientApi, TurnPeerData,
 };
-use crate::protocol::{TurnClientProtocol, TurnProtocolChannelRecv};
+use crate::protocol::{TurnClientProtocol, TurnProtocolChannelRecv, TurnProtocolRecv};
 
 pub use crate::common::{
     BindChannelError, CreatePermissionError, DeleteError, TurnEvent, TurnPollRet, TurnRecvRet,
@@ -153,6 +153,19 @@ impl TurnClientApi for TurnClientUdp {
         transmit: Transmit<T>,
         now: Instant,
     ) -> TurnRecvRet<T> {
+        /* is this data for our client? */
+        if transmit.to != self.local_addr()
+            || self.transport() != transmit.transport
+            || transmit.from != self.remote_addr()
+        {
+            trace!(
+                "received data not directed at us ({:?}) but for {:?}!",
+                self.local_addr(),
+                transmit.to
+            );
+            return TurnRecvRet::Ignored(transmit);
+        }
+
         let data = transmit.data.as_ref();
         let Ok(_hdr) = MessageHeader::from_bytes(data) else {
             let Ok(channel) = ChannelData::parse(data) else {
@@ -180,6 +193,28 @@ impl TurnClientApi for TurnClientUdp {
                 }
             }
         };
-        self.protocol.handle_message(transmit, now).into()
+        match self.protocol.handle_message(transmit.data, now) {
+            TurnProtocolRecv::Handled => TurnRecvRet::Handled,
+            TurnProtocolRecv::Ignored(data) => TurnRecvRet::Ignored(Transmit::new(
+                data,
+                transmit.transport,
+                transmit.from,
+                transmit.to,
+            )),
+            TurnProtocolRecv::PeerData {
+                data,
+                range,
+                transport,
+                peer,
+            } => TurnRecvRet::PeerData(TurnPeerData {
+                data: DataRangeOrOwned::Range { data, range },
+                transport,
+                peer,
+            }),
+        }
+    }
+
+    fn poll_recv(&mut self, _now: Instant) -> Option<TurnPeerData<Vec<u8>>> {
+        None
     }
 }
