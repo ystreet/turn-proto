@@ -12,7 +12,6 @@
 
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr};
-use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -38,7 +37,7 @@ pub use crate::common::{
     BindChannelError, CreatePermissionError, DeleteError, TurnEvent, TurnPollRet, TurnRecvRet,
 };
 pub use crate::protocol::SendError;
-use crate::tcp::{IncomingTcp, TurnTcpBuffer};
+use crate::tcp::{ensure_data_owned, IncomingTcp, StoredTcp, TurnTcpBuffer};
 
 /// A TURN client that communicates over TLS.
 #[derive(Debug)]
@@ -69,14 +68,6 @@ impl TurnClientTls {
         }
     }
 
-    fn ensure_data_owned(data: Vec<u8>, range: Range<usize>) -> Vec<u8> {
-        if range.start == 0 && range.end == data.len() {
-            data
-        } else {
-            data[range.start..range.end].to_vec()
-        }
-    }
-
     fn handle_incoming_plaintext<T: AsRef<[u8]> + std::fmt::Debug>(
         &mut self,
         transmit: Transmit<Vec<u8>>,
@@ -84,27 +75,29 @@ impl TurnClientTls {
     ) -> TurnRecvRet<T> {
         match self.incoming_tcp_buffer.incoming_tcp(transmit) {
             IncomingTcp::NeedMoreData => TurnRecvRet::Handled,
-            IncomingTcp::CompleteMessage(transmit) => {
-                match self.protocol.handle_message(transmit, now) {
+            IncomingTcp::CompleteMessage(transmit, msg_range) => {
+                match self.protocol.handle_message(
+                    &transmit.data.as_slice()[msg_range.start..msg_range.end],
+                    now,
+                ) {
                     TurnProtocolRecv::Handled => TurnRecvRet::Handled,
                     TurnProtocolRecv::Ignored(_) => TurnRecvRet::Handled,
                     TurnProtocolRecv::PeerData {
-                        transmit,
+                        data: _,
                         range,
                         transport,
                         peer,
                     } => TurnRecvRet::PeerData(TurnPeerData {
-                        data: DataRangeOrOwned::Owned(Self::ensure_data_owned(
-                            transmit.data,
-                            range,
-                        )),
+                        data: DataRangeOrOwned::Owned(ensure_data_owned(transmit.data, range)),
                         transport,
                         peer,
                     }),
                 }
             }
-            IncomingTcp::CompleteChannel(transmit) => {
-                let channel = ChannelData::parse(transmit.data.as_ref()).unwrap();
+            IncomingTcp::CompleteChannel(transmit, msg_range) => {
+                let channel =
+                    ChannelData::parse(&transmit.data.as_slice()[msg_range.start..msg_range.end])
+                        .unwrap();
                 let ret = self.protocol.handle_channel(
                     Transmit::new(channel, transmit.transport, transmit.from, transmit.to),
                     now,
@@ -116,32 +109,28 @@ impl TurnClientTls {
                         transport,
                         peer,
                     } => TurnRecvRet::PeerData(TurnPeerData {
-                        data: DataRangeOrOwned::Owned(Self::ensure_data_owned(
-                            transmit.data,
-                            range,
-                        )),
+                        data: DataRangeOrOwned::Owned(ensure_data_owned(transmit.data, range)),
                         transport,
                         peer,
                     }),
                 }
             }
-            IncomingTcp::StoredMessage(data, transmit) => match self.protocol.handle_message(
-                Transmit::new(data, transmit.transport, transmit.from, transmit.to),
-                now,
-            ) {
-                TurnProtocolRecv::Handled => TurnRecvRet::Handled,
-                TurnProtocolRecv::Ignored(_) => TurnRecvRet::Handled,
-                TurnProtocolRecv::PeerData {
-                    transmit,
-                    range,
-                    transport,
-                    peer,
-                } => TurnRecvRet::PeerData(TurnPeerData {
-                    data: DataRangeOrOwned::Owned(Self::ensure_data_owned(transmit.data, range)),
-                    transport,
-                    peer,
-                }),
-            },
+            IncomingTcp::StoredMessage(data, transmit) => {
+                match self.protocol.handle_message(data, now) {
+                    TurnProtocolRecv::Handled => TurnRecvRet::Handled,
+                    TurnProtocolRecv::Ignored(_) => TurnRecvRet::Handled,
+                    TurnProtocolRecv::PeerData {
+                        data: _,
+                        range,
+                        transport,
+                        peer,
+                    } => TurnRecvRet::PeerData(TurnPeerData {
+                        data: DataRangeOrOwned::Owned(ensure_data_owned(transmit.data, range)),
+                        transport,
+                        peer,
+                    }),
+                }
+            }
             IncomingTcp::StoredChannel(data, transmit) => {
                 let channel = ChannelData::parse(&data).unwrap();
                 let ret = self.protocol.handle_channel(
@@ -374,7 +363,7 @@ impl TurnClientApi for TurnClientTls {
             }
         };
         if io_state.plaintext_bytes_to_read() > 0 {
-            let mut out = vec![0; 1024];
+            let mut out = vec![0; 2048];
             let n = match self.conn.reader().read(&mut out) {
                 Ok(n) => n,
                 Err(e) => {
@@ -390,5 +379,52 @@ impl TurnClientApi for TurnClientTls {
         }
 
         TurnRecvRet::Handled
+    }
+
+    fn poll_recv(&mut self, now: Instant) -> Option<TurnPeerData<Vec<u8>>> {
+        while let Some(recv) = self.incoming_tcp_buffer.poll_recv() {
+            match recv {
+                StoredTcp::Message(msg) => {
+                    if let TurnProtocolRecv::PeerData {
+                        data,
+                        range,
+                        transport,
+                        peer,
+                    } = self.protocol.handle_message(msg, now)
+                    {
+                        return Some(TurnPeerData {
+                            data: DataRangeOrOwned::Range { data, range },
+                            transport,
+                            peer,
+                        });
+                    }
+                }
+                StoredTcp::Channel(data) => {
+                    let Ok(channel) = ChannelData::parse(&data) else {
+                        continue;
+                    };
+                    if let TurnProtocolChannelRecv::PeerData {
+                        range,
+                        transport,
+                        peer,
+                    } = self.protocol.handle_channel(
+                        Transmit::new(
+                            channel,
+                            TransportType::Tcp,
+                            self.remote_addr(),
+                            self.local_addr(),
+                        ),
+                        now,
+                    ) {
+                        return Some(TurnPeerData {
+                            data: DataRangeOrOwned::Range { data, range },
+                            transport,
+                            peer,
+                        });
+                    }
+                }
+            }
+        }
+        None
     }
 }

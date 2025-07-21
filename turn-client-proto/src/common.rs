@@ -38,9 +38,6 @@ pub trait TurnClientApi {
     /// The remote TURN server's address.
     fn remote_addr(&self) -> SocketAddr;
 
-    /// Poll the client for further progress.
-    fn poll(&mut self, now: Instant) -> TurnPollRet;
-
     /// The list of allocated relayed addresses on the TURN server.
     fn relayed_addresses(&self) -> impl Iterator<Item = (TransportType, SocketAddr)> + '_;
 
@@ -50,12 +47,6 @@ pub trait TurnClientApi {
         transport: TransportType,
         relayed: SocketAddr,
     ) -> impl Iterator<Item = IpAddr> + '_;
-
-    /// Poll for a packet to send.
-    fn poll_transmit(&mut self, now: Instant) -> Option<Transmit<Data<'static>>>;
-
-    /// Poll for an event that has occurred.
-    fn poll_event(&mut self) -> Option<TurnEvent>;
 
     /// Remove the allocation/s on the server.
     fn delete(&mut self, now: Instant) -> Result<(), DeleteError>;
@@ -97,6 +88,18 @@ pub trait TurnClientApi {
         transmit: Transmit<T>,
         now: Instant,
     ) -> TurnRecvRet<T>;
+
+    /// Poll the client for any further recevied data.
+    fn poll_recv(&mut self, now: Instant) -> Option<TurnPeerData<Vec<u8>>>;
+
+    /// Poll the client for further progress.
+    fn poll(&mut self, now: Instant) -> TurnPollRet;
+
+    /// Poll for a packet to send.
+    fn poll_transmit(&mut self, now: Instant) -> Option<Transmit<Data<'static>>>;
+
+    /// Poll for an event that has occurred.
+    fn poll_event(&mut self) -> Option<TurnEvent>;
 }
 
 /// Return value from calling [poll](TurnClientApi::poll)().
