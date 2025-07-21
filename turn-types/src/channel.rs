@@ -50,6 +50,29 @@ impl<'a> ChannelData<'a> {
     /// assert_eq!(parsed.data(), channel.data());
     /// ```
     pub fn parse(data: &'a [u8]) -> Result<Self, StunParseError> {
+        let (id, len) = Self::parse_header(data)?;
+
+        Ok(ChannelData {
+            id,
+            data: &data[4..4 + len],
+        })
+    }
+
+    /// Parse the header of an [`ChannelData`] returning the channel ID and the length of the
+    /// contained data (without the 4 byte header).
+    ///
+    /// # Examples
+    /// ```
+    /// # use turn_types::channel::*;
+    /// let data = [4; 3];
+    /// let channel = ChannelData::new(0x4000, &data);
+    /// let mut output = [0; 7];
+    /// assert_eq!(7, channel.write_into_unchecked(&mut output));
+    /// let (id, len) = ChannelData::parse_header(&output).unwrap();
+    /// assert_eq!(id, channel.id());
+    /// assert_eq!(len, 3);
+    /// ```
+    pub fn parse_header(data: &[u8]) -> Result<(u16, usize), StunParseError> {
         if data.len() < 4 {
             return Err(stun_types::message::StunParseError::Truncated {
                 expected: 4,
@@ -69,10 +92,7 @@ impl<'a> ChannelData<'a> {
             return Err(stun_types::message::StunParseError::InvalidAttributeData);
         }
 
-        Ok(ChannelData {
-            id,
-            data: &data[4..4 + len],
-        })
+        Ok((id, len))
     }
 
     /// Write this [`ChannelData`] into the provided destination slice.
