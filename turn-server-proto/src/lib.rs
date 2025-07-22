@@ -18,11 +18,11 @@
 #![deny(missing_debug_implementations)]
 #![deny(missing_docs)]
 
-mod server;
+pub mod api;
+pub mod server;
 
-pub use server::{TurnServer, TurnServerPollRet};
-pub use stun_proto as stun;
-pub use turn_types as types;
+#[cfg(feature = "rustls")]
+pub mod rustls;
 
 #[cfg(test)]
 mod tests {
