@@ -31,6 +31,8 @@ jobs:
       if: matrix.toolchain == '1.75'
     - name: Build
       run: cargo build --verbose
+    - name: Build (without default features)
+      run: cargo build --verbose --no-default-features
   test:
     runs-on: ubuntu-latest
     steps:

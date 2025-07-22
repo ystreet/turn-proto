@@ -129,6 +129,10 @@ impl TurnClientApi for TurnClientUdp {
         self.protocol.create_permission(transport, peer_addr, now)
     }
 
+    fn have_permission(&self, transport: TransportType, to: IpAddr) -> bool {
+        self.protocol.have_permission(transport, to)
+    }
+
     fn bind_channel(
         &mut self,
         transport: TransportType,
@@ -216,5 +220,131 @@ impl TurnClientApi for TurnClientUdp {
 
     fn poll_recv(&mut self, _now: Instant) -> Option<TurnPeerData<Vec<u8>>> {
         None
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use turn_server_proto::server::TurnServer;
+
+    use super::*;
+
+    use crate::common::tests::{
+        turn_allocate_delete, turn_allocate_expire_client, turn_allocate_expire_server,
+        turn_allocate_permission, turn_allocate_refresh, turn_channel_bind,
+        turn_channel_bind_refresh, turn_create_permission_refresh, turn_create_permission_timeout,
+        turn_offpath_data, turn_peer_incoming_stun, turn_unparseable_data, TurnTest,
+    };
+
+    pub(crate) fn turn_udp_new(
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        credentials: TurnCredentials,
+    ) -> TurnClientUdp {
+        TurnClientUdp::allocate(local_addr, remote_addr, credentials)
+    }
+
+    fn turn_server_udp_new(listen_address: SocketAddr, realm: String) -> TurnServer {
+        TurnServer::new(TransportType::Udp, listen_address, realm)
+    }
+
+    pub(crate) fn create_test() -> TurnTest<TurnClientUdp, TurnServer> {
+        TurnTest::<TurnClientUdp, TurnServer>::builder().build(turn_udp_new, turn_server_udp_new)
+    }
+
+    #[test]
+    fn test_turn_udp_allocate_udp_permission() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test();
+        turn_allocate_permission(&mut test, now);
+    }
+
+    #[test]
+    fn test_udp_turn_allocate_expire_server() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test();
+        turn_allocate_expire_server(&mut test, now);
+    }
+
+    #[test]
+    fn test_udp_turn_allocate_expire_client() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test();
+        turn_allocate_expire_client(&mut test, now);
+    }
+
+    #[test]
+    fn test_udp_turn_allocate_refresh() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test();
+        turn_allocate_refresh(&mut test, now);
+    }
+
+    #[test]
+    fn test_udp_turn_allocate_delete() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test();
+        turn_allocate_delete(&mut test, now);
+    }
+
+    #[test]
+    fn test_udp_turn_channel_bind() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test();
+        turn_channel_bind(&mut test, now);
+    }
+
+    #[test]
+    fn test_udp_turn_peer_incoming_stun() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test();
+        turn_peer_incoming_stun(&mut test, now);
+    }
+
+    #[test]
+    fn test_udp_turn_create_permission_refresh() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test();
+        turn_create_permission_refresh(&mut test, now);
+    }
+
+    #[test]
+    fn test_udp_turn_create_permission_timeout() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test();
+        turn_create_permission_timeout(&mut test, now);
+    }
+
+    #[test]
+    fn test_udp_turn_channel_bind_refresh() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test();
+        turn_channel_bind_refresh(&mut test, now);
+    }
+
+    #[test]
+    fn test_udp_offpath_data() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test();
+        turn_offpath_data(&mut test, now);
+    }
+
+    #[test]
+    fn test_udp_unparseable_data() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test();
+        turn_unparseable_data(&mut test, now);
     }
 }
