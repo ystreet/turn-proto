@@ -11,13 +11,19 @@ edition.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["rustls"]
+rustls = ["dep:rustls"]
+
 [dependencies]
 byteorder.workspace = true
 stun-proto.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 turn-types = { path = "../turn-types", version = "0.1.0" }
+rustls = { workspace = true, optional = true }
 
 [dev-dependencies]
+rustls.workspace = true
 turn-client-proto = { path = "../turn-client-proto" }
 tracing-subscriber.workspace = true

@@ -6,6 +6,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+//! A TURN server that can handle UDP and TCP connections.
+
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -32,6 +34,8 @@ use turn_types::message::{ALLOCATE, CHANNEL_BIND, DATA, REFRESH, SEND};
 use turn_types::TurnCredentials;
 
 use tracing::{debug, error, info, trace, warn};
+
+use crate::api::{TurnServerApi, TurnServerPollRet};
 
 static MINIMUM_NONCE_EXPIRY_DURATION: Duration = Duration::from_secs(30);
 static DEFAULT_NONCE_EXPIRY_DURATION: Duration = Duration::from_secs(3600);
@@ -72,28 +76,13 @@ struct NonceData {
     local_addr: SocketAddr,
 }
 
-/// Return value for [poll](TurnServer::poll).
-#[derive(Debug)]
-pub enum TurnServerPollRet {
-    /// Wait until the specified time before calling poll() again.
-    WaitUntil(Instant),
-    /// Allocate a UDP socket for a client specified by the client's network 5-tuple.
-    AllocateSocketUdp {
-        /// The transport of the client asking for an allocation.
-        transport: TransportType,
-        /// The TURN server address of the client asking for an allocation.
-        local_addr: SocketAddr,
-        /// The client local address of the client asking for an allocation.
-        remote_addr: SocketAddr,
-    },
-}
-
 impl TurnServer {
     /// Construct a new [`TurnServer`]
     ///
     /// # Examples
     /// ```
-    /// # use turn_server_proto::TurnServer;
+    /// # use turn_server_proto::server::TurnServer;
+    /// # use turn_server_proto::api::TurnServerApi;
     /// # use stun_proto::types::TransportType;
     /// let realm = String::from("realm");
     /// let listen_addr = "10.0.0.1:3478".parse().unwrap();
@@ -112,318 +101,6 @@ impl TurnServer {
             users: HashMap::default(),
             nonce_expiry_duration: DEFAULT_NONCE_EXPIRY_DURATION,
         }
-    }
-
-    /// Add a user credentials that would be accepted by this [`TurnServer`].
-    pub fn add_user(&mut self, username: String, password: String) {
-        self.users.insert(username, password);
-    }
-
-    /// The address that the [`TurnServer`] is listening on for incoming client connections.
-    pub fn listen_address(&self) -> SocketAddr {
-        self.stun.local_addr()
-    }
-
-    /// Set the amount of time that a Nonce (used for authentication) will expire and a new Nonce
-    /// will need to be acquired by a client.
-    pub fn set_nonce_expiry_duration(&mut self, expiry_duration: Duration) {
-        if expiry_duration < MINIMUM_NONCE_EXPIRY_DURATION {
-            panic!("Attempted to set a nonce expiry duration ({expiry_duration:?}) of less than the allowed minimum ({MINIMUM_NONCE_EXPIRY_DURATION:?})");
-        }
-        self.nonce_expiry_duration = expiry_duration;
-    }
-
-    /// Provide received data to the [`TurnServer`].
-    ///
-    /// Any returned Transmit should be forwarded to the appropriate socket.
-    #[tracing::instrument(
-        name = "turn_server_recv",
-        skip(self, transmit),
-        fields(
-            transport = %transmit.transport,
-            remote_addr = %transmit.from,
-            local_addr = %transmit.to,
-            data_len = transmit.data.as_ref().len(),
-        )
-        err,
-        ret,
-    )]
-    pub fn recv<T: AsRef<[u8]>>(
-        &mut self,
-        transmit: Transmit<T>,
-        now: Instant,
-    ) -> Result<Option<Transmit<Vec<u8>>>, StunError> {
-        if let Some((client, allocation)) =
-            self.allocation_from_public_5tuple(transmit.transport, transmit.to, transmit.from)
-        {
-            // A packet from the relayed address needs to be sent to the client that set up
-            // the allocation.
-            let Some(_permission) =
-                allocation.permissions_from_5tuple(transmit.transport, transmit.to, transmit.from)
-            else {
-                warn!(
-                    "no permission for {:?} for this allocation {:?}",
-                    transmit.from, allocation.addr
-                );
-                return Ok(None);
-            };
-
-            if let Some(existing) =
-                allocation.channel_from_5tuple(transmit.transport, transmit.to, transmit.from)
-            {
-                debug!(
-                    "found existing channel {} for {:?} for this allocation {:?}",
-                    existing.id, transmit.from, allocation.addr
-                );
-                let mut data = vec![0; 4];
-                data[0..2].copy_from_slice(&existing.id.to_be_bytes());
-                data[2..4].copy_from_slice(&(transmit.data.as_ref().len() as u16).to_be_bytes());
-                // XXX: try to avoid copy?
-                data.extend_from_slice(transmit.data.as_ref());
-                Ok(Some(Transmit::new(
-                    data.into_boxed_slice().into(),
-                    client.transport,
-                    client.local_addr,
-                    client.remote_addr,
-                )))
-            } else {
-                // no channel with that id
-                debug!(
-                    "no channel for {:?} for this allocation {:?}, using DATA indication",
-                    transmit.from, allocation.addr
-                );
-                let transaction_id = TransactionId::generate();
-                let mut builder = Message::builder(
-                    MessageType::from_class_method(MessageClass::Indication, DATA),
-                    transaction_id,
-                    MessageWriteVec::new(),
-                );
-                let peer_address = XorPeerAddress::new(transmit.from, transaction_id);
-                builder.add_attribute(&peer_address).unwrap();
-                let data = AData::new(transmit.data.as_ref());
-                builder.add_attribute(&data).unwrap();
-                // XXX: try to avoid copy?
-                let msg_data = builder.finish();
-
-                Ok(Some(Transmit::new(
-                    msg_data.into_boxed_slice().into(),
-                    client.transport,
-                    client.local_addr,
-                    client.remote_addr,
-                )))
-            }
-        } else {
-            // TODO: TCP buffering requirements
-            match Message::from_bytes(transmit.data.as_ref()) {
-                Ok(msg) => {
-                    trace!("received {} from {:?}", msg, transmit.from);
-                    match self.handle_stun(
-                        &msg,
-                        transmit.transport,
-                        transmit.from,
-                        transmit.to,
-                        now,
-                    ) {
-                        Err(builder) => {
-                            let data = builder.finish();
-                            return Ok(Some(Transmit::new(
-                                data,
-                                transmit.transport,
-                                transmit.to,
-                                transmit.from,
-                            )));
-                        }
-                        Ok(Some(transmit)) => Ok(Some(transmit)),
-                        Ok(None) => Ok(None),
-                    }
-                }
-                Err(_) => {
-                    if let Some(client) =
-                        self.client_from_5tuple(transmit.transport, transmit.to, transmit.from)
-                    {
-                        trace!(
-                            "received {} bytes from {:?}",
-                            transmit.data.as_ref().len(),
-                            transmit.from
-                        );
-                        let Ok(channel) = ChannelData::parse(transmit.data.as_ref()) else {
-                            return Ok(None);
-                        };
-                        trace!(
-                            "parsed channel data with id {} and data length {}",
-                            channel.id(),
-                            channel.data().len()
-                        );
-                        let Some((allocation, existing)) =
-                            client.allocations.iter().find_map(|allocation| {
-                                allocation
-                                    .channel_from_id(channel.id())
-                                    .map(|perm| (allocation, perm))
-                            })
-                        else {
-                            warn!(
-                                "no channel id {} for this client {:?}",
-                                channel.id(),
-                                client.remote_addr
-                            );
-                            // no channel with that id
-                            return Ok(None);
-                        };
-
-                        // A packet from the client needs to be sent to the peer referenced by the
-                        // configured channel.
-                        let Some(_permission) = allocation.permissions_from_5tuple(
-                            allocation.ttype,
-                            allocation.addr,
-                            existing.peer_addr,
-                        ) else {
-                            warn!(
-                                "no permission for {:?} for this allocation {:?}",
-                                existing.peer_addr, allocation.addr
-                            );
-                            return Ok(None);
-                        };
-                        Ok(Some(Transmit::new(
-                            channel.data().to_vec(),
-                            allocation.ttype,
-                            allocation.addr,
-                            existing.peer_addr,
-                        )))
-                    } else {
-                        trace!(
-                            "No handler for {} bytes over {:?} from {:?}, to {:?}. Ignoring",
-                            transmit.data.as_ref().len(),
-                            transmit.transport,
-                            transmit.from,
-                            transmit.to
-                        );
-                        Ok(None)
-                    }
-                }
-            }
-        }
-    }
-
-    /// Poll the [`TurnServer`] in order to make further progress.
-    ///
-    /// The returned value indicates what the caller should do.
-    #[tracing::instrument(name = "turn_server_poll", skip(self), ret)]
-    pub fn poll(&mut self, now: Instant) -> TurnServerPollRet {
-        for pending in self.pending_allocates.iter_mut() {
-            if pending.asked {
-                continue;
-            }
-
-            // TODO: TCP
-            return TurnServerPollRet::AllocateSocketUdp {
-                transport: pending.client.transport,
-                local_addr: pending.client.local_addr,
-                remote_addr: pending.client.remote_addr,
-            };
-        }
-
-        for client in self.clients.iter_mut() {
-            client.allocations.retain_mut(|allocation| {
-                if allocation.expires_at <= now {
-                    allocation
-                        .permissions
-                        .retain_mut(|permission| permission.expires_at <= now);
-                    allocation
-                        .channels
-                        .retain_mut(|channel| channel.expires_at <= now);
-                    true
-                } else {
-                    false
-                }
-            });
-        }
-
-        TurnServerPollRet::WaitUntil(now + Duration::from_secs(60))
-    }
-
-    /// Poll for a new Transmit to send over a socket.
-    #[tracing::instrument(name = "turn_server_poll_transmit", skip(self))]
-    pub fn poll_transmit(&mut self, now: Instant) -> Option<Transmit<Vec<u8>>> {
-        if let Some(transmit) = self.pending_transmits.pop_back() {
-            return Some(transmit);
-        }
-        None
-    }
-
-    /// Notify the [`TurnServer`] that a UDP socket has been allocated (or an error) in response to
-    /// [TurnServerPollRet::AllocateSocketUdp].
-    #[tracing::instrument(name = "turn_server_allocated_udp_socket", skip(self))]
-    pub fn allocated_udp_socket(
-        &mut self,
-        transport: TransportType,
-        local_addr: SocketAddr,
-        remote_addr: SocketAddr,
-        socket_addr: Result<SocketAddr, ()>,
-        now: Instant,
-    ) {
-        let Some(position) = self.pending_allocates.iter().position(|pending| {
-            pending.client.transport == transport
-                && pending.client.local_addr == local_addr
-                && pending.client.remote_addr == remote_addr
-        }) else {
-            warn!("No pending allocation for transport: Udp, local: {local_addr:?}, remote {remote_addr:?}");
-            return;
-        };
-        info!("pending allocation for transport: Udp, local: {local_addr:?}, remote {remote_addr:?} resulted in {socket_addr:?}");
-        let mut pending = self.pending_allocates.remove(position).unwrap();
-        let transaction_id = pending.transaction_id;
-        let to = pending.client.remote_addr;
-
-        let mut builder = if let Ok(socket_addr) = socket_addr {
-            pending.client.allocations.push(Allocation {
-                addr: socket_addr,
-                ttype: TransportType::Udp,
-                expires_at: now + DEFAULT_ALLOCATION_DURATION,
-                permissions: vec![],
-                channels: vec![],
-            });
-
-            let mut builder = Message::builder(
-                MessageType::from_class_method(MessageClass::Success, ALLOCATE),
-                transaction_id,
-                MessageWriteVec::new(),
-            );
-            let relayed_address = XorRelayedAddress::new(socket_addr, transaction_id);
-            builder.add_attribute(&relayed_address).unwrap();
-            let lifetime = Lifetime::new(1800);
-            builder.add_attribute(&lifetime).unwrap();
-            // TODO RESERVATION-TOKEN
-            let mapped_address = XorMappedAddress::new(pending.client.remote_addr, transaction_id);
-            builder.add_attribute(&mapped_address).unwrap();
-
-            builder
-        } else {
-            let mut builder = Message::builder(
-                MessageType::from_class_method(MessageClass::Error, ALLOCATE),
-                transaction_id,
-                MessageWriteVec::new(),
-            );
-            let error = ErrorCode::builder(ErrorCode::INSUFFICIENT_CAPACITY)
-                .build()
-                .unwrap();
-            builder.add_attribute(&error).unwrap();
-            builder
-        };
-        builder
-            .add_message_integrity(
-                &MessageIntegrityCredentials::LongTerm(pending.client.credentials.clone()),
-                stun_proto::types::message::IntegrityAlgorithm::Sha1,
-            )
-            .unwrap();
-        let msg = builder.finish();
-
-        let Ok(transmit) = self.stun.send(msg, to, now) else {
-            return;
-        };
-        if socket_addr.is_ok() {
-            self.clients.push(pending.client);
-        }
-        self.pending_transmits.push_back(transmit);
     }
 
     fn validate_stun(
@@ -1181,6 +858,7 @@ impl TurnServer {
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
     ) {
+        info!("attempting to remove client {ttype}, {remote_addr} -> {local_addr}");
         self.clients.retain(|client| {
             client.transport != ttype
                 && client.remote_addr != remote_addr
@@ -1208,6 +886,307 @@ impl TurnServer {
                 })
                 .map(|allocation| (client, allocation))
         })
+    }
+}
+
+impl TurnServerApi for TurnServer {
+    fn add_user(&mut self, username: String, password: String) {
+        self.users.insert(username, password);
+    }
+
+    fn listen_address(&self) -> SocketAddr {
+        self.stun.local_addr()
+    }
+
+    fn set_nonce_expiry_duration(&mut self, expiry_duration: Duration) {
+        if expiry_duration < MINIMUM_NONCE_EXPIRY_DURATION {
+            panic!("Attempted to set a nonce expiry duration ({expiry_duration:?}) of less than the allowed minimum ({MINIMUM_NONCE_EXPIRY_DURATION:?})");
+        }
+        self.nonce_expiry_duration = expiry_duration;
+    }
+
+    #[tracing::instrument(
+        name = "turn_server_recv",
+        skip(self, transmit),
+        fields(
+            transport = %transmit.transport,
+            remote_addr = %transmit.from,
+            local_addr = %transmit.to,
+            data_len = transmit.data.as_ref().len(),
+        )
+        err,
+        ret,
+    )]
+    fn recv<T: AsRef<[u8]>>(
+        &mut self,
+        transmit: Transmit<T>,
+        now: Instant,
+    ) -> Result<Option<Transmit<Vec<u8>>>, StunError> {
+        if let Some((client, allocation)) =
+            self.allocation_from_public_5tuple(transmit.transport, transmit.to, transmit.from)
+        {
+            // A packet from the relayed address needs to be sent to the client that set up
+            // the allocation.
+            let Some(_permission) =
+                allocation.permissions_from_5tuple(transmit.transport, transmit.to, transmit.from)
+            else {
+                warn!(
+                    "no permission for {:?} for this allocation {:?}",
+                    transmit.from, allocation.addr
+                );
+                return Ok(None);
+            };
+
+            if let Some(existing) =
+                allocation.channel_from_5tuple(transmit.transport, transmit.to, transmit.from)
+            {
+                debug!(
+                    "found existing channel {} for {:?} for this allocation {:?}",
+                    existing.id, transmit.from, allocation.addr
+                );
+                let mut data = vec![0; 4];
+                data[0..2].copy_from_slice(&existing.id.to_be_bytes());
+                data[2..4].copy_from_slice(&(transmit.data.as_ref().len() as u16).to_be_bytes());
+                // XXX: try to avoid copy?
+                data.extend_from_slice(transmit.data.as_ref());
+                Ok(Some(Transmit::new(
+                    data.into_boxed_slice().into(),
+                    client.transport,
+                    client.local_addr,
+                    client.remote_addr,
+                )))
+            } else {
+                // no channel with that id
+                debug!(
+                    "no channel for {:?} for this allocation {:?}, using DATA indication",
+                    transmit.from, allocation.addr
+                );
+                let transaction_id = TransactionId::generate();
+                let mut builder = Message::builder(
+                    MessageType::from_class_method(MessageClass::Indication, DATA),
+                    transaction_id,
+                    MessageWriteVec::new(),
+                );
+                let peer_address = XorPeerAddress::new(transmit.from, transaction_id);
+                builder.add_attribute(&peer_address).unwrap();
+                let data = AData::new(transmit.data.as_ref());
+                builder.add_attribute(&data).unwrap();
+                // XXX: try to avoid copy?
+                let msg_data = builder.finish();
+
+                Ok(Some(Transmit::new(
+                    msg_data.into_boxed_slice().into(),
+                    client.transport,
+                    client.local_addr,
+                    client.remote_addr,
+                )))
+            }
+        } else {
+            // TODO: TCP buffering requirements
+            match Message::from_bytes(transmit.data.as_ref()) {
+                Ok(msg) => {
+                    trace!("received {} from {:?}", msg, transmit.from);
+                    match self.handle_stun(
+                        &msg,
+                        transmit.transport,
+                        transmit.from,
+                        transmit.to,
+                        now,
+                    ) {
+                        Err(builder) => {
+                            let data = builder.finish();
+                            return Ok(Some(Transmit::new(
+                                data,
+                                transmit.transport,
+                                transmit.to,
+                                transmit.from,
+                            )));
+                        }
+                        Ok(Some(transmit)) => Ok(Some(transmit)),
+                        Ok(None) => Ok(None),
+                    }
+                }
+                Err(_) => {
+                    if let Some(client) =
+                        self.client_from_5tuple(transmit.transport, transmit.to, transmit.from)
+                    {
+                        trace!(
+                            "received {} bytes from {:?}",
+                            transmit.data.as_ref().len(),
+                            transmit.from
+                        );
+                        let Ok(channel) = ChannelData::parse(transmit.data.as_ref()) else {
+                            return Ok(None);
+                        };
+                        trace!(
+                            "parsed channel data with id {} and data length {}",
+                            channel.id(),
+                            channel.data().len()
+                        );
+                        let Some((allocation, existing)) =
+                            client.allocations.iter().find_map(|allocation| {
+                                allocation
+                                    .channel_from_id(channel.id())
+                                    .map(|perm| (allocation, perm))
+                            })
+                        else {
+                            warn!(
+                                "no channel id {} for this client {:?}",
+                                channel.id(),
+                                client.remote_addr
+                            );
+                            // no channel with that id
+                            return Ok(None);
+                        };
+
+                        // A packet from the client needs to be sent to the peer referenced by the
+                        // configured channel.
+                        let Some(_permission) = allocation.permissions_from_5tuple(
+                            allocation.ttype,
+                            allocation.addr,
+                            existing.peer_addr,
+                        ) else {
+                            warn!(
+                                "no permission for {:?} for this allocation {:?}",
+                                existing.peer_addr, allocation.addr
+                            );
+                            return Ok(None);
+                        };
+                        Ok(Some(Transmit::new(
+                            channel.data().to_vec(),
+                            allocation.ttype,
+                            allocation.addr,
+                            existing.peer_addr,
+                        )))
+                    } else {
+                        trace!(
+                            "No handler for {} bytes over {:?} from {:?}, to {:?}. Ignoring",
+                            transmit.data.as_ref().len(),
+                            transmit.transport,
+                            transmit.from,
+                            transmit.to
+                        );
+                        Ok(None)
+                    }
+                }
+            }
+        }
+    }
+
+    #[tracing::instrument(name = "turn_server_poll", skip(self), ret)]
+    fn poll(&mut self, now: Instant) -> TurnServerPollRet {
+        for pending in self.pending_allocates.iter_mut() {
+            if pending.asked {
+                continue;
+            }
+
+            // TODO: TCP
+            return TurnServerPollRet::AllocateSocketUdp {
+                transport: pending.client.transport,
+                local_addr: pending.client.local_addr,
+                remote_addr: pending.client.remote_addr,
+            };
+        }
+
+        for client in self.clients.iter_mut() {
+            client.allocations.retain_mut(|allocation| {
+                if allocation.expires_at >= now {
+                    allocation
+                        .permissions
+                        .retain_mut(|permission| permission.expires_at >= now);
+                    allocation
+                        .channels
+                        .retain_mut(|channel| channel.expires_at >= now);
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+
+        TurnServerPollRet::WaitUntil(now + Duration::from_secs(60))
+    }
+
+    #[tracing::instrument(name = "turn_server_poll_transmit", skip(self))]
+    fn poll_transmit(&mut self, now: Instant) -> Option<Transmit<Vec<u8>>> {
+        if let Some(transmit) = self.pending_transmits.pop_back() {
+            return Some(transmit);
+        }
+        None
+    }
+
+    #[tracing::instrument(name = "turn_server_allocated_udp_socket", skip(self))]
+    fn allocated_udp_socket(
+        &mut self,
+        transport: TransportType,
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        socket_addr: Result<SocketAddr, ()>,
+        now: Instant,
+    ) {
+        let Some(position) = self.pending_allocates.iter().position(|pending| {
+            pending.client.transport == transport
+                && pending.client.local_addr == local_addr
+                && pending.client.remote_addr == remote_addr
+        }) else {
+            warn!("No pending allocation for transport: Udp, local: {local_addr:?}, remote {remote_addr:?}");
+            return;
+        };
+        info!("pending allocation for transport: Udp, local: {local_addr:?}, remote {remote_addr:?} resulted in {socket_addr:?}");
+        let mut pending = self.pending_allocates.remove(position).unwrap();
+        let transaction_id = pending.transaction_id;
+        let to = pending.client.remote_addr;
+
+        let mut builder = if let Ok(socket_addr) = socket_addr {
+            pending.client.allocations.push(Allocation {
+                addr: socket_addr,
+                ttype: TransportType::Udp,
+                expires_at: now + DEFAULT_ALLOCATION_DURATION,
+                permissions: vec![],
+                channels: vec![],
+            });
+
+            let mut builder = Message::builder(
+                MessageType::from_class_method(MessageClass::Success, ALLOCATE),
+                transaction_id,
+                MessageWriteVec::new(),
+            );
+            let relayed_address = XorRelayedAddress::new(socket_addr, transaction_id);
+            builder.add_attribute(&relayed_address).unwrap();
+            let lifetime = Lifetime::new(1800);
+            builder.add_attribute(&lifetime).unwrap();
+            // TODO RESERVATION-TOKEN
+            let mapped_address = XorMappedAddress::new(pending.client.remote_addr, transaction_id);
+            builder.add_attribute(&mapped_address).unwrap();
+
+            builder
+        } else {
+            let mut builder = Message::builder(
+                MessageType::from_class_method(MessageClass::Error, ALLOCATE),
+                transaction_id,
+                MessageWriteVec::new(),
+            );
+            let error = ErrorCode::builder(ErrorCode::INSUFFICIENT_CAPACITY)
+                .build()
+                .unwrap();
+            builder.add_attribute(&error).unwrap();
+            builder
+        };
+        builder
+            .add_message_integrity(
+                &MessageIntegrityCredentials::LongTerm(pending.client.credentials.clone()),
+                stun_proto::types::message::IntegrityAlgorithm::Sha1,
+            )
+            .unwrap();
+        let msg = builder.finish();
+
+        let Ok(transmit) = self.stun.send(msg, to, now) else {
+            unreachable!();
+        };
+        if socket_addr.is_ok() {
+            self.clients.push(pending.client);
+        }
+        self.pending_transmits.push_back(transmit);
     }
 }
 
