@@ -81,6 +81,7 @@ impl TurnClientTls {
                     now,
                 ) {
                     TurnProtocolRecv::Handled => TurnRecvRet::Handled,
+                    // XXX: this might be grounds for connection termination.
                     TurnProtocolRecv::Ignored(_) => TurnRecvRet::Handled,
                     TurnProtocolRecv::PeerData {
                         data: _,
@@ -276,6 +277,10 @@ impl TurnClientApi for TurnClientTls {
         Ok(())
     }
 
+    fn have_permission(&self, transport: TransportType, to: IpAddr) -> bool {
+        self.protocol.have_permission(transport, to)
+    }
+
     fn bind_channel(
         &mut self,
         transport: TransportType,
@@ -328,6 +333,14 @@ impl TurnClientApi for TurnClientTls {
         Ok(None)
     }
 
+    #[tracing::instrument(
+        name = "turn_rustls_recv",
+        skip(self, transmit, now),
+        fields(
+            from = ?transmit.from,
+            data_len = transmit.data.as_ref().len()
+        )
+    )]
     fn recv<T: AsRef<[u8]> + std::fmt::Debug>(
         &mut self,
         transmit: Transmit<T>,
@@ -426,5 +439,337 @@ impl TurnClientApi for TurnClientTls {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crate::common::tests::{transmit_send_build, TurnTest};
+    use turn_types::message::CREATE_PERMISSION;
+    use turn_types::stun::message::{Message, MessageType, MessageWriteVec, TransactionId};
+    use turn_types::stun::prelude::MessageWrite;
+
+    use super::*;
+
+    use rcgen::CertifiedKey;
+    use rustls::crypto::aws_lc_rs as crypto_provider;
+    use rustls::pki_types::PrivateKeyDer;
+    use rustls::ServerConfig;
+    use turn_server_proto::api::TurnServerApi;
+    use turn_server_proto::rustls::RustlsTurnServer;
+    mod danger {
+        use rustls::client::danger::HandshakeSignatureValid;
+        use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
+        use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+        use rustls::DigitallySignedStruct;
+
+        #[derive(Debug)]
+        pub struct NoCertificateVerification(CryptoProvider);
+
+        impl NoCertificateVerification {
+            pub fn new(provider: CryptoProvider) -> Self {
+                Self(provider)
+            }
+        }
+
+        impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
+            fn verify_server_cert(
+                &self,
+                _end_entity: &CertificateDer<'_>,
+                _intermediates: &[CertificateDer<'_>],
+                _server_name: &ServerName<'_>,
+                _ocsp: &[u8],
+                _now: UnixTime,
+            ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+                Ok(rustls::client::danger::ServerCertVerified::assertion())
+            }
+
+            fn verify_tls12_signature(
+                &self,
+                message: &[u8],
+                cert: &CertificateDer<'_>,
+                dss: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                verify_tls12_signature(
+                    message,
+                    cert,
+                    dss,
+                    &self.0.signature_verification_algorithms,
+                )
+            }
+
+            fn verify_tls13_signature(
+                &self,
+                message: &[u8],
+                cert: &CertificateDer<'_>,
+                dss: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                verify_tls13_signature(
+                    message,
+                    cert,
+                    dss,
+                    &self.0.signature_verification_algorithms,
+                )
+            }
+
+            fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+                self.0.signature_verification_algorithms.supported_schemes()
+            }
+        }
+    }
+
+    fn client_config() -> Arc<ClientConfig> {
+        Arc::new(
+            ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(danger::NoCertificateVerification::new(
+                    crypto_provider::default_provider(),
+                )))
+                .with_no_client_auth(),
+        )
+    }
+
+    fn server_config() -> Arc<ServerConfig> {
+        let CertifiedKey { cert, signing_key } =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        Arc::new(
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![cert.der().to_owned()],
+                    PrivateKeyDer::try_from(signing_key.serialize_der())
+                        .unwrap()
+                        .clone_key(),
+                )
+                .unwrap(),
+        )
+    }
+
+    fn turn_rustls_new(
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        credentials: TurnCredentials,
+    ) -> TurnClientTls {
+        TurnClientTls::allocate(
+            local_addr,
+            remote_addr,
+            credentials,
+            remote_addr.ip().into(),
+            client_config(),
+        )
+    }
+
+    fn turn_server_rustls_new(listen_address: SocketAddr, realm: String) -> RustlsTurnServer {
+        RustlsTurnServer::new(listen_address, realm, server_config())
+    }
+
+    fn create_test() -> TurnTest<TurnClientTls, RustlsTurnServer> {
+        TurnTest::<TurnClientTls, RustlsTurnServer>::builder()
+            .build(turn_rustls_new, turn_server_rustls_new)
+    }
+
+    fn complete_io<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
+        let mut handled = false;
+        loop {
+            test.client.poll(now);
+            test.server.poll(now);
+            if let Some(transmit) = test.client.poll_transmit(now) {
+                handled = true;
+                trace!("have transmit: {transmit:?}");
+                if let Some(transmit) = test.server.recv(transmit, now).unwrap() {
+                    trace!("have transmit: {transmit:?}");
+                    test.client.recv(transmit, now);
+                }
+            }
+            if let Some(transmit) = test.server.poll_transmit(now) {
+                handled = true;
+                trace!("have transmit: {transmit:?}");
+                test.client_recv(transmit, now);
+            }
+            if !handled {
+                break;
+            }
+            handled = false;
+        }
+    }
+
+    fn allocate_udp<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
+        complete_io(test, now);
+        test.server.allocated_udp_socket(
+            TransportType::Tcp,
+            test.client.remote_addr(),
+            test.client.local_addr(),
+            Ok(test.turn_alloc_addr),
+            now,
+        );
+        complete_io(test, now);
+        let event = test.client.poll_event().unwrap();
+        assert!(matches!(event, TurnEvent::AllocationCreated(_, _)));
+        assert_eq!(
+            test.client.relayed_addresses().next(),
+            Some((TransportType::Udp, test.turn_alloc_addr))
+        );
+    }
+
+    fn udp_permission<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
+        test.client
+            .create_permission(TransportType::Udp, test.peer_addr.ip(), now)
+            .unwrap();
+        complete_io(test, now);
+
+        let event = test.client.poll_event().unwrap();
+        assert!(matches!(event, TurnEvent::PermissionCreated(_, _)));
+        let (transport, relayed) = test.client.relayed_addresses().next().unwrap();
+        assert!(test
+            .client
+            .permissions(transport, relayed)
+            .any(|perm_ip| perm_ip == test.peer_addr.ip()));
+        assert!(test.client.have_permission(transport, test.peer_addr.ip()));
+    }
+
+    fn delete_udp<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
+        test.client.delete(now).unwrap();
+        complete_io(test, now);
+        assert_eq!(test.client.relayed_addresses().count(), 0);
+    }
+
+    fn channel_bind<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
+        test.client
+            .bind_channel(TransportType::Udp, test.peer_addr, now)
+            .unwrap();
+        complete_io(test, now);
+
+        if let Some(event) = test.client.poll_event() {
+            assert!(matches!(event, TurnEvent::PermissionCreated(_, _)));
+        }
+        let (transport, relayed) = test.client.relayed_addresses().next().unwrap();
+        assert!(test
+            .client
+            .permissions(transport, relayed)
+            .any(|perm_ip| perm_ip == test.peer_addr.ip()));
+        assert!(test.client.have_permission(transport, test.peer_addr.ip()));
+    }
+
+    fn sendrecv_data<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
+        // client to peer
+        let data = [4; 8];
+        let transmit = test
+            .client
+            .send_to(TransportType::Udp, test.peer_addr, data, now)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            transmit.data,
+            DelayedMessageOrChannelSend::Data(_)
+        ));
+        let transmit = transmit_send_build(transmit);
+        assert_eq!(transmit.transport, test.client.transport());
+        assert_eq!(transmit.from, test.client.local_addr());
+        assert_eq!(transmit.to, test.server.listen_address());
+        let Ok(Some(transmit)) = test.server.recv(transmit, now) else {
+            unreachable!();
+        };
+        assert_eq!(transmit.transport, TransportType::Udp);
+        assert_eq!(transmit.from, test.turn_alloc_addr);
+        assert_eq!(transmit.to, test.peer_addr);
+
+        // peer to client
+        let sent_data = [5; 12];
+        let Some(transmit) = test
+            .server
+            .recv(
+                Transmit::new(
+                    sent_data,
+                    TransportType::Udp,
+                    test.peer_addr,
+                    test.turn_alloc_addr,
+                ),
+                now,
+            )
+            .unwrap()
+        else {
+            unreachable!();
+        };
+        assert_eq!(transmit.transport, test.client.transport());
+        assert_eq!(transmit.from, test.server.listen_address());
+        assert_eq!(transmit.to, test.client.local_addr());
+        let TurnRecvRet::PeerData(peer_data) = test.client.recv(transmit, now) else {
+            unreachable!();
+        };
+        assert_eq!(peer_data.peer, test.peer_addr);
+        assert_eq!(peer_data.data(), sent_data);
+    }
+
+    #[test]
+    fn test_turn_rustls_allocate_udp_permission() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test();
+        allocate_udp(&mut test, now);
+        udp_permission(&mut test, now);
+        sendrecv_data(&mut test, now);
+    }
+
+    #[test]
+    fn test_turn_rustls_allocate_refresh() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test();
+        allocate_udp(&mut test, now);
+        let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
+            unreachable!();
+        };
+        assert!(now + Duration::from_secs(1000) < expiry);
+        udp_permission(&mut test, expiry);
+        sendrecv_data(&mut test, now);
+    }
+
+    #[test]
+    fn test_turn_rustls_allocate_delete() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test();
+        allocate_udp(&mut test, now);
+        delete_udp(&mut test, now);
+    }
+
+    #[test]
+    fn test_turn_rustls_allocate_bind_channel() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test();
+        allocate_udp(&mut test, now);
+        channel_bind(&mut test, now);
+        sendrecv_data(&mut test, now);
+    }
+
+    #[test]
+    fn test_turn_rustls_offpath_data() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test();
+        allocate_udp(&mut test, now);
+        udp_permission(&mut test, now);
+        let data = Message::builder(
+            MessageType::from_class_method(
+                turn_types::stun::message::MessageClass::Error,
+                CREATE_PERMISSION,
+            ),
+            TransactionId::generate(),
+            MessageWriteVec::new(),
+        )
+        .finish();
+        let transmit = Transmit::new(
+            data,
+            test.client.transport(),
+            test.turn_alloc_addr,
+            test.client.local_addr(),
+        );
+        assert!(matches!(
+            test.client.recv(transmit, now),
+            TurnRecvRet::Ignored(_)
+        ));
     }
 }

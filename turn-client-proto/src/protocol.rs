@@ -36,13 +36,13 @@ use crate::common::{
 };
 
 /// Buffer before an expiration time before sending a refresh packet.
-static EXPIRY_BUFFER: Duration = Duration::from_secs(60);
+pub(crate) static EXPIRY_BUFFER: Duration = Duration::from_secs(60);
 /// Lifetime of a permission.
-static PERMISSION_DURATION: Duration = Duration::from_secs(300);
+pub(crate) static PERMISSION_DURATION: Duration = Duration::from_secs(300);
 /// Lifetime of a channel
-static CHANNEL_DURATION: Duration = Duration::from_secs(600);
+pub(crate) static CHANNEL_DURATION: Duration = Duration::from_secs(600);
 /// Lifetime of a removed channel before the channel can be reused
-static CHANNEL_REMOVE_DURATION: Duration = Duration::from_secs(300);
+pub(crate) static CHANNEL_REMOVE_DURATION: Duration = Duration::from_secs(300);
 
 #[derive(Debug)]
 pub(crate) struct TurnClientProtocol {
@@ -70,6 +70,7 @@ impl TurnClientProtocol {
     }
 
     fn send_initial_request(&mut self, now: Instant) -> (Transmit<Data<'static>>, TransactionId) {
+        info!("sending initial ALLOCATE");
         let mut msg = Message::builder_request(ALLOCATE, MessageWriteVec::new());
         let lifetime = Lifetime::new(3600);
         msg.add_attribute(&lifetime).unwrap();
@@ -94,6 +95,7 @@ impl TurnClientProtocol {
         nonce: &str,
         now: Instant,
     ) -> (Transmit<Data<'static>>, TransactionId) {
+        info!("sending authenticated ALLOCATE");
         let mut builder = Message::builder_request(ALLOCATE, MessageWriteVec::new());
         let requested_transport = RequestedTransport::new(RequestedTransport::UDP);
         builder.add_attribute(&requested_transport).unwrap();
@@ -142,7 +144,6 @@ impl TurnClientProtocol {
                 .pending_permissions
                 .swap_remove_back(pending_idx)
                 .unwrap();
-            info!("Succesfully created {permission:?}");
             if msg.has_class(stun_proto::types::message::MessageClass::Error) {
                 warn!(
                     "Received error response to create permission request for {}",
@@ -156,6 +157,7 @@ impl TurnClientProtocol {
                     permission.ip,
                 ));
             } else {
+                info!("Succesfully created {permission:?}");
                 pending_events.push_front(TurnEvent::PermissionCreated(
                     allocations[alloc_idx].transport,
                     permission.ip,
@@ -285,6 +287,30 @@ impl TurnClientProtocol {
                     break 'outer;
                 }
             }
+            for (permission, transaction_id) in alloc.pending_permissions.iter_mut() {
+                if *transaction_id != msg.transaction_id() {
+                    continue;
+                }
+                info!("Received STALE_NONCE in response to CREATE_PERMISSION {} for transaction {}, resending", permission.ip, msg.transaction_id());
+                let credentials = LongTermCredentials::new(
+                    credentials.username().to_string(),
+                    credentials.password().to_string(),
+                    realm,
+                );
+                let peer_addr = permission.ip;
+                let (transmit, new_transaction_id) = Self::send_create_permission_request(
+                    stun_agent,
+                    credentials.clone(),
+                    &nonce,
+                    peer_addr,
+                    now,
+                );
+                *transaction_id = new_transaction_id;
+                pending_transmits.push_back(transmit);
+                new_credentials = Some(credentials);
+                stun_agent.remove_outstanding_request(msg.transaction_id());
+                break 'outer;
+            }
             for channel in alloc.channels.iter_mut() {
                 if channel
                     .pending_refresh
@@ -311,6 +337,30 @@ impl TurnClientProtocol {
                     break 'outer;
                 }
             }
+            for (channel, transaction_id) in alloc.pending_channels.iter_mut() {
+                if *transaction_id != msg.transaction_id() {
+                    continue;
+                }
+                info!("Received STALE_NONCE in response to BIND_CHANNEL {} for transaction {}, resending", channel.peer_addr, msg.transaction_id());
+                let credentials = LongTermCredentials::new(
+                    credentials.username().to_string(),
+                    credentials.password().to_string(),
+                    realm,
+                );
+                let (transmit, new_transaction_id) = Self::send_channel_bind_request(
+                    stun_agent,
+                    credentials.clone(),
+                    &nonce,
+                    channel.id,
+                    channel.peer_addr,
+                    now,
+                );
+                *transaction_id = new_transaction_id;
+                pending_transmits.push_back(transmit);
+                new_credentials = Some(credentials);
+                stun_agent.remove_outstanding_request(msg.transaction_id());
+                break 'outer;
+            }
         }
 
         if let Some(credentials) = new_credentials {
@@ -332,6 +382,19 @@ impl TurnClientProtocol {
         }
     }
 
+    #[tracing::instrument(
+        ret,
+        skip(
+            stun_agent,
+            state,
+            allocations,
+            pending_transmits,
+            pending_events,
+            msg,
+            credentials,
+            now
+        )
+    )]
     #[allow(clippy::too_many_arguments)]
     fn handle_stun(
         stun_agent: &mut StunAgent,
@@ -511,6 +574,7 @@ impl TurnClientProtocol {
         lifetime: u32,
         now: Instant,
     ) -> (Transmit<Data<'static>>, TransactionId, u32) {
+        info!(lifetime, "sending REFRESH");
         let mut refresh = Message::builder_request(REFRESH, MessageWriteVec::new());
         let transaction_id = refresh.transaction_id();
         let lt = Lifetime::new(lifetime);
@@ -540,6 +604,7 @@ impl TurnClientProtocol {
         peer_addr: IpAddr,
         now: Instant,
     ) -> (Transmit<Data<'static>>, TransactionId) {
+        info!(peer_addr = ?peer_addr, "sending CREATE_PERMISSION");
         let mut builder = Message::builder_request(CREATE_PERMISSION, MessageWriteVec::new());
         let transaction_id = builder.transaction_id();
 
@@ -574,6 +639,7 @@ impl TurnClientProtocol {
         peer_addr: SocketAddr,
         now: Instant,
     ) -> (Transmit<Data<'static>>, TransactionId) {
+        info!(peer_addr = ?peer_addr, id, "sending CHANNEL_BIND");
         let mut builder = Message::builder_request(CHANNEL_BIND, MessageWriteVec::new());
         let transaction_id = builder.transaction_id();
         let channel_no = ChannelNumber::new(id);
@@ -602,28 +668,15 @@ impl TurnClientProtocol {
         (transmit.into_owned(), transaction_id)
     }
 
-    fn have_permission(&self, transport: TransportType, to: SocketAddr, now: Instant) -> bool {
+    pub(crate) fn have_permission(&self, transport: TransportType, to: IpAddr) -> bool {
         self.allocations.iter().any(|allocation| {
             allocation.transport == transport
-                && allocation.expires_at >= now
+                && !allocation.expired
                 && allocation
                     .permissions
                     .iter()
-                    .any(|permission| permission.expires_at >= now && permission.ip == to.ip())
+                    .any(|permission| !permission.expired && permission.ip == to)
         })
-    }
-
-    #[cfg(test)]
-    fn permission(&self, transport: TransportType, ip: IpAddr) -> Option<&Permission> {
-        self.allocations
-            .iter()
-            .filter(|allocation| allocation.transport == transport)
-            .find_map(|allocation| {
-                allocation
-                    .permissions
-                    .iter()
-                    .find(|permission| permission.ip == ip)
-            })
     }
 
     fn channel(&self, transport: TransportType, addr: SocketAddr) -> Option<&Channel> {
@@ -919,7 +972,7 @@ impl TurnClientProtocol {
         data: T,
         now: Instant,
     ) -> Result<TransmitBuild<DelayedMessageOrChannelSend<T>>, SendError> {
-        if !self.have_permission(transport, to, now) {
+        if !self.have_permission(transport, to.ip()) {
             return Err(SendError::NoPermission);
         }
 
@@ -985,7 +1038,6 @@ impl TurnClientProtocol {
 
     #[tracing::instrument(name = "turn_client_poll", ret, skip(self))]
     pub(crate) fn poll(&mut self, now: Instant) -> TurnPollRet {
-        trace!("polling at {now:?}");
         if !self.pending_events.is_empty() || !self.pending_transmits.is_empty() {
             return TurnPollRet::WaitUntil(now);
         }
@@ -1479,19 +1531,12 @@ pub(crate) enum TurnProtocolChannelRecv {
 
 #[cfg(test)]
 mod tests {
-    use stun_proto::types::{
-        attribute::{MessageIntegrity, MessageIntegritySha256, XorMappedAddress},
-        message::Method,
-        prelude::AttributeStaticType,
-    };
-    use turn_types::{
-        attribute::XorRelayedAddress, channel::ChannelData, stun::message::MessageType,
-    };
+    use turn_server_proto::api::TurnServerApi;
 
-    use crate::common::{DelayedMessageOrChannelSend, DelayedTransmitBuild, TransmitBuild};
+    use crate::common::TurnClientApi;
+    use crate::tcp::TurnRecvRet;
 
     use super::*;
-    use turn_server_proto::{TurnServer, TurnServerPollRet};
 
     #[test]
     fn test_turn_client_protocol_new_properties() {
@@ -1519,875 +1564,26 @@ mod tests {
         assert_eq!(client.relayed_addresses().count(), 0);
     }
 
-    fn transmit_send_build<T: DelayedTransmitBuild + std::fmt::Debug>(
-        transmit: TransmitBuild<T>,
-    ) -> Transmit<Data<'static>> {
-        transmit
-            .build()
-            .reinterpret_data(|data| Data::from(data.into_boxed_slice()))
-    }
-    #[derive(Debug)]
-    struct TurnTestBuilder {
-        turn_listen_addr: SocketAddr,
-        credentials: TurnCredentials,
-        realm: String,
-        client_addr: SocketAddr,
-        client_transport: TransportType,
-        turn_alloc_addr: SocketAddr,
-        peer_addr: SocketAddr,
-    }
-    impl TurnTestBuilder {
-        fn build(self) -> TurnTest {
-            let mut server =
-                TurnServer::new(self.client_transport, self.turn_listen_addr, self.realm);
-            server.add_user(
-                self.credentials.username().to_owned(),
-                self.credentials.password().to_owned(),
-            );
-            server.set_nonce_expiry_duration(Duration::from_secs(30));
-            let stun_agent = StunAgent::builder(self.client_transport, self.client_addr)
-                .remote_addr(self.turn_listen_addr)
-                .build();
-            let client = TurnClientProtocol::new(stun_agent, self.credentials);
-            TurnTest {
-                client,
-                server,
-                turn_alloc_addr: self.turn_alloc_addr,
-                peer_addr: self.peer_addr,
-            }
-        }
-
-        fn client_transport(mut self, transport: TransportType) -> Self {
-            self.client_transport = transport;
-            self
-        }
-    }
-
-    #[derive(Debug)]
-    struct TurnTest {
-        client: TurnClientProtocol,
-        server: TurnServer,
-        turn_alloc_addr: SocketAddr,
-        peer_addr: SocketAddr,
-    }
-
-    impl TurnTest {
-        fn builder() -> TurnTestBuilder {
-            let credentials = TurnCredentials::new("turnuser", "turnpass");
-            TurnTestBuilder {
-                turn_listen_addr: "127.0.0.1:3478".parse().unwrap(),
-                credentials,
-                realm: String::from("realm"),
-                client_addr: "127.0.0.1:2000".parse().unwrap(),
-                client_transport: TransportType::Udp,
-                turn_alloc_addr: "10.0.0.20:2000".parse().unwrap(),
-                peer_addr: "10.0.0.3:3000".parse().unwrap(),
-            }
-        }
-
-        fn allocate(&mut self, now: Instant) {
-            // initial allocate
-            let transmit = self.client.poll_transmit(now).unwrap();
-            let msg = Message::from_bytes(&transmit.data).unwrap();
-            assert!(msg.has_method(ALLOCATE));
-            assert!(msg.has_class(stun_proto::types::message::MessageClass::Request));
-            assert!(msg.has_attribute(RequestedTransport::TYPE));
-            assert!(!msg.has_attribute(Realm::TYPE));
-            assert!(!msg.has_attribute(Nonce::TYPE));
-            assert!(!msg.has_attribute(Username::TYPE));
-            assert!(!msg.has_attribute(MessageIntegrity::TYPE));
-            assert!(!msg.has_attribute(MessageIntegritySha256::TYPE));
-            // error reply
-            let Ok(Some(transmit)) = self.server.recv(transmit, now) else {
-                unreachable!();
-            };
-            let msg = Message::from_bytes(&transmit.data).unwrap();
-            assert!(msg.has_method(ALLOCATE));
-            assert!(msg.has_class(stun_proto::types::message::MessageClass::Error));
-            assert!(msg.has_attribute(Realm::TYPE));
-            let err = msg.attribute::<ErrorCode>().unwrap();
-            assert_eq!(err.code(), ErrorCode::UNAUTHORIZED);
-            assert!(msg.has_attribute(Nonce::TYPE));
-            self.client.handle_message(transmit.data, now);
-
-            // authenticated allocate
-            let transmit = self.client.poll_transmit(now).unwrap();
-            let msg = Message::from_bytes(&transmit.data).unwrap();
-            assert!(msg.has_method(ALLOCATE));
-            assert!(msg.has_class(stun_proto::types::message::MessageClass::Request));
-            assert!(msg.has_attribute(RequestedTransport::TYPE));
-            assert!(msg.has_attribute(Realm::TYPE));
-            assert!(msg.has_attribute(Nonce::TYPE));
-            assert!(msg.has_attribute(Username::TYPE));
-            assert!(msg.has_attribute(MessageIntegrity::TYPE));
-            let Ok(None) = self.server.recv(transmit, now) else {
-                unreachable!();
-            };
-            let TurnServerPollRet::AllocateSocketUdp {
-                transport,
-                local_addr: alloc_local_addr,
-                remote_addr: alloc_remote_addr,
-            } = self.server.poll(now)
-            else {
-                unreachable!();
-            };
-            assert_eq!(transport, self.client.transport());
-            assert_eq!(alloc_local_addr, self.server.listen_address());
-            assert_eq!(alloc_remote_addr, self.client.local_addr());
-            self.server.allocated_udp_socket(
-                transport,
-                alloc_local_addr,
-                alloc_remote_addr,
-                Ok(self.turn_alloc_addr),
-                now,
-            );
-            // ok reply
-            let Some(transmit) = self.server.poll_transmit(now) else {
-                unreachable!();
-            };
-            let msg = Message::from_bytes(&transmit.data).unwrap();
-            assert!(msg.has_method(ALLOCATE));
-            assert!(msg.has_class(stun_proto::types::message::MessageClass::Success));
-            assert!(msg.has_attribute(XorRelayedAddress::TYPE));
-            assert!(msg.has_attribute(Lifetime::TYPE));
-            assert!(msg.has_attribute(XorMappedAddress::TYPE));
-            assert!(msg.has_attribute(MessageIntegrity::TYPE));
-            assert!(matches!(
-                self.client.handle_message(transmit.data, now),
-                TurnProtocolRecv::Handled
-            ));
-            assert!(self
-                .client
-                .relayed_addresses()
-                .any(|(transport, relayed)| transport == TransportType::Udp
-                    && relayed == self.turn_alloc_addr))
-        }
-
-        fn refresh(&mut self, now: Instant) {
-            let TurnPollRet::WaitUntil(expiry) = self.client.poll(now) else {
-                unreachable!()
-            };
-            assert_eq!(now, expiry);
-            let transmit = self.client.poll_transmit(now).unwrap();
-            trace!("transmit {:?}", transmit.data);
-            let msg = Message::from_bytes(&transmit.data).unwrap();
-            assert!(msg.has_method(REFRESH));
-            assert!(msg.has_class(stun_proto::types::message::MessageClass::Request));
-            assert!(msg.has_attribute(Realm::TYPE));
-            assert!(msg.has_attribute(Nonce::TYPE));
-            assert!(msg.has_attribute(Username::TYPE));
-            assert!(msg.has_attribute(MessageIntegrity::TYPE));
-            // ok reply
-            let Ok(Some(transmit)) = self.server.recv(transmit, now) else {
-                unreachable!();
-            };
-            let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
-                self.refresh(now);
-                return;
-            };
-            let msg = Message::from_bytes(&transmit.data).unwrap();
-            assert!(msg.has_method(REFRESH));
-            assert!(msg.has_class(stun_proto::types::message::MessageClass::Success));
-            assert!(msg.has_attribute(Lifetime::TYPE));
-            assert!(msg.has_attribute(MessageIntegrity::TYPE));
-            assert!(matches!(
-                self.client.handle_message(transmit.data, now),
-                TurnProtocolRecv::Handled
-            ));
-            assert!(self
-                .client
-                .relayed_addresses()
-                .any(|(transport, relayed)| transport == TransportType::Udp
-                    && relayed == self.turn_alloc_addr))
-        }
-
-        fn delete_allocation(&mut self, now: Instant) {
-            self.client.delete(now).unwrap();
-            let transmit = self.client.poll_transmit(now).unwrap();
-            self.handle_delete_allocation(transmit, now);
-        }
-
-        fn handle_delete_allocation<T: AsRef<[u8]> + std::fmt::Debug>(
-            &mut self,
-            transmit: Transmit<T>,
-            now: Instant,
-        ) {
-            let msg = Message::from_bytes(transmit.data.as_ref()).unwrap();
-            assert!(msg.has_method(REFRESH));
-            assert!(msg.has_class(stun_proto::types::message::MessageClass::Request));
-            assert!(msg.has_attribute(Lifetime::TYPE));
-            assert!(msg.has_attribute(Realm::TYPE));
-            assert!(msg.has_attribute(Nonce::TYPE));
-            assert!(msg.has_attribute(Username::TYPE));
-            assert!(msg.has_attribute(MessageIntegrity::TYPE));
-            // ok reply
-            let Ok(Some(transmit)) = self.server.recv(transmit, now) else {
-                unreachable!();
-            };
-            let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
-                let transmit = self.client.poll_transmit(now).unwrap();
-                self.handle_delete_allocation(transmit, now);
-                return;
-            };
-            let msg = Message::from_bytes(&transmit.data).unwrap();
-            assert!(msg.has_method(REFRESH));
-            assert!(msg.has_class(stun_proto::types::message::MessageClass::Success));
-            assert!(msg.has_attribute(Lifetime::TYPE));
-            assert!(msg.has_attribute(MessageIntegrity::TYPE));
-            self.client.handle_message(transmit.data, now);
-            assert!(!self
-                .client
-                .relayed_addresses()
-                .any(|(transport, relayed)| transport == TransportType::Udp
-                    && relayed == self.turn_alloc_addr))
-        }
-
-        fn create_permission(&mut self, now: Instant) {
-            self.client
-                .create_permission(TransportType::Udp, self.peer_addr.ip(), now)
-                .unwrap();
-            let transmit = self.client.poll_transmit(now).unwrap();
-            self.handle_create_permission(transmit, now);
-        }
-
-        fn handle_create_permission<T: AsRef<[u8]> + std::fmt::Debug>(
-            &mut self,
-            transmit: Transmit<T>,
-            now: Instant,
-        ) {
-            let msg = Message::from_bytes(transmit.data.as_ref()).unwrap();
-            assert!(msg.has_method(CREATE_PERMISSION));
-            assert!(msg.has_class(stun_proto::types::message::MessageClass::Request));
-            assert!(msg.has_attribute(XorPeerAddress::TYPE));
-            assert!(msg.has_attribute(MessageIntegrity::TYPE));
-            let Ok(Some(transmit)) = self.server.recv(transmit, now) else {
-                unreachable!();
-            };
-            let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
-                let transmit = self.client.poll_transmit(now).unwrap();
-                self.handle_create_permission(transmit, now);
-                return;
-            };
-            assert!(matches!(
-                self.client.handle_message(transmit.data, now),
-                TurnProtocolRecv::Handled
-            ));
-            self.validate_client_permission_state(now);
-        }
-
-        fn maybe_handles_stale_nonce<T: AsRef<[u8]> + std::fmt::Debug>(
-            &mut self,
-            transmit: Transmit<T>,
-            now: Instant,
-        ) -> Option<Transmit<T>> {
-            let msg = Message::from_bytes(transmit.data.as_ref()).unwrap();
-            if msg.has_class(stun_proto::types::message::MessageClass::Error) {
-                let error = msg.attribute::<ErrorCode>().unwrap();
-                assert_eq!(error.code(), ErrorCode::STALE_NONCE);
-                assert!(matches!(
-                    self.client.handle_message(transmit.data, now),
-                    TurnProtocolRecv::Handled
-                ));
-                None
-            } else {
-                Some(transmit)
-            }
-        }
-
-        fn validate_client_permission_state(&self, now: Instant) {
-            let Some(permision) = self
-                .client
-                .permission(TransportType::Udp, self.peer_addr.ip())
-            else {
-                unreachable!();
-            };
-            assert_eq!(permision.expires_at, now + PERMISSION_DURATION);
-            assert!(self
-                .client
-                .permissions(TransportType::Udp, self.turn_alloc_addr)
-                .any(|perm_addr| perm_addr == self.peer_addr.ip()));
-        }
-
-        fn bind_channel(&mut self, now: Instant) {
-            self.client
-                .bind_channel(TransportType::Udp, self.peer_addr, now)
-                .unwrap();
-            let transmit = self.client.poll_transmit(now).unwrap();
-            self.handle_bind_channel(transmit, now);
-        }
-
-        fn handle_bind_channel<T: AsRef<[u8]> + std::fmt::Debug>(
-            &mut self,
-            transmit: Transmit<T>,
-            now: Instant,
-        ) {
-            let msg = Message::from_bytes(transmit.data.as_ref()).unwrap();
-            assert!(msg.has_method(CHANNEL_BIND));
-            assert!(msg.has_class(stun_proto::types::message::MessageClass::Request));
-            assert!(msg.has_attribute(XorPeerAddress::TYPE));
-            assert!(msg.has_attribute(MessageIntegrity::TYPE));
-            let Ok(Some(transmit)) = self.server.recv(transmit, now) else {
-                unreachable!();
-            };
-            let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
-                let transmit = self.client.poll_transmit(now).unwrap();
-                self.handle_create_permission(transmit, now);
-                return;
-            };
-            self.client.handle_message(transmit.data, now);
-            let permision = self
-                .client
-                .permission(TransportType::Udp, self.peer_addr.ip())
-                .unwrap();
-            assert_eq!(permision.expires_at, now + PERMISSION_DURATION);
-            let channel = self
-                .client
-                .channel(TransportType::Udp, self.peer_addr)
-                .unwrap();
-            assert_eq!(channel.expires_at, now + CHANNEL_DURATION);
-        }
-
-        fn sendrecv_data(&mut self, now: Instant) {
-            // client to peer
-            let data = [4; 8];
-            let transmit = self
-                .client
-                .send_to(TransportType::Udp, self.peer_addr, data, now)
-                .unwrap();
-            assert!(matches!(
-                transmit.data,
-                DelayedMessageOrChannelSend::Message(_)
-            ));
-            let transmit = transmit_send_build(transmit);
-            assert_eq!(transmit.transport, self.client.transport());
-            assert_eq!(transmit.from, self.client.local_addr());
-            assert_eq!(transmit.to, self.server.listen_address());
-            let Ok(Some(transmit)) = self.server.recv(transmit, now) else {
-                unreachable!();
-            };
-            assert_eq!(transmit.transport, TransportType::Udp);
-            assert_eq!(transmit.from, self.turn_alloc_addr);
-            assert_eq!(transmit.to, self.peer_addr);
-
-            // peer to client
-            let sent_data = [5; 12];
-            let Some(transmit) = self
-                .server
-                .recv(
-                    Transmit::new(
-                        sent_data,
-                        TransportType::Udp,
-                        self.peer_addr,
-                        self.turn_alloc_addr,
-                    ),
-                    now,
-                )
-                .unwrap()
-            else {
-                unreachable!();
-            };
-            assert_eq!(transmit.transport, self.client.transport());
-            assert_eq!(transmit.from, self.server.listen_address());
-            assert_eq!(transmit.to, self.client.local_addr());
-            let msg = Message::from_bytes(&transmit.data).unwrap();
-            assert!(msg.has_class(stun_proto::types::message::MessageClass::Indication));
-            assert!(msg.has_method(DATA));
-            let data = msg.attribute::<AData>().unwrap();
-            assert_eq!(data.data(), sent_data);
-            let TurnProtocolRecv::PeerData {
-                data,
-                range,
-                transport: TransportType::Udp,
-                peer,
-            } = self.client.handle_message(transmit.data, now)
-            else {
-                unreachable!();
-            };
-            assert_eq!(peer, self.peer_addr);
-            assert_eq!(&data[range.start..range.end], sent_data);
-        }
-
-        fn sendrecv_data_channel(&mut self, now: Instant) {
-            let to_peer = [4; 8];
-            let from_peer = [5; 12];
-            self.sendrecv_data_channel_with_data(&to_peer, &from_peer, now);
-        }
-
-        fn sendrecv_data_channel_with_data(
-            &mut self,
-            to_peer: &[u8],
-            from_peer: &[u8],
-            now: Instant,
-        ) {
-            let transmit = self
-                .client
-                .send_to(TransportType::Udp, self.peer_addr, to_peer, now)
-                .unwrap();
-            assert!(matches!(
-                transmit.data,
-                DelayedMessageOrChannelSend::Channel(_)
-            ));
-            assert_eq!(transmit.transport, self.client.transport());
-            assert_eq!(transmit.from, self.client.local_addr());
-            assert_eq!(transmit.to, self.server.listen_address());
-            let transmit = transmit_send_build(transmit);
-            let Some(transmit) = self
-                .server
-                .recv(transmit, now)
-                .ok()
-                .flatten()
-                .or_else(|| self.server.poll_transmit(now))
-            else {
-                unreachable!();
-            };
-            assert_eq!(transmit.transport, TransportType::Udp);
-            assert_eq!(transmit.from, self.turn_alloc_addr);
-            assert_eq!(transmit.to, self.peer_addr);
-
-            // peer to client
-            let Some(transmit) = self
-                .server
-                .recv(
-                    Transmit::new(
-                        from_peer,
-                        TransportType::Udp,
-                        self.peer_addr,
-                        self.turn_alloc_addr,
-                    ),
-                    now,
-                )
-                .unwrap()
-            else {
-                unreachable!();
-            };
-            assert_eq!(transmit.transport, self.client.transport());
-            assert_eq!(transmit.from, self.server.listen_address());
-            assert_eq!(transmit.to, self.client.local_addr());
-            let cd = ChannelData::parse(&transmit.data).unwrap();
-            assert_eq!(cd.data(), from_peer);
-        }
-    }
-
-    fn turn_allocate_permission(client_transport: TransportType, now: Instant) -> TurnTest {
-        let mut test = TurnTest::builder()
-            .client_transport(client_transport)
-            .build();
-
-        test.allocate(now);
-        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
-            test.client.poll_event()
-        else {
-            unreachable!();
-        };
-        assert_eq!(relayed_address, test.turn_alloc_addr);
-        test.create_permission(now);
-        let Some(TurnEvent::PermissionCreated(TransportType::Udp, permission_ip)) =
-            test.client.poll_event()
-        else {
-            unreachable!();
-        };
-        assert_eq!(permission_ip, test.peer_addr.ip());
-
-        test.sendrecv_data(now);
-        test.bind_channel(now);
-        test.sendrecv_data_channel(now);
-        test
-    }
-
-    #[test]
-    fn test_turn_udp_allocate_udp_permission() {
-        let _log = crate::tests::test_init_log();
-
-        let now = Instant::now();
-        turn_allocate_permission(TransportType::Udp, now);
-    }
-
-    #[test]
-    fn test_turn_tcp_allocate_udp_permission() {
-        let _log = crate::tests::test_init_log();
-
-        let now = Instant::now();
-        turn_allocate_permission(TransportType::Tcp, now);
-    }
-
-    #[test]
-    fn test_turn_allocate_expire_server() {
-        let _log = crate::tests::test_init_log();
-
-        let mut test = TurnTest::builder().build();
-        test.server
-            .set_nonce_expiry_duration(Duration::from_secs(9000));
-        let now = Instant::now();
-
-        test.allocate(now);
-        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
-            test.client.poll_event()
-        else {
-            unreachable!();
-        };
-        assert_eq!(relayed_address, test.turn_alloc_addr);
-        test.client
-            .create_permission(TransportType::Udp, test.peer_addr.ip(), now)
-            .unwrap();
-        let transmit = test.client.poll_transmit(now).unwrap();
-        let now = now + Duration::from_secs(3000);
-        let Ok(Some(transmit)) = test.server.recv(transmit, now) else {
-            unreachable!();
-        };
-        let msg = Message::from_bytes(&transmit.data).unwrap();
-        assert!(msg.has_method(CREATE_PERMISSION));
-        assert!(msg.has_class(stun_proto::types::message::MessageClass::Error));
-        let err = msg.attribute::<ErrorCode>().unwrap();
-        assert_eq!(err.code(), ErrorCode::ALLOCATION_MISMATCH);
-        test.client.handle_message(transmit.data, now);
-    }
-
-    #[test]
-    fn test_turn_allocate_expire_client() {
-        let _log = crate::tests::test_init_log();
-
-        let mut test = TurnTest::builder().build();
-        let now = Instant::now();
-
-        test.allocate(now);
-        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
-            test.client.poll_event()
-        else {
-            unreachable!();
-        };
-        assert_eq!(relayed_address, test.turn_alloc_addr);
-        let now = now + Duration::from_secs(3000);
-        let Err(CreatePermissionError::NoAllocation) =
-            test.client
-                .create_permission(TransportType::Udp, test.peer_addr.ip(), now)
-        else {
-            unreachable!();
-        };
-    }
-
-    #[test]
-    fn test_turn_allocate_refresh() {
-        let _log = crate::tests::test_init_log();
-
-        let mut test = TurnTest::builder().build();
-        let now = Instant::now();
-
-        test.allocate(now);
-        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
-            test.client.poll_event()
-        else {
-            unreachable!();
-        };
-        assert_eq!(relayed_address, test.turn_alloc_addr);
-
-        let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
-            unreachable!()
-        };
-        trace!("expiry: {expiry:?}");
-        assert!(expiry > now + Duration::from_secs(1000));
-
-        test.refresh(expiry);
-        test.create_permission(expiry);
-        let Some(TurnEvent::PermissionCreated(TransportType::Udp, permission_ip)) =
-            test.client.poll_event()
-        else {
-            unreachable!();
-        };
-        assert_eq!(permission_ip, test.peer_addr.ip());
-        test.sendrecv_data(expiry);
-    }
-
-    #[test]
-    fn test_turn_allocate_delete() {
-        let _log = crate::tests::test_init_log();
-
-        let mut test = TurnTest::builder().build();
-        let now = Instant::now();
-
-        test.allocate(now);
-        test.delete_allocation(now);
-
-        let Err(CreatePermissionError::NoAllocation) =
-            test.client
-                .create_permission(TransportType::Udp, test.peer_addr.ip(), now)
-        else {
-            unreachable!();
-        };
-    }
-
-    #[test]
-    fn test_turn_channel_bind() {
-        let _log = crate::tests::test_init_log();
-
-        let mut test = TurnTest::builder().build();
-        let now = Instant::now();
-
-        test.allocate(now);
-        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
-            test.client.poll_event()
-        else {
-            unreachable!();
-        };
-        assert_eq!(relayed_address, test.turn_alloc_addr);
-        test.bind_channel(now);
-        let Some(TurnEvent::PermissionCreated(TransportType::Udp, permission_ip)) =
-            test.client.poll_event()
-        else {
-            unreachable!();
-        };
-        assert_eq!(permission_ip, test.peer_addr.ip());
-        test.sendrecv_data_channel(now);
-    }
-
-    #[test]
-    fn test_turn_peer_incoming_stun() {
-        // tests that sending stun messages can be passed through the turn server
-        let _log = crate::tests::test_init_log();
-
-        let mut test = TurnTest::builder().build();
-        let now = Instant::now();
-
-        test.allocate(now);
-        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
-            test.client.poll_event()
-        else {
-            unreachable!();
-        };
-        assert_eq!(relayed_address, test.turn_alloc_addr);
-        test.bind_channel(now);
-        let Some(TurnEvent::PermissionCreated(TransportType::Udp, permission_ip)) =
-            test.client.poll_event()
-        else {
-            unreachable!();
-        };
-        assert_eq!(permission_ip, test.peer_addr.ip());
-
-        let mut msg = Message::builder(
-            MessageType::from_class_method(MessageClass::Indication, Method::new(0x1432)),
-            TransactionId::generate(),
-            MessageWriteVec::new(),
-        );
-        let realm = Realm::new("realm").unwrap();
-        msg.add_attribute(&realm).unwrap();
-        let data = msg.finish();
-        test.sendrecv_data_channel_with_data(&data, &data, now);
-    }
-
-    #[test]
-    fn test_turn_create_permission_refresh() {
-        let _log = crate::tests::test_init_log();
-
-        let mut test = TurnTest::builder().build();
-        let now = Instant::now();
-
-        test.allocate(now);
-        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
-            test.client.poll_event()
-        else {
-            unreachable!();
-        };
-        assert_eq!(relayed_address, test.turn_alloc_addr);
-
-        test.create_permission(now);
-        let Some(TurnEvent::PermissionCreated(TransportType::Udp, permission_ip)) =
-            test.client.poll_event()
-        else {
-            unreachable!();
-        };
-        assert_eq!(permission_ip, test.peer_addr.ip());
-
-        let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
-            unreachable!()
-        };
-        assert_eq!(expiry, now + PERMISSION_DURATION - EXPIRY_BUFFER);
-        let TurnPollRet::WaitUntil(now) = test.client.poll(expiry) else {
-            unreachable!()
-        };
-        assert_eq!(now, expiry);
-
-        let create_permission = |test: &mut TurnTest, now: Instant| -> Transmit<Vec<u8>> {
-            let transmit = test.client.poll_transmit(now).unwrap();
-            let msg = Message::from_bytes(&transmit.data).unwrap();
-            assert_eq!(msg.method(), CREATE_PERMISSION);
-            let Ok(Some(transmit)) = test.server.recv(transmit, now) else {
-                unreachable!();
-            };
-            transmit
-        };
-
-        let transmit = create_permission(&mut test, now);
-        let transmit = if let Some(transmit) = test.maybe_handles_stale_nonce(transmit, now) {
-            transmit
-        } else {
-            create_permission(&mut test, now)
-        };
-        test.client.handle_message(transmit.data, expiry);
-        test.validate_client_permission_state(expiry);
-
-        test.sendrecv_data(expiry);
-    }
-
-    #[test]
-    fn test_turn_create_permission_timeout() {
-        let _log = crate::tests::test_init_log();
-
-        let mut test = TurnTest::builder().build();
-        let now = Instant::now();
-
-        test.allocate(now);
-        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
-            test.client.poll_event()
-        else {
-            unreachable!();
-        };
-        assert_eq!(relayed_address, test.turn_alloc_addr);
-
-        test.create_permission(now);
-        let Some(TurnEvent::PermissionCreated(TransportType::Udp, permission_ip)) =
-            test.client.poll_event()
-        else {
-            unreachable!();
-        };
-        assert_eq!(permission_ip, test.peer_addr.ip());
-
-        let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
-            unreachable!()
-        };
-        assert_eq!(expiry, now + PERMISSION_DURATION - EXPIRY_BUFFER);
-        let TurnPollRet::WaitUntil(now) = test.client.poll(expiry) else {
-            unreachable!()
-        };
-        assert_eq!(now, expiry);
-
-        let transmit = test.client.poll_transmit(expiry).unwrap();
-        let msg = Message::from_bytes(&transmit.data).unwrap();
-        assert_eq!(msg.method(), CREATE_PERMISSION);
-        // drop the create permission refresh (and retransmits)
-        let mut expiry = now;
-        for _i in 0..8 {
-            let TurnPollRet::WaitUntil(new_now) = test.client.poll(expiry) else {
-                unreachable!()
-            };
-            let _ = test.client.poll_transmit(new_now);
-            expiry = new_now;
-        }
-        assert_eq!(expiry, now + EXPIRY_BUFFER);
-        let TurnPollRet::WaitUntil(now) = test.client.poll(expiry) else {
-            unreachable!()
-        };
-
-        assert!(!test
-            .client
-            .have_permission(TransportType::Udp, test.peer_addr, now));
-        let Some(TurnEvent::PermissionCreateFailed(_transport, ip)) = test.client.poll_event()
-        else {
-            unreachable!();
-        };
-        assert_eq!(ip, test.peer_addr.ip());
-    }
-
-    #[test]
-    fn test_turn_channel_bind_refresh() {
-        let _log = crate::tests::test_init_log();
-
-        let mut test = TurnTest::builder().build();
-        let now = Instant::now();
-
-        test.allocate(now);
-        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
-            test.client.poll_event()
-        else {
-            unreachable!();
-        };
-        assert_eq!(relayed_address, test.turn_alloc_addr);
-
-        test.bind_channel(now);
-        let Some(TurnEvent::PermissionCreated(TransportType::Udp, permission_ip)) =
-            test.client.poll_event()
-        else {
-            unreachable!();
-        };
-        assert_eq!(permission_ip, test.peer_addr.ip());
-
-        // two permission refreshes
-        let mut permissions_done = now;
-        for _i in 0..2 {
-            let now = permissions_done;
-            let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
-                unreachable!()
-            };
-            assert_eq!(expiry, now + PERMISSION_DURATION - EXPIRY_BUFFER);
-            let TurnPollRet::WaitUntil(now) = test.client.poll(expiry) else {
-                unreachable!()
-            };
-            assert_eq!(now, expiry);
-
-            let create_permission = move |test: &mut TurnTest, now: Instant| -> Transmit<Vec<u8>> {
-                let transmit = test.client.poll_transmit(now).unwrap();
-                let msg = Message::from_bytes(&transmit.data).unwrap();
-                assert_eq!(msg.method(), CREATE_PERMISSION);
-                let Ok(Some(transmit)) = test.server.recv(transmit, now) else {
-                    unreachable!();
-                };
-                transmit
-            };
-
-            let transmit = create_permission(&mut test, now);
-            let transmit = if let Some(transmit) = test.maybe_handles_stale_nonce(transmit, now) {
-                transmit
-            } else {
-                create_permission(&mut test, now)
-            };
-            test.client.handle_message(transmit.data, now);
-            test.validate_client_permission_state(now);
-            permissions_done = now;
-        }
-        let now = permissions_done;
-
-        let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
-            unreachable!()
-        };
-        assert_eq!(expiry, now + Duration::from_secs(60));
-        let TurnPollRet::WaitUntil(now) = test.client.poll(expiry) else {
-            unreachable!()
-        };
-        assert_eq!(now, expiry);
-        let transmit = test.client.poll_transmit(expiry).unwrap();
-        let msg = Message::from_bytes(&transmit.data).unwrap();
-        println!("message {msg}");
-        assert_eq!(msg.method(), CHANNEL_BIND);
-        let Ok(Some(transmit)) = test.server.recv(transmit, now) else {
-            unreachable!();
-        };
-        test.client.handle_message(transmit.data, expiry);
-
-        test.sendrecv_data_channel(expiry);
-    }
-
     #[test]
     fn test_client_receive_offpath_data() {
         let _log = crate::tests::test_init_log();
 
         let now = Instant::now();
 
-        let mut test = turn_allocate_permission(TransportType::Udp, now);
+        let mut test = crate::udp::tests::create_test();
         let data = [0x40, 0, 0, 14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let TurnProtocolRecv::Ignored(ignored) = test.client.handle_message(&data, now) else {
-            unreachable!();
-        };
-        assert_eq!(ignored, &data);
-        let channel = ChannelData::parse(ignored).unwrap();
-        let TurnProtocolChannelRecv::Ignored = test.client.handle_channel(
+        let TurnRecvRet::Ignored(ignored) = test.client.recv(
             Transmit::new(
-                channel,
-                TransportType::Udp,
-                test.peer_addr,
+                &data,
+                test.client.transport(),
+                test.client.remote_addr(),
                 test.client.local_addr(),
             ),
             now,
         ) else {
             unreachable!();
         };
+        assert_eq!(ignored.data, &data);
     }
 
     #[test]
@@ -2395,8 +1591,8 @@ mod tests {
         let _log = crate::tests::test_init_log();
 
         let now = Instant::now();
+        let mut test = crate::udp::tests::create_test();
 
-        let mut test = turn_allocate_permission(TransportType::Udp, now);
         let data = [3; 9];
         assert!(test
             .server

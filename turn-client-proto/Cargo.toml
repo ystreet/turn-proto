@@ -27,6 +27,7 @@ clap = {version = "4", features = ["derive"]}
 criterion.workspace = true
 rustls.workspace = true
 rustls-platform-verifier.workspace = true
+rcgen = "0.14"
 
 [features]
 default = ["rustls"]

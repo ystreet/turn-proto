@@ -149,6 +149,10 @@ impl TurnClientApi for TurnClientTcp {
         self.protocol.create_permission(transport, peer_addr, now)
     }
 
+    fn have_permission(&self, transport: TransportType, to: IpAddr) -> bool {
+        self.protocol.have_permission(transport, to)
+    }
+
     fn bind_channel(
         &mut self,
         transport: TransportType,
@@ -247,10 +251,7 @@ impl TurnClientApi for TurnClientTcp {
                         transport,
                         peer,
                     } => TurnRecvRet::PeerData(TurnPeerData {
-                        data: DataRangeOrOwned::Range {
-                            data: transmit.data,
-                            range,
-                        },
+                        data: DataRangeOrOwned::Owned(ensure_data_owned(data, range)),
                         transport,
                         peer,
                     }),
@@ -433,6 +434,7 @@ pub(crate) fn ensure_data_owned(data: Vec<u8>, range: Range<usize>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use tracing::info;
+    use turn_server_proto::server::TurnServer;
     use turn_types::{
         message::ALLOCATE,
         stun::{
@@ -442,7 +444,16 @@ mod tests {
         },
     };
 
-    use crate::tests::test_init_log;
+    use crate::common::tests::turn_allocate_permission;
+    use crate::common::tests::{
+        turn_allocate_delete, turn_allocate_expire_client, turn_allocate_expire_server,
+        turn_allocate_refresh, turn_channel_bind, turn_channel_bind_refresh,
+        turn_create_permission_refresh, turn_create_permission_timeout, turn_peer_incoming_stun,
+    };
+    use crate::{
+        common::tests::{turn_offpath_data, TurnTest},
+        tests::test_init_log,
+    };
 
     use super::*;
 
@@ -577,5 +588,133 @@ mod tests {
             unreachable!()
         };
         assert_eq!(produced, channel);
+    }
+
+    fn turn_tcp_new(
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        credentials: TurnCredentials,
+    ) -> TurnClientTcp {
+        TurnClientTcp::allocate(local_addr, remote_addr, credentials)
+    }
+
+    fn turn_server_tcp_new(listen_addr: SocketAddr, realm: String) -> TurnServer {
+        TurnServer::new(TransportType::Tcp, listen_addr, realm)
+    }
+
+    fn create_test(split_transmit_bytes: usize) -> TurnTest<TurnClientTcp, TurnServer> {
+        TurnTest::<TurnClientTcp, TurnServer>::builder()
+            .split_transmit_bytes(split_transmit_bytes)
+            .build(turn_tcp_new, turn_server_tcp_new)
+    }
+
+    static TRANSMIT_SPLITS: [usize; 3] = [0, 3, 6];
+
+    #[test]
+    fn test_turn_tcp_allocate_udp_permission() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        for split in TRANSMIT_SPLITS {
+            let mut test = create_test(split);
+            turn_allocate_permission(&mut test, now);
+        }
+    }
+
+    #[test]
+    fn test_tcp_turn_allocate_expire_server() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        for split in TRANSMIT_SPLITS {
+            let mut test = create_test(split);
+            turn_allocate_expire_server(&mut test, now);
+        }
+    }
+
+    #[test]
+    fn test_tcp_turn_allocate_expire_client() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        for split in TRANSMIT_SPLITS {
+            let mut test = create_test(split);
+            turn_allocate_expire_client(&mut test, now);
+        }
+    }
+
+    #[test]
+    fn test_tcp_turn_allocate_refresh() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        for split in TRANSMIT_SPLITS {
+            let mut test = create_test(split);
+            turn_allocate_refresh(&mut test, now);
+        }
+    }
+
+    #[test]
+    fn test_tcp_turn_allocate_delete() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        for split in TRANSMIT_SPLITS {
+            let mut test = create_test(split);
+            turn_allocate_delete(&mut test, now);
+        }
+    }
+
+    #[test]
+    fn test_tcp_turn_channel_bind() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        for split in TRANSMIT_SPLITS {
+            let mut test = create_test(split);
+            turn_channel_bind(&mut test, now);
+        }
+    }
+
+    #[test]
+    fn test_tcp_turn_peer_incoming_stun() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        for split in TRANSMIT_SPLITS {
+            let mut test = create_test(split);
+            turn_peer_incoming_stun(&mut test, now);
+        }
+    }
+
+    #[test]
+    fn test_tcp_turn_create_permission_refresh() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        for split in TRANSMIT_SPLITS {
+            let mut test = create_test(split);
+            turn_create_permission_refresh(&mut test, now);
+        }
+    }
+
+    #[test]
+    fn test_tcp_turn_create_permission_timeout() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        for split in TRANSMIT_SPLITS {
+            let mut test = create_test(split);
+            turn_create_permission_timeout(&mut test, now);
+        }
+    }
+
+    #[test]
+    fn test_tcp_turn_channel_bind_refresh() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        for split in TRANSMIT_SPLITS {
+            let mut test = create_test(split);
+            turn_channel_bind_refresh(&mut test, now);
+        }
+    }
+
+    #[test]
+    fn test_tcp_offpath_data() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test(0);
+        turn_offpath_data(&mut test, now);
     }
 }
