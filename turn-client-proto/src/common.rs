@@ -470,20 +470,38 @@ pub(crate) mod tests {
         TurnCredentials,
     };
 
+    pub(crate) fn generate_addresses() -> (SocketAddr, SocketAddr) {
+        (
+            "192.168.0.1:1000".parse().unwrap(),
+            "10.0.0.2:2000".parse().unwrap(),
+        )
+    }
+
     #[test]
     fn test_delayed_message() {
+        let (local_addr, remote_addr) = generate_addresses();
         let data = [5; 5];
         let peer_addr = "127.0.0.1:1".parse().unwrap();
-        let transmit = DelayedMessageOrChannelSend::Message(DelayedMessageSend { data, peer_addr });
-        let len = transmit.len();
+        let transmit = TransmitBuild::new(
+            DelayedMessageOrChannelSend::Message(DelayedMessageSend { data, peer_addr }),
+            TransportType::Udp,
+            local_addr,
+            remote_addr,
+        );
+        let len = transmit.data.len();
         let out = transmit.build();
-        assert_eq!(len, out.len());
-        let msg = Message::from_bytes(&out).unwrap();
+        assert_eq!(len, out.data.len());
+        let msg = Message::from_bytes(&out.data).unwrap();
         let addr = msg.attribute::<XorPeerAddress>().unwrap();
         assert_eq!(addr.addr(msg.transaction_id()), peer_addr);
         let out_data = msg.attribute::<AData>().unwrap();
         assert_eq!(out_data.data(), data.as_ref());
-        let transmit = DelayedMessageOrChannelSend::Message(DelayedMessageSend { data, peer_addr });
+        let transmit = TransmitBuild::new(
+            DelayedMessageOrChannelSend::Message(DelayedMessageSend { data, peer_addr }),
+            TransportType::Udp,
+            local_addr,
+            remote_addr,
+        );
         let mut out2 = vec![0; len];
         transmit.write_into(&mut out2);
         let msg = Message::from_bytes(&out2).unwrap();
@@ -495,24 +513,59 @@ pub(crate) mod tests {
 
     #[test]
     fn test_delayed_channel() {
+        let (local_addr, remote_addr) = generate_addresses();
         let data = [5; 5];
         let channel_id = 0x4567;
-        let transmit =
-            DelayedMessageOrChannelSend::Channel(DelayedChannelSend { data, channel_id });
-        let len = transmit.len();
+        let transmit = TransmitBuild::new(
+            DelayedMessageOrChannelSend::Channel(DelayedChannelSend { data, channel_id }),
+            TransportType::Udp,
+            local_addr,
+            remote_addr,
+        );
+        let len = transmit.data.len();
         let out = transmit.build();
-        assert_eq!(len, out.len());
-        let channel = ChannelData::parse(&out).unwrap();
+        assert_eq!(len, out.data.len());
+        let channel = ChannelData::parse(&out.data).unwrap();
         assert_eq!(channel.id(), channel_id);
         assert_eq!(channel.data(), data.as_ref());
-        let transmit =
-            DelayedMessageOrChannelSend::Channel(DelayedChannelSend { data, channel_id });
+        let transmit = TransmitBuild::new(
+            DelayedMessageOrChannelSend::Channel(DelayedChannelSend { data, channel_id }),
+            TransportType::Udp,
+            local_addr,
+            remote_addr,
+        );
         let mut out2 = vec![0; len];
         transmit.write_into(&mut out2);
-        assert_eq!(len, out.len());
-        let channel = ChannelData::parse(&out).unwrap();
+        assert_eq!(len, out2.len());
+        let channel = ChannelData::parse(&out2).unwrap();
         assert_eq!(channel.id(), channel_id);
         assert_eq!(channel.data(), data.as_ref());
+    }
+
+    #[test]
+    fn test_delayed_owned() {
+        let (local_addr, remote_addr) = generate_addresses();
+        let data = vec![7; 7];
+        let transmit = TransmitBuild::new(
+            DelayedMessageOrChannelSend::<Vec<u8>>::Data(data.clone()),
+            TransportType::Udp,
+            local_addr,
+            remote_addr,
+        );
+        let len = transmit.data.len();
+        let out = transmit.build();
+        assert_eq!(len, out.data.len());
+        assert_eq!(data, out.data);
+        let transmit = TransmitBuild::new(
+            DelayedMessageOrChannelSend::<Vec<u8>>::Data(data.clone()),
+            TransportType::Udp,
+            local_addr,
+            remote_addr,
+        );
+        let mut out2 = vec![0; len];
+        transmit.write_into(&mut out2);
+        assert_eq!(len, out2.len());
+        assert_eq!(data, out2);
     }
 
     pub(crate) fn transmit_send_build<T: DelayedTransmitBuild + std::fmt::Debug>(
@@ -934,7 +987,8 @@ pub(crate) mod tests {
                 unreachable!();
             };
             assert_eq!(peer_data.peer, self.peer_addr);
-            assert_eq!(peer_data.data(), sent_data);
+            assert_eq!(peer_data.as_ref(), sent_data);
+            assert!(self.client.poll_recv(now).is_none());
         }
 
         fn sendrecv_data_channel(&mut self, now: Instant) {
@@ -999,9 +1053,9 @@ pub(crate) mod tests {
             let TurnRecvRet::PeerData(peer_data) = self.client_recv(transmit, now) else {
                 unreachable!();
             };
-            println!("{peer_data:?}");
             assert_eq!(peer_data.peer, self.peer_addr);
             assert_eq!(peer_data.data(), from_peer);
+            assert!(self.client.poll_recv(now).is_none());
         }
     }
 
