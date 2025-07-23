@@ -175,10 +175,7 @@ impl TurnClientApi for TurnClientUdp {
             let Ok(channel) = ChannelData::parse(data) else {
                 return TurnRecvRet::Ignored(transmit);
             };
-            let ret = self.protocol.handle_channel(
-                Transmit::new(channel, transmit.transport, transmit.from, transmit.to),
-                now,
-            );
+            let ret = self.protocol.handle_channel(channel, now);
             match ret {
                 TurnProtocolChannelRecv::Ignored => return TurnRecvRet::Ignored(transmit),
                 TurnProtocolChannelRecv::PeerData {

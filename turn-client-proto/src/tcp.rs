@@ -196,11 +196,7 @@ impl TurnClientApi for TurnClientTcp {
             IncomingTcp::CompleteChannel(transmit, range) => {
                 let channel =
                     ChannelData::parse(&transmit.data.as_ref()[range.start..range.end]).unwrap();
-                let ret = self.protocol.handle_channel(
-                    Transmit::new(channel, transmit.transport, transmit.from, transmit.to),
-                    now,
-                );
-                match ret {
+                match self.protocol.handle_channel(channel, now) {
                     TurnProtocolChannelRecv::Ignored => TurnRecvRet::Ignored(transmit),
                     TurnProtocolChannelRecv::PeerData {
                         range,
@@ -221,11 +217,7 @@ impl TurnClientApi for TurnClientTcp {
             }
             IncomingTcp::StoredChannel(data, transmit) => {
                 let channel = ChannelData::parse(&data).unwrap();
-                let ret = self.protocol.handle_channel(
-                    Transmit::new(channel, transmit.transport, transmit.from, transmit.to),
-                    now,
-                );
-                match ret {
+                match self.protocol.handle_channel(channel, now) {
                     TurnProtocolChannelRecv::Ignored => TurnRecvRet::Ignored(transmit),
                     TurnProtocolChannelRecv::PeerData {
                         range,
@@ -267,15 +259,7 @@ impl TurnClientApi for TurnClientTcp {
                         range,
                         transport,
                         peer,
-                    } = self.protocol.handle_channel(
-                        Transmit::new(
-                            channel,
-                            TransportType::Tcp,
-                            self.remote_addr(),
-                            self.local_addr(),
-                        ),
-                        now,
-                    ) {
+                    } = self.protocol.handle_channel(channel, now) {
                         return Some(TurnPeerData {
                             data: DataRangeOrOwned::Range { data, range },
                             transport,

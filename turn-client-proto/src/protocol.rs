@@ -693,40 +693,25 @@ impl TurnClientProtocol {
 
     #[tracing::instrument(
         name = "turn_handle_channel",
-        skip(self, transmit),
+        skip(self, channel),
         fields(
-            transport = ?transmit.transport,
-            from = ?transmit.from,
-            to = ?transmit.to,
-            data_len = transmit.data.as_ref().len(),
+            channel.id = channel.id(),
+            channel.data.len = channel.data().len(),
         )
     )]
     pub(crate) fn handle_channel<'a>(
         &mut self,
-        transmit: Transmit<ChannelData<'a>>,
+        channel: ChannelData<'a>,
         now: Instant,
     ) -> TurnProtocolChannelRecv {
-        /* is this data for our client? */
-        if transmit.to != self.stun_agent.local_addr()
-            || self.stun_agent.transport() != transmit.transport
-            || transmit.from != self.stun_agent.remote_addr().unwrap()
-        {
-            trace!(
-                "received data not directed at us ({:?}) but for {:?}!",
-                self.stun_agent.local_addr(),
-                transmit.to
-            );
-            return TurnProtocolChannelRecv::Ignored;
-        }
-
         for alloc in self.allocations.iter_mut() {
             if let Some(chan) = alloc
                 .channels
                 .iter_mut()
-                .find(|chan| chan.id == transmit.data.id())
+                .find(|chan| chan.id == channel.id())
             {
                 return TurnProtocolChannelRecv::PeerData {
-                    range: 4..4 + transmit.data.data().len(),
+                    range: 4..4 + channel.data().len(),
                     transport: alloc.transport,
                     peer: chan.peer_addr,
                 };
