@@ -208,15 +208,6 @@ impl TurnClientProtocol {
         }
     }
 
-    fn handle_stale_nonce_while_authenticating(
-        stun_agent: &mut StunAgent,
-        credentials: LongTermCredentials,
-        nonce: &str,
-        now: Instant,
-    ) -> (Transmit<Data<'static>>, TransactionId) {
-        Self::send_authenticating_request(stun_agent, credentials, nonce, now)
-    }
-
     fn validate_stale_nonce(msg: &Message<'_>) -> Option<(String, String)> {
         if !msg.has_class(MessageClass::Error) {
             return None;
@@ -462,14 +453,14 @@ impl TurnClientProtocol {
                         } else {
                             continue;
                         };
-                        debug!("remove pending REFRESH transaction {transaction_id}");
-                        let Ok(lifetime) = msg.attribute::<Lifetime>() else {
-                            continue;
-                        };
+                        debug!("removed pending REFRESH transaction {transaction_id}");
                         if is_success {
                             if requested_lifetime == 0 {
                                 remove_allocations = true;
                             } else {
+                                let Ok(lifetime) = msg.attribute::<Lifetime>() else {
+                                    continue;
+                                };
                                 alloc.expires_at =
                                     now + Duration::from_secs(lifetime.seconds() as u64);
                             }
@@ -479,7 +470,6 @@ impl TurnClientProtocol {
 
                     if remove_allocations {
                         allocations.clear();
-                        pending_events.push_front(TurnEvent::AllocationCreateFailed);
                         *state = AuthState::Error;
                     }
                     if handled {
@@ -844,13 +834,13 @@ impl TurnClientProtocol {
                         let Some((new_nonce, _realm)) = Self::validate_stale_nonce(&msg) else {
                             return TurnProtocolRecv::Ignored(data);
                         };
-                        let (transmit, new_transaction_id) =
-                            Self::handle_stale_nonce_while_authenticating(
-                                stun_agent,
-                                credentials.clone(),
-                                &new_nonce,
-                                now,
-                            );
+                        stun_agent.remove_outstanding_request(*transaction_id);
+                        let (transmit, new_transaction_id) = Self::send_authenticating_request(
+                            stun_agent,
+                            credentials.clone(),
+                            nonce,
+                            now,
+                        );
                         *nonce = new_nonce;
                         *transaction_id = new_transaction_id;
                         self.pending_transmits.push_back(transmit);
@@ -875,11 +865,12 @@ impl TurnClientProtocol {
                                 else {
                                     return TurnProtocolRecv::Ignored(data);
                                 };
+                                stun_agent.remove_outstanding_request(*transaction_id);
                                 let (transmit, new_transaction_id) =
-                                    Self::handle_stale_nonce_while_authenticating(
+                                    Self::send_authenticating_request(
                                         stun_agent,
                                         credentials.clone(),
-                                        &new_nonce,
+                                        nonce,
                                         now,
                                     );
                                 *nonce = new_nonce;
@@ -944,12 +935,14 @@ impl TurnClientProtocol {
         };
 
         // FIXME: TCP allocations
-        let transport = self
+        let Some(transport) = self
             .allocations
             .iter()
             .map(|allocation| allocation.transport)
             .next()
-            .unwrap();
+        else {
+            return TurnProtocolRecv::Ignored(data);
+        };
 
         match Self::handle_stun(
             &mut self.stun_agent,
@@ -1089,7 +1082,10 @@ impl TurnClientProtocol {
                 }
                 return TurnPollRet::WaitUntil(earliest_wait);
             }
-            AuthState::Authenticated { credentials: _, nonce: _ } => {
+            AuthState::Authenticated {
+                credentials: _,
+                nonce: _,
+            } => {
                 let mut remove_allocation_indices = vec![];
                 for (idx, alloc) in self.allocations.iter_mut().enumerate() {
                     let mut expires_at;
@@ -1103,19 +1099,30 @@ impl TurnClientProtocol {
                     if let Some((pending, _lifetime)) = alloc.pending_refresh {
                         if cancelled_transaction.is_some_and(|cancelled| cancelled == pending) {
                             warn!("Refresh timed out or was cancelled");
-                            if alloc.expires_at >= now {
+                            if alloc.expires_at > now {
                                 expires_at = alloc.expires_at;
                             } else {
                                 remove_allocation_indices.push(idx);
                                 continue;
                             }
-                        } else {
+                        } else if alloc.expires_at > now {
                             expires_at = alloc.expires_at;
+                        } else {
+                            warn!(
+                                "Allocation {} {} timed out",
+                                alloc.transport, alloc.relayed_address
+                            );
+                            self.stun_agent.remove_outstanding_request(pending);
+                            remove_allocation_indices.push(idx);
+                            continue;
                         }
-                    } else if alloc.expires_at >= now {
+                    } else if alloc.expires_at > now {
                         expires_at = alloc.refresh_time().max(now);
                     } else {
-                        warn!("Allocation timed out");
+                        warn!(
+                            "Allocation {} {} timed out",
+                            alloc.transport, alloc.relayed_address
+                        );
                         remove_allocation_indices.push(idx);
                         continue;
                     }
@@ -1141,6 +1148,7 @@ impl TurnClientProtocol {
                                     alloc.relayed_address,
                                     channel.peer_addr
                                 );
+                                self.stun_agent.remove_outstanding_request(pending);
                             } else {
                                 expires_at = expires_at.min(channel.expires_at);
                             }
@@ -1175,6 +1183,7 @@ impl TurnClientProtocol {
                                         alloc.transport,
                                         permission.ip,
                                     ));
+                                self.stun_agent.remove_outstanding_request(pending);
                             } else {
                                 expires_at = expires_at.min(permission.expires_at);
                             }
@@ -1186,6 +1195,9 @@ impl TurnClientProtocol {
                 }
                 for (i, idx) in remove_allocation_indices.into_iter().enumerate() {
                     self.allocations.remove(idx - i);
+                }
+                if self.allocations.is_empty() {
+                    return TurnPollRet::Closed;
                 }
                 return TurnPollRet::WaitUntil(earliest_wait.max(now));
             }
@@ -1266,7 +1278,8 @@ impl TurnClientProtocol {
                         if permission.expires_at < now {
                             continue;
                         }
-                        if permission.pending_refresh.is_none() && permission.refresh_time() <= now {
+                        if permission.pending_refresh.is_none() && permission.refresh_time() <= now
+                        {
                             info!(
                                 "refreshing {} permission from {} to {}",
                                 alloc.transport, alloc.relayed_address, permission.ip
@@ -1944,7 +1957,9 @@ mod tests {
                         transaction_id,
                     ))
                     .unwrap();
-                reply.add_attribute(&Lifetime::new(600)).unwrap();
+                reply
+                    .add_attribute(&Lifetime::new(TEST_ALLOCATION_LIFETIME))
+                    .unwrap();
                 reply
                     .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
                     .unwrap();
@@ -1957,6 +1972,126 @@ mod tests {
             client.poll_event(),
             Some(TurnEvent::AllocationCreated(_, _))
         ));
+        assert_eq!(client.relayed_addresses().count(), 1);
+    }
+
+    fn wait_advance(client: &mut TurnClientProtocol, now: Instant) -> Instant {
+        let TurnPollRet::WaitUntil(expiry) = client.poll(now) else {
+            unreachable!();
+        };
+        assert!(expiry > now);
+        expiry
+    }
+
+    fn check_closed(client: &mut TurnClientProtocol, now: Instant) {
+        assert!(matches!(client.poll(now), TurnPollRet::Closed));
+        assert_eq!(client.relayed_addresses().count(), 0);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_authenticated_allocate_expire() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        check_closed(&mut client, now + EXPIRY_BUFFER + Duration::from_secs(1));
+    }
+
+    fn generate_stale_nonce(msg: &Message<'_>) -> Vec<u8> {
+        let mut reply = Message::builder_error(msg, MessageWriteVec::new());
+        reply
+            .add_attribute(&ErrorCode::builder(ErrorCode::STALE_NONCE).build().unwrap())
+            .unwrap();
+        reply.add_attribute(&Realm::new("realm").unwrap()).unwrap();
+        reply.add_attribute(&Nonce::new("nonce").unwrap()).unwrap();
+        reply.finish()
+    }
+
+    #[test]
+    fn test_turn_client_protocol_authenticated_allocate_reply_stale_nonce() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        let ret = allocate_response(&mut client, |msg| generate_stale_nonce(&msg), now);
+        assert!(matches!(ret, TurnProtocolRecv::Handled));
+        authenticated_allocate(&mut client, now);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_authenticated_allocate_reply_stale_nonce_missing_attributes() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        let ret = allocate_response(
+            &mut client,
+            |msg| {
+                let mut reply = Message::builder_error(&msg, MessageWriteVec::new());
+                reply
+                    .add_attribute(&ErrorCode::builder(ErrorCode::STALE_NONCE).build().unwrap())
+                    .unwrap();
+                reply.add_attribute(&Nonce::new("nonce").unwrap()).unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        assert!(matches!(ret, TurnProtocolRecv::Ignored(_)));
+
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        let ret = allocate_response(
+            &mut client,
+            |msg| {
+                let mut reply = Message::builder_error(&msg, MessageWriteVec::new());
+                reply.add_attribute(&Realm::new("realm").unwrap()).unwrap();
+                reply.add_attribute(&Nonce::new("nonce").unwrap()).unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        assert!(matches!(ret, TurnProtocolRecv::Ignored(_)));
+
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        let ret = allocate_response(
+            &mut client,
+            |msg| {
+                let mut reply = Message::builder_error(&msg, MessageWriteVec::new());
+                reply
+                    .add_attribute(&ErrorCode::builder(ErrorCode::STALE_NONCE).build().unwrap())
+                    .unwrap();
+                reply.add_attribute(&Nonce::new("nonce").unwrap()).unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        assert!(matches!(ret, TurnProtocolRecv::Ignored(_)));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_refresh_reply_missing_attributes() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        let credentials = client_credentials(&client);
+        let ret = refresh_response(
+            &mut client,
+            |msg| {
+                let mut reply = Message::builder_success(&msg, MessageWriteVec::new());
+                reply
+                    .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                    .unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        assert!(matches!(ret, TurnProtocolRecv::Handled));
     }
 
     fn refresh_response<F: FnOnce(Message<'_>) -> Vec<u8>>(
@@ -1974,12 +2109,7 @@ mod tests {
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
-        // produces the wait
-        let TurnPollRet::WaitUntil(expiry) = client.poll(now) else {
-            unreachable!();
-        };
-        assert!(expiry > now);
-        let now = expiry;
+        let now = wait_advance(&mut client, now);
         let credentials = client_credentials(&client);
         let ret = refresh_response(
             &mut client,
@@ -1993,12 +2123,124 @@ mod tests {
             now,
         );
         assert!(matches!(ret, TurnProtocolRecv::Handled));
-        let TurnPollRet::WaitUntil(_now) = client.poll(
-            now + Duration::from_secs(TEST_ALLOCATION_LIFETIME as u64) - EXPIRY_BUFFER
-                + Duration::from_secs(1),
-        ) else {
+        check_closed(&mut client, now + EXPIRY_BUFFER + Duration::from_secs(1));
+    }
+
+    fn generate_refresh_response(msg: &Message<'_>, credentials: LongTermCredentials) -> Vec<u8> {
+        let mut reply = Message::builder_success(msg, MessageWriteVec::new());
+        reply
+            .add_attribute(&Lifetime::new(TEST_ALLOCATION_LIFETIME))
+            .unwrap();
+        reply
+            .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+            .unwrap();
+        reply.finish()
+    }
+
+    fn generate_delete_response(msg: &Message<'_>, credentials: LongTermCredentials) -> Vec<u8> {
+        let mut reply = Message::builder_success(msg, MessageWriteVec::new());
+        reply.add_attribute(&Lifetime::new(0)).unwrap();
+        reply
+            .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+            .unwrap();
+        reply.finish()
+    }
+
+    fn refresh(client: &mut TurnClientProtocol, credentials: LongTermCredentials, now: Instant) {
+        let ret = refresh_response(
+            client,
+            |msg| generate_refresh_response(&msg, credentials),
+            now,
+        );
+        assert!(matches!(ret, TurnProtocolRecv::Handled));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_refresh_stale_nonce() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        let ret = refresh_response(&mut client, |msg| generate_stale_nonce(&msg), now);
+        assert!(matches!(ret, TurnProtocolRecv::Handled));
+        let credentials = client_credentials(&client);
+        refresh(&mut client, credentials, now);
+        let TurnPollRet::WaitUntil(_now) =
+            client.poll(now + EXPIRY_BUFFER + Duration::from_secs(1))
+        else {
             unreachable!();
         };
+        assert_eq!(client.relayed_addresses().count(), 1);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_refresh_stale_nonce_unanswered_refresh() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        let ret = refresh_response(&mut client, |msg| generate_stale_nonce(&msg), now);
+        assert!(matches!(ret, TurnProtocolRecv::Handled));
+        // drop the re-REFRESH
+        let _transmit = client.poll_transmit(now).unwrap();
+        check_closed(&mut client, now + EXPIRY_BUFFER + Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_delete_stale_nonce() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        client.delete(now).unwrap();
+        let ret = refresh_response(&mut client, |msg| generate_stale_nonce(&msg), now);
+        assert!(matches!(ret, TurnProtocolRecv::Handled));
+        let credentials = client_credentials(&client);
+        let ret = refresh_response(
+            &mut client,
+            |msg| generate_delete_response(&msg, credentials),
+            now,
+        );
+        assert!(matches!(ret, TurnProtocolRecv::Handled));
+        check_closed(&mut client, now);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_delete_allocation_mismatch() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        client.delete(now).unwrap();
+        let credentials = client_credentials(&client);
+        let ret = refresh_response(
+            &mut client,
+            |msg| {
+                let mut reply = Message::builder_error(&msg, MessageWriteVec::new());
+                reply
+                    .add_attribute(
+                        &ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
+                            .build()
+                            .unwrap(),
+                    )
+                    .unwrap();
+                reply
+                    .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                    .unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        assert!(matches!(ret, TurnProtocolRecv::Handled));
+        check_closed(&mut client, now);
     }
 
     #[test]
