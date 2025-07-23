@@ -12,11 +12,12 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-stun-types.workspace = true
 byteorder.workspace = true
 rand.workspace = true
-tracing.workspace = true
+stun-types.workspace = true
+stun-proto.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

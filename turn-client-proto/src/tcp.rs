@@ -20,10 +20,10 @@ use stun_proto::types::data::Data;
 use stun_proto::types::TransportType;
 
 use turn_types::channel::ChannelData;
-use turn_types::stun::message::{Message, MessageHeader};
+pub use turn_types::tcp::{IncomingTcp, StoredTcp, TurnTcpBuffer};
 use turn_types::TurnCredentials;
 
-use tracing::{debug, trace, warn};
+use tracing::{trace, warn};
 
 use crate::common::{
     DataRangeOrOwned, DelayedMessageOrChannelSend, TransmitBuild, TurnClientApi, TurnPeerData,
@@ -76,25 +76,6 @@ impl TurnClientTcp {
             incoming_tcp_buffer: TurnTcpBuffer::new(),
         }
     }
-}
-
-#[derive(Debug)]
-pub(crate) enum IncomingTcp<T: AsRef<[u8]> + std::fmt::Debug> {
-    /// Not enough data for processing to complete.
-    NeedMoreData,
-    /// Input data contains a complete STUN Message.
-    CompleteMessage(Transmit<T>, Range<usize>),
-    /// Input data contains a complete Channel data message.
-    CompleteChannel(Transmit<T>, Range<usize>),
-    /// A STUN message has been produced from the buffered data.
-    StoredMessage(Vec<u8>, Transmit<T>),
-    /// A Channel data message has been produced from the buffered data.
-    StoredChannel(Vec<u8>, Transmit<T>),
-}
-
-pub(crate) enum StoredTcp {
-    Message(Vec<u8>),
-    Channel(Vec<u8>),
 }
 
 impl TurnClientApi for TurnClientTcp {
@@ -308,101 +289,6 @@ impl TurnClientApi for TurnClientTcp {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct TurnTcpBuffer {
-    tcp_buffer: Vec<u8>,
-}
-
-impl TurnTcpBuffer {
-    pub(crate) fn new() -> Self {
-        Self { tcp_buffer: vec![] }
-    }
-
-    #[tracing::instrument(ret,
-        level = "trace",
-        ret,
-        skip(self, transmit),
-        fields(
-            transmit.data_len = transmit.data.as_ref().len(),
-            from = ?transmit.from
-        )
-    )]
-    pub(crate) fn incoming_tcp<T: AsRef<[u8]> + std::fmt::Debug>(
-        &mut self,
-        transmit: Transmit<T>,
-    ) -> IncomingTcp<T> {
-        if self.tcp_buffer.is_empty() {
-            let data = transmit.data.as_ref();
-            trace!("Trying to parse incoming data as a complete message/channel");
-            let Ok(hdr) = MessageHeader::from_bytes(data) else {
-                let Ok(channel) = ChannelData::parse(data) else {
-                    self.tcp_buffer.extend_from_slice(data);
-                    return IncomingTcp::NeedMoreData;
-                };
-                let channel_len = 4 + channel.data().len();
-                debug!(
-                    "Incoming data contains a channel with id {} and len {}",
-                    channel.id(),
-                    channel_len - 4
-                );
-                if channel_len > data.len() {
-                    self.tcp_buffer.extend_from_slice(&data[channel_len..]);
-                }
-                return IncomingTcp::CompleteChannel(transmit, 0..channel_len);
-            };
-            let msg_len = MessageHeader::LENGTH + hdr.data_length() as usize;
-            if data.len() < msg_len {
-                self.tcp_buffer.extend_from_slice(data);
-                return IncomingTcp::NeedMoreData;
-            }
-            let Ok(_msg) = Message::from_bytes(&data[..msg_len]) else {
-                // XXX: this might need some other return value for a more serious error.
-                self.tcp_buffer.extend_from_slice(data);
-                return IncomingTcp::NeedMoreData;
-            };
-            if msg_len < data.len() {
-                self.tcp_buffer.extend_from_slice(&data[msg_len..]);
-            }
-            return IncomingTcp::CompleteMessage(transmit, 0..msg_len);
-        }
-
-        self.tcp_buffer.extend_from_slice(transmit.data.as_ref());
-        match self.poll_recv() {
-            None => IncomingTcp::NeedMoreData,
-            Some(StoredTcp::Message(msg)) => IncomingTcp::StoredMessage(msg, transmit),
-            Some(StoredTcp::Channel(channel)) => IncomingTcp::StoredChannel(channel, transmit),
-        }
-    }
-
-    pub(crate) fn poll_recv(&mut self) -> Option<StoredTcp> {
-        trace!("poll_recv: tcp buffer: {:x?}", self.tcp_buffer);
-        let Ok(hdr) = MessageHeader::from_bytes(&self.tcp_buffer) else {
-            trace!("poll_recv: failed message parse");
-            let Ok(channel) = ChannelData::parse(&self.tcp_buffer) else {
-                trace!("poll_recv: failed channel parse");
-                return None;
-            };
-            let channel_len = 4 + channel.data().len();
-            let (data, remaining) = self.tcp_buffer.split_at(channel_len);
-            let data_binding = data.to_vec();
-            self.tcp_buffer = remaining.to_vec();
-            return Some(StoredTcp::Channel(data_binding));
-        };
-        let msg_len = MessageHeader::LENGTH + hdr.data_length() as usize;
-        if self.tcp_buffer.len() < msg_len {
-            return None;
-        }
-        let (data, remaining) = self.tcp_buffer.split_at(msg_len);
-        let data_binding = data.to_vec();
-        self.tcp_buffer = remaining.to_vec();
-        let Ok(_msg) = Message::from_bytes(&data_binding) else {
-            // XXX: this might need some other return value for a more serious error.
-            return None;
-        };
-        Some(StoredTcp::Message(data_binding))
-    }
-}
-
 fn protocol_recv_to_api<T: AsRef<[u8]> + std::fmt::Debug>(
     recv: TurnProtocolRecv<Vec<u8>>,
     original: Transmit<T>,
@@ -433,16 +319,7 @@ pub(crate) fn ensure_data_owned(data: Vec<u8>, range: Range<usize>) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use tracing::info;
     use turn_server_proto::server::TurnServer;
-    use turn_types::{
-        message::ALLOCATE,
-        stun::{
-            attribute::Software,
-            message::MessageWriteVec,
-            prelude::{MessageWrite, MessageWriteExt},
-        },
-    };
 
     use crate::common::tests::turn_allocate_permission;
     use crate::common::tests::{
@@ -450,145 +327,9 @@ mod tests {
         turn_allocate_refresh, turn_channel_bind, turn_channel_bind_refresh,
         turn_create_permission_refresh, turn_create_permission_timeout, turn_peer_incoming_stun,
     };
-    use crate::{
-        common::tests::{turn_offpath_data, TurnTest},
-        tests::test_init_log,
-    };
+    use crate::common::tests::{turn_offpath_data, TurnTest};
 
     use super::*;
-
-    fn generate_message() -> Vec<u8> {
-        let mut msg = Message::builder_request(ALLOCATE, MessageWriteVec::new());
-        msg.add_attribute(&Software::new("turn-client-proto").unwrap())
-            .unwrap();
-        msg.add_fingerprint().unwrap();
-        msg.finish()
-    }
-
-    fn generate_message_in_channel() -> Vec<u8> {
-        let msg = generate_message();
-        let channel = ChannelData::new(0x4000, &msg);
-        let mut out = vec![0; msg.len() + 4];
-        channel.write_into_unchecked(&mut out);
-        out
-    }
-
-    fn generate_addresses() -> (SocketAddr, SocketAddr) {
-        (
-            "192.168.0.1:1000".parse().unwrap(),
-            "10.0.0.2:2000".parse().unwrap(),
-        )
-    }
-
-    #[test]
-    fn test_incoming_tcp_complete_message() {
-        let _init = test_init_log();
-        let (local_addr, remote_addr) = generate_addresses();
-        let mut tcp = TurnTcpBuffer::new();
-        let msg = generate_message();
-        let ret = tcp.incoming_tcp(Transmit::new(
-            msg,
-            TransportType::Tcp,
-            remote_addr,
-            local_addr,
-        ));
-        assert!(matches!(ret, IncomingTcp::CompleteMessage(_, _)));
-    }
-
-    #[test]
-    fn test_incoming_tcp_complete_message_in_channel() {
-        let _init = test_init_log();
-        let (local_addr, remote_addr) = generate_addresses();
-        let mut tcp = TurnTcpBuffer::new();
-        let msg = generate_message_in_channel();
-        let ret = tcp.incoming_tcp(Transmit::new(
-            msg,
-            TransportType::Tcp,
-            remote_addr,
-            local_addr,
-        ));
-        assert!(matches!(ret, IncomingTcp::CompleteChannel(_, _)));
-    }
-
-    #[test]
-    fn test_incoming_tcp_partial_message() {
-        let _init = test_init_log();
-        let (local_addr, remote_addr) = generate_addresses();
-        let mut tcp = TurnTcpBuffer::new();
-        let msg = generate_message();
-        info!("message: {msg:x?}");
-        for i in 1..msg.len() {
-            let ret = tcp.incoming_tcp(Transmit::new(
-                &msg[i - 1..i],
-                TransportType::Tcp,
-                remote_addr,
-                local_addr,
-            ));
-            assert!(matches!(ret, IncomingTcp::NeedMoreData));
-        }
-        let IncomingTcp::StoredMessage(produced, _) = tcp.incoming_tcp(Transmit::new(
-            &msg[msg.len() - 1..],
-            TransportType::Tcp,
-            remote_addr,
-            local_addr,
-        )) else {
-            unreachable!()
-        };
-        assert_eq!(produced, msg);
-    }
-
-    #[test]
-    fn test_incoming_tcp_partial_channel() {
-        let _init = test_init_log();
-        let (local_addr, remote_addr) = generate_addresses();
-        let mut tcp = TurnTcpBuffer::new();
-        let channel = generate_message_in_channel();
-        info!("message: {channel:x?}");
-        for i in 1..channel.len() {
-            let ret = tcp.incoming_tcp(Transmit::new(
-                &channel[i - 1..i],
-                TransportType::Tcp,
-                remote_addr,
-                local_addr,
-            ));
-            assert!(matches!(ret, IncomingTcp::NeedMoreData));
-        }
-        let IncomingTcp::StoredChannel(produced, _) = tcp.incoming_tcp(Transmit::new(
-            &channel[channel.len() - 1..],
-            TransportType::Tcp,
-            remote_addr,
-            local_addr,
-        )) else {
-            unreachable!()
-        };
-        assert_eq!(produced, channel);
-    }
-
-    #[test]
-    fn test_incoming_tcp_message_and_channel() {
-        let _init = test_init_log();
-        let (local_addr, remote_addr) = generate_addresses();
-        let mut tcp = TurnTcpBuffer::new();
-        let msg = generate_message();
-        let channel = generate_message_in_channel();
-        let mut input = msg.clone();
-        input.extend_from_slice(&channel);
-        info!("input: {input:x?}");
-        let IncomingTcp::CompleteMessage(transmit, msg_range) = tcp.incoming_tcp(Transmit::new(
-            input.clone(),
-            TransportType::Tcp,
-            remote_addr,
-            local_addr,
-        )) else {
-            unreachable!()
-        };
-        assert_eq!(msg_range, 0..msg.len());
-        assert_eq!(transmit.data, input);
-        let Some(StoredTcp::Channel(produced)) = tcp.poll_recv() else {
-            unreachable!()
-        };
-        assert_eq!(produced, channel);
-    }
 
     fn turn_tcp_new(
         local_addr: SocketAddr,
