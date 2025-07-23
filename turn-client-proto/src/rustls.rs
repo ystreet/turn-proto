@@ -722,8 +722,11 @@ mod tests {
             unreachable!();
         };
         assert!(now + Duration::from_secs(1000) < expiry);
+        // TODO: removing this (REFRESH handling) produces multiple messages in a single TCP
+        // transmit which the server currently does not like.
+        complete_io(&mut test, expiry);
         udp_permission(&mut test, expiry);
-        sendrecv_data(&mut test, now);
+        sendrecv_data(&mut test, expiry);
     }
 
     #[test]

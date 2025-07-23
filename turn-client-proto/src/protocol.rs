@@ -21,9 +21,9 @@ use stun_proto::types::message::{
     LongTermCredentials, Message, MessageClass, MessageIntegrityCredentials, TransactionId,
 };
 use stun_proto::types::TransportType;
-use tracing::{error, info, trace, warn};
-use turn_types::attribute::{ChannelNumber, Lifetime, XorPeerAddress};
-use turn_types::attribute::{Data as AData, DontFragment, RequestedTransport, XorRelayedAddress};
+use tracing::{debug, error, info, trace, warn};
+use turn_types::attribute::{ChannelNumber, Lifetime, XorPeerAddress, XorRelayedAddress};
+use turn_types::attribute::{Data as AData, DontFragment, RequestedTransport};
 use turn_types::channel::ChannelData;
 use turn_types::message::*;
 use turn_types::stun::message::MessageWriteVec;
@@ -90,7 +90,7 @@ impl TurnClientProtocol {
     }
 
     fn send_authenticating_request(
-        &mut self,
+        stun_agent: &mut StunAgent,
         credentials: LongTermCredentials,
         nonce: &str,
         now: Instant,
@@ -113,9 +113,8 @@ impl TurnClientProtocol {
             .unwrap();
         let transaction_id = builder.transaction_id();
         let msg = builder.finish();
-        let transmit = self
-            .stun_agent
-            .send_request(&msg, self.stun_agent.remote_addr().unwrap(), now)
+        let transmit = stun_agent
+            .send_request(&msg, stun_agent.remote_addr().unwrap(), now)
             .unwrap();
         (transmit.into_owned(), transaction_id)
     }
@@ -209,35 +208,52 @@ impl TurnClientProtocol {
         }
     }
 
-    fn handle_unvalidated_stun(
+    fn handle_stale_nonce_while_authenticating(
         stun_agent: &mut StunAgent,
-        state: &mut AuthState,
-        allocations: &mut [Allocation],
-        pending_transmits: &mut VecDeque<Transmit<Data<'static>>>,
-        msg: Message<'_>,
         credentials: LongTermCredentials,
+        nonce: &str,
         now: Instant,
-    ) -> InternalHandleStunReply {
-        // only handle STALE_NONCE errors here as that is the only unvalidated case that we have.
+    ) -> (Transmit<Data<'static>>, TransactionId) {
+        Self::send_authenticating_request(stun_agent, credentials, nonce, now)
+    }
+
+    fn validate_stale_nonce(msg: &Message<'_>) -> Option<(String, String)> {
         if !msg.has_class(MessageClass::Error) {
-            return InternalHandleStunReply::Ignored;
+            return None;
         }
         let Ok(error) = msg.attribute::<ErrorCode>() else {
-            return InternalHandleStunReply::Ignored;
+            return None;
         };
         if error.code() != ErrorCode::STALE_NONCE {
-            return InternalHandleStunReply::Ignored;
+            return None;
         }
         let Ok(nonce) = msg
             .attribute::<Nonce>()
             .map(|nonce| nonce.nonce().to_string())
         else {
-            return InternalHandleStunReply::Ignored;
+            return None;
         };
         let Ok(realm) = msg
             .attribute::<Realm>()
             .map(|realm| realm.realm().to_string())
         else {
+            return None;
+        };
+
+        Some((nonce, realm))
+    }
+
+    fn handle_unvalidated_stun(
+        stun_agent: &mut StunAgent,
+        state: &mut AuthState,
+        allocations: &mut [Allocation],
+        pending_transmits: &mut VecDeque<Transmit<Data<'static>>>,
+        msg: &Message<'_>,
+        credentials: LongTermCredentials,
+        now: Instant,
+    ) -> InternalHandleStunReply {
+        // only handle STALE_NONCE errors here as that is the only unvalidated case that we have.
+        let Some((nonce, realm)) = Self::validate_stale_nonce(msg) else {
             return InternalHandleStunReply::Ignored;
         };
 
@@ -419,19 +435,13 @@ impl TurnClientProtocol {
                     state,
                     allocations,
                     pending_transmits,
-                    msg,
+                    &msg,
                     credentials,
                     now,
                 )
             }
         };
         if msg.is_response() {
-            let Ok(_) = msg.validate_integrity(&MessageIntegrityCredentials::LongTerm(credentials))
-            else {
-                trace!("incoming message failed integrity check");
-                return InternalHandleStunReply::Ignored;
-            };
-
             match msg.method() {
                 REFRESH => {
                     let is_success = if msg.has_class(MessageClass::Error) {
@@ -442,20 +452,21 @@ impl TurnClientProtocol {
                     };
                     let mut remove_allocations = false;
                     let mut handled = false;
-                    if is_success {
-                        for alloc in allocations.iter_mut() {
-                            let Ok(lifetime) = msg.attribute::<Lifetime>() else {
-                                continue;
-                            };
-                            let (_transaction_id, requested_lifetime) = if alloc
-                                .pending_refresh
-                                .is_some_and(|(transaction_id, _requested_lifetime)| {
-                                    transaction_id == msg.transaction_id() && is_success
-                                }) {
-                                alloc.pending_refresh.take().unwrap()
-                            } else {
-                                continue;
-                            };
+                    for alloc in allocations.iter_mut() {
+                        let (transaction_id, requested_lifetime) = if alloc
+                            .pending_refresh
+                            .is_some_and(|(transaction_id, _requested_lifetime)| {
+                                transaction_id == msg.transaction_id()
+                            }) {
+                            alloc.pending_refresh.take().unwrap()
+                        } else {
+                            continue;
+                        };
+                        debug!("remove pending REFRESH transaction {transaction_id}");
+                        let Ok(lifetime) = msg.attribute::<Lifetime>() else {
+                            continue;
+                        };
+                        if is_success {
                             if requested_lifetime == 0 {
                                 remove_allocations = true;
                             } else {
@@ -468,6 +479,7 @@ impl TurnClientProtocol {
 
                     if remove_allocations {
                         allocations.clear();
+                        pending_events.push_front(TurnEvent::AllocationCreateFailed);
                         *state = AuthState::Error;
                     }
                     if handled {
@@ -476,10 +488,8 @@ impl TurnClientProtocol {
                         } else {
                             info!("Successfully refreshed allocation");
                         }
-                        InternalHandleStunReply::Handled
-                    } else {
-                        InternalHandleStunReply::Ignored
                     }
+                    InternalHandleStunReply::Handled
                 }
                 CREATE_PERMISSION => {
                     if Self::update_permission_state(allocations, pending_events, msg, now) {
@@ -769,28 +779,21 @@ impl TurnClientProtocol {
                 /* The Initial stun request should result in an unauthorized error as there were
                  * no credentials in the initial request */
                 if !msg.has_class(stun_proto::types::message::MessageClass::Error) {
+                    info!("Initial ALLOCATE response is not an error");
                     self.state = AuthState::Error;
                     self.pending_events
                         .push_front(TurnEvent::AllocationCreateFailed);
-                    return TurnProtocolRecv::Ignored(data);
+                    return TurnProtocolRecv::Handled;
                 }
-                let Ok(error_code) = msg.attribute::<ErrorCode>() else {
+                let error_code = msg.attribute::<ErrorCode>();
+                let realm = msg.attribute::<Realm>();
+                let nonce = msg.attribute::<Nonce>();
+                let (Ok(error_code), Ok(realm), Ok(nonce)) = (error_code, realm, nonce) else {
+                    info!("Initial ALLOCATE error response missing ErrorCode, Realm, or Nonce attribute");
                     self.state = AuthState::Error;
                     self.pending_events
                         .push_front(TurnEvent::AllocationCreateFailed);
-                    return TurnProtocolRecv::Ignored(data);
-                };
-                let Ok(realm) = msg.attribute::<Realm>() else {
-                    self.state = AuthState::Error;
-                    self.pending_events
-                        .push_front(TurnEvent::AllocationCreateFailed);
-                    return TurnProtocolRecv::Ignored(data);
-                };
-                let Ok(nonce) = msg.attribute::<Nonce>() else {
-                    self.state = AuthState::Error;
-                    self.pending_events
-                        .push_front(TurnEvent::AllocationCreateFailed);
-                    return TurnProtocolRecv::Ignored(data);
+                    return TurnProtocolRecv::Handled;
                 };
                 match error_code.code() {
                     ErrorCode::UNAUTHORIZED => {
@@ -799,7 +802,8 @@ impl TurnClientProtocol {
                             .credentials
                             .clone()
                             .into_long_term_credentials(realm.realm());
-                        let (transmit, transaction_id) = self.send_authenticating_request(
+                        let (transmit, transaction_id) = Self::send_authenticating_request(
+                            &mut self.stun_agent,
                             credentials.clone(),
                             nonce.nonce(),
                             now,
@@ -823,7 +827,7 @@ impl TurnClientProtocol {
                             .push_front(TurnEvent::AllocationCreateFailed);
                     }
                 }
-                return TurnProtocolRecv::Ignored(data);
+                return TurnProtocolRecv::Handled;
             }
             AuthState::Authenticating {
                 credentials,
@@ -831,12 +835,26 @@ impl TurnClientProtocol {
                 transaction_id,
             } => {
                 trace!("received STUN message {msg}");
-                let msg = match self.stun_agent.handle_stun(msg, remote_addr) {
+                let stun_agent = &mut self.stun_agent;
+                let msg = match stun_agent.handle_stun(msg, remote_addr) {
                     HandleStunReply::Drop => return TurnProtocolRecv::Handled,
                     HandleStunReply::IncomingStun(_) => return TurnProtocolRecv::Ignored(data),
                     HandleStunReply::ValidatedStunResponse(msg) => msg,
-                    HandleStunReply::UnvalidatedStunResponse(_msg) => {
-                        return TurnProtocolRecv::Ignored(data)
+                    HandleStunReply::UnvalidatedStunResponse(msg) => {
+                        let Some((new_nonce, _realm)) = Self::validate_stale_nonce(&msg) else {
+                            return TurnProtocolRecv::Ignored(data);
+                        };
+                        let (transmit, new_transaction_id) =
+                            Self::handle_stale_nonce_while_authenticating(
+                                stun_agent,
+                                credentials.clone(),
+                                &new_nonce,
+                                now,
+                            );
+                        *nonce = new_nonce;
+                        *transaction_id = new_transaction_id;
+                        self.pending_transmits.push_back(transmit);
+                        return TurnProtocolRecv::Handled;
                     }
                 };
                 if !msg.is_response() || &msg.transaction_id() != transaction_id {
@@ -845,55 +863,50 @@ impl TurnClientProtocol {
                 match msg.class() {
                     stun_proto::types::message::MessageClass::Error => {
                         let Ok(error_code) = msg.attribute::<ErrorCode>() else {
+                            info!("Authenticating ALLOCATE error response missing ErrorCode attribute");
                             self.state = AuthState::Error;
-                            return TurnProtocolRecv::Ignored(data);
+                            self.pending_events
+                                .push_front(TurnEvent::AllocationCreateFailed);
+                            return TurnProtocolRecv::Handled;
                         };
                         match error_code.code() {
                             ErrorCode::STALE_NONCE => {
-                                let Ok(realm) = msg.attribute::<Realm>() else {
-                                    self.state = AuthState::Error;
+                                let Some((new_nonce, _realm)) = Self::validate_stale_nonce(&msg)
+                                else {
                                     return TurnProtocolRecv::Ignored(data);
                                 };
-                                let Ok(nonce) = msg.attribute::<Nonce>() else {
-                                    self.state = AuthState::Error;
-                                    return TurnProtocolRecv::Ignored(data);
-                                };
-                                let credentials = self
-                                    .credentials
-                                    .clone()
-                                    .into_long_term_credentials(realm.realm());
-                                let (transmit, transaction_id) = self.send_authenticating_request(
-                                    credentials.clone(),
-                                    nonce.nonce(),
-                                    now,
-                                );
-                                self.pending_transmits.push_back(transmit.into_owned());
-                                self.state = AuthState::Authenticating {
-                                    credentials,
-                                    nonce: nonce.nonce().to_string(),
-                                    transaction_id,
-                                };
+                                let (transmit, new_transaction_id) =
+                                    Self::handle_stale_nonce_while_authenticating(
+                                        stun_agent,
+                                        credentials.clone(),
+                                        &new_nonce,
+                                        now,
+                                    );
+                                *nonce = new_nonce;
+                                *transaction_id = new_transaction_id;
+                                self.pending_transmits.push_back(transmit);
                                 return TurnProtocolRecv::Handled;
                             }
                             code => {
                                 warn!("Unknown error code returned while authenticating: {code:?}");
                                 self.state = AuthState::Error;
+                                self.pending_events
+                                    .push_front(TurnEvent::AllocationCreateFailed);
+                                return TurnProtocolRecv::Handled;
                             }
                         }
                     }
                     stun_proto::types::message::MessageClass::Success => {
-                        let Ok(_) = msg.validate_integrity(&MessageIntegrityCredentials::LongTerm(
-                            credentials.clone(),
-                        )) else {
-                            return TurnProtocolRecv::Ignored(data);
-                        };
                         let xor_relayed_address = msg.attribute::<XorRelayedAddress>();
                         let lifetime = msg.attribute::<Lifetime>();
                         let (Ok(xor_relayed_address), Ok(lifetime)) =
                             (xor_relayed_address, lifetime)
                         else {
+                            info!("Authenticating ALLOCATE response missing XorRelayedAddress or Lifetime attributes");
                             self.state = AuthState::Error;
-                            return TurnProtocolRecv::Ignored(data);
+                            self.pending_events
+                                .push_front(TurnEvent::AllocationCreateFailed);
+                            return TurnProtocolRecv::Handled;
                         };
                         let relayed_address = xor_relayed_address.addr(msg.transaction_id());
                         let lifetime = Duration::from_secs(lifetime.seconds() as u64);
@@ -1060,6 +1073,7 @@ impl TurnClientProtocol {
             }
             AuthState::InitialSent(transaction_id) => {
                 if cancelled_transaction.is_some_and(|cancelled| &cancelled == transaction_id) {
+                    info!("Initial transaction timed out or was cancelled");
                     self.state = AuthState::Error;
                 }
                 return TurnPollRet::WaitUntil(earliest_wait);
@@ -1070,45 +1084,50 @@ impl TurnClientProtocol {
                 transaction_id,
             } => {
                 if cancelled_transaction.is_some_and(|cancelled| &cancelled == transaction_id) {
+                    info!("Authenticating transaction timed out or was cancelled");
                     self.state = AuthState::Error;
                 }
                 return TurnPollRet::WaitUntil(earliest_wait);
             }
-            AuthState::Authenticated { credentials, nonce } => {
-                for alloc in self.allocations.iter_mut() {
-                    let mut expires_at = alloc.expires_at
-                        - if alloc.pending_refresh.is_none() {
-                            if alloc.lifetime > EXPIRY_BUFFER * 2 {
-                                EXPIRY_BUFFER
-                            } else {
-                                alloc.lifetime / 2
-                            }
-                        } else {
-                            Duration::ZERO
-                        };
-                    if alloc.pending_refresh.is_none() && expires_at <= now {
-                        let (transmit, transaction_id, lifetime) = Self::send_refresh(
-                            &mut self.stun_agent,
-                            credentials.clone(),
-                            nonce,
-                            1800,
-                            now,
-                        );
-                        alloc.pending_refresh = Some((transaction_id, lifetime));
-                        self.pending_transmits.push_back(transmit.into_owned());
-                        earliest_wait = now.min(earliest_wait);
-                    }
+            AuthState::Authenticated { credentials: _, nonce: _ } => {
+                let mut remove_allocation_indices = vec![];
+                for (idx, alloc) in self.allocations.iter_mut().enumerate() {
+                    let mut expires_at;
+
+                    trace!(
+                        "alloc {} {} refresh time in {:?}",
+                        alloc.transport,
+                        alloc.relayed_address,
+                        alloc.refresh_time() - now
+                    );
                     if let Some((pending, _lifetime)) = alloc.pending_refresh {
                         if cancelled_transaction.is_some_and(|cancelled| cancelled == pending) {
-                            // TODO: need to eventually fail when the allocation times out.
                             warn!("Refresh timed out or was cancelled");
-                            expires_at = alloc.expires_at;
+                            if alloc.expires_at >= now {
+                                expires_at = alloc.expires_at;
+                            } else {
+                                remove_allocation_indices.push(idx);
+                                continue;
+                            }
                         } else {
-                            expires_at = earliest_wait;
+                            expires_at = alloc.expires_at;
                         }
+                    } else if alloc.expires_at >= now {
+                        expires_at = alloc.refresh_time().max(now);
+                    } else {
+                        warn!("Allocation timed out");
+                        remove_allocation_indices.push(idx);
+                        continue;
                     }
+
                     for channel in alloc.channels.iter_mut() {
-                        let refresh_time = channel.expires_at - EXPIRY_BUFFER;
+                        trace!(
+                            "channel {} {} {} refresh time in {:?}",
+                            channel.id,
+                            alloc.transport,
+                            channel.peer_addr,
+                            channel.refresh_time() - now
+                        );
                         if let Some(pending) = channel.pending_refresh {
                             if cancelled_transaction.is_some_and(|cancelled| cancelled == pending) {
                                 // TODO: need to eventually fail when the permission times out.
@@ -1125,33 +1144,19 @@ impl TurnClientProtocol {
                             } else {
                                 expires_at = expires_at.min(channel.expires_at);
                             }
-                        } else if refresh_time <= now {
-                            info!(
-                                "refreshing {} channel {} from {} to {}",
-                                alloc.transport,
-                                channel.id,
-                                alloc.relayed_address,
-                                channel.peer_addr
-                            );
-                            let (transmit, transaction_id) = Self::send_channel_bind_request(
-                                &mut self.stun_agent,
-                                credentials.clone(),
-                                nonce,
-                                channel.id,
-                                channel.peer_addr,
-                                now,
-                            );
-                            channel.pending_refresh = Some(transaction_id);
-                            self.pending_transmits.push_back(transmit);
-                            expires_at = expires_at.min(refresh_time);
                         } else {
-                            expires_at = expires_at.min(refresh_time);
+                            expires_at = expires_at.min(channel.refresh_time().max(now));
                         }
                     }
 
                     // refresh permission if necessary
                     for permission in alloc.permissions.iter_mut() {
-                        let refresh_time = permission.expires_at - EXPIRY_BUFFER;
+                        trace!(
+                            "permission {} {} refresh time in {:?}",
+                            alloc.transport,
+                            permission.ip,
+                            permission.refresh_time() - now
+                        );
                         if let Some(pending) = permission.pending_refresh {
                             if cancelled_transaction.is_some_and(|cancelled| cancelled == pending) {
                                 warn!(
@@ -1173,26 +1178,14 @@ impl TurnClientProtocol {
                             } else {
                                 expires_at = expires_at.min(permission.expires_at);
                             }
-                        } else if refresh_time <= now {
-                            info!(
-                                "refreshing {} permission from {} to {}",
-                                alloc.transport, alloc.relayed_address, permission.ip
-                            );
-                            let (transmit, transaction_id) = Self::send_create_permission_request(
-                                &mut self.stun_agent,
-                                credentials.clone(),
-                                nonce,
-                                permission.ip,
-                                now,
-                            );
-                            permission.pending_refresh = Some(transaction_id);
-                            self.pending_transmits.push_back(transmit);
-                            expires_at = expires_at.min(refresh_time);
                         } else {
-                            expires_at = expires_at.min(refresh_time);
+                            expires_at = expires_at.min(permission.refresh_time().max(now));
                         }
                     }
                     earliest_wait = expires_at.min(earliest_wait)
+                }
+                for (i, idx) in remove_allocation_indices.into_iter().enumerate() {
+                    self.allocations.remove(idx - i);
                 }
                 return TurnPollRet::WaitUntil(earliest_wait.max(now));
             }
@@ -1227,10 +1220,71 @@ impl TurnClientProtocol {
                 nonce: _,
                 transaction_id: _,
             } => None,
-            AuthState::Authenticated {
-                credentials: _,
-                nonce: _,
-            } => None,
+            AuthState::Authenticated { credentials, nonce } => {
+                for alloc in self.allocations.iter_mut() {
+                    if alloc.expired || alloc.expires_at < now {
+                        continue;
+                    }
+                    if alloc.pending_refresh.is_none() && alloc.refresh_time() <= now {
+                        let (transmit, transaction_id, lifetime) = Self::send_refresh(
+                            &mut self.stun_agent,
+                            credentials.clone(),
+                            nonce,
+                            1800,
+                            now,
+                        );
+                        alloc.pending_refresh = Some((transaction_id, lifetime));
+                        return Some(transmit);
+                    }
+
+                    for channel in alloc.channels.iter_mut() {
+                        if channel.expires_at < now {
+                            continue;
+                        }
+                        if channel.pending_refresh.is_none() && channel.refresh_time() <= now {
+                            info!(
+                                "refreshing {} channel {} from {} to {}",
+                                alloc.transport,
+                                channel.id,
+                                alloc.relayed_address,
+                                channel.peer_addr
+                            );
+                            let (transmit, transaction_id) = Self::send_channel_bind_request(
+                                &mut self.stun_agent,
+                                credentials.clone(),
+                                nonce,
+                                channel.id,
+                                channel.peer_addr,
+                                now,
+                            );
+                            channel.pending_refresh = Some(transaction_id);
+                            return Some(transmit);
+                        }
+                    }
+
+                    for permission in alloc.permissions.iter_mut() {
+                        if permission.expires_at < now {
+                            continue;
+                        }
+                        if permission.pending_refresh.is_none() && permission.refresh_time() <= now {
+                            info!(
+                                "refreshing {} permission from {} to {}",
+                                alloc.transport, alloc.relayed_address, permission.ip
+                            );
+                            let (transmit, transaction_id) = Self::send_create_permission_request(
+                                &mut self.stun_agent,
+                                credentials.clone(),
+                                nonce,
+                                permission.ip,
+                                now,
+                            );
+                            permission.pending_refresh = Some(transaction_id);
+                            return Some(transmit);
+                        }
+                    }
+                }
+                None
+            }
         }
     }
 
@@ -1431,6 +1485,7 @@ impl TurnClientProtocol {
     }
 
     pub(crate) fn error(&mut self) {
+        info!("user produced an error");
         self.state = AuthState::Error;
     }
 }
@@ -1480,6 +1535,17 @@ struct Allocation {
     expired_channels: Vec<Channel>,
 }
 
+impl Allocation {
+    fn refresh_time(&self) -> Instant {
+        self.expires_at
+            - if self.lifetime > EXPIRY_BUFFER * 2 {
+                EXPIRY_BUFFER
+            } else {
+                self.lifetime / 2
+            }
+    }
+}
+
 #[derive(Debug)]
 struct Channel {
     id: u16,
@@ -1488,12 +1554,24 @@ struct Channel {
     pending_refresh: Option<TransactionId>,
 }
 
+impl Channel {
+    fn refresh_time(&self) -> Instant {
+        self.expires_at - EXPIRY_BUFFER
+    }
+}
+
 #[derive(Debug)]
 struct Permission {
     expired: bool,
     expires_at: Instant,
     ip: IpAddr,
     pending_refresh: Option<TransactionId>,
+}
+
+impl Permission {
+    fn refresh_time(&self) -> Instant {
+        self.expires_at - EXPIRY_BUFFER
+    }
 }
 
 #[derive(Debug)]
@@ -1532,29 +1610,35 @@ pub(crate) enum TurnProtocolChannelRecv {
 #[cfg(test)]
 mod tests {
     use turn_server_proto::api::TurnServerApi;
+    use turn_types::stun::message::{IntegrityAlgorithm, Method};
 
+    use crate::common::tests::generate_addresses;
     use crate::common::TurnClientApi;
     use crate::tcp::TurnRecvRet;
 
     use super::*;
 
-    #[test]
-    fn test_turn_client_protocol_new_properties() {
-        let _log = crate::tests::test_init_log();
-
-        let local_addr = "192.168.0.1:31234".parse().unwrap();
-        let remote_addr = "10.0.0.1:3478".parse().unwrap();
+    fn new_protocol() -> TurnClientProtocol {
+        let (local_addr, remote_addr) = generate_addresses();
         let credentials = TurnCredentials::new("tuser", "tpass");
 
         let stun_agent = StunAgent::builder(TransportType::Udp, local_addr)
             .remote_addr(remote_addr)
             .build();
-        let mut client = TurnClientProtocol::new(stun_agent, credentials);
+        let client = TurnClientProtocol::new(stun_agent, credentials);
         assert_eq!(client.transport(), TransportType::Udp);
         assert_eq!(client.local_addr(), local_addr);
         assert_eq!(client.remote_addr(), remote_addr);
 
+        client
+    }
+
+    #[test]
+    fn test_turn_client_protocol_new_properties() {
+        let _log = crate::tests::test_init_log();
+        let mut client = new_protocol();
         let now = Instant::now();
+
         let TurnPollRet::WaitUntil(new_now) = client.poll(now) else {
             unreachable!();
         };
@@ -1562,6 +1646,359 @@ mod tests {
         assert!(client.poll_event().is_none());
 
         assert_eq!(client.relayed_addresses().count(), 0);
+    }
+
+    fn response<F: FnOnce(Message<'_>) -> Vec<u8>>(
+        client: &mut TurnClientProtocol,
+        method: Method,
+        reply: F,
+        now: Instant,
+    ) -> TurnProtocolRecv<Vec<u8>> {
+        let transmit = client.poll_transmit(now).unwrap();
+        let msg = Message::from_bytes(&transmit.data).unwrap();
+        assert_eq!(msg.method(), method);
+        let reply = reply(msg);
+        client.handle_message(reply, now)
+    }
+
+    fn allocate_response<F: FnOnce(Message<'_>) -> Vec<u8>>(
+        client: &mut TurnClientProtocol,
+        reply: F,
+        now: Instant,
+    ) -> TurnProtocolRecv<Vec<u8>> {
+        response(client, ALLOCATE, reply, now)
+    }
+
+    fn check_allocate_reply_failed(
+        client: &mut TurnClientProtocol,
+        ret: TurnProtocolRecv<Vec<u8>>,
+    ) {
+        assert!(matches!(ret, TurnProtocolRecv::Handled));
+        assert!(matches!(
+            client.poll_event(),
+            Some(TurnEvent::AllocationCreateFailed)
+        ));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_initial_allocate_bad_request() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        let ret = allocate_response(
+            &mut client,
+            |msg| Message::bad_request(&msg, MessageWriteVec::new()).finish(),
+            now,
+        );
+        check_allocate_reply_failed(&mut client, ret);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_initial_allocate_reply_with_request() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        let ret = allocate_response(
+            &mut client,
+            |_msg| Message::builder_request(ALLOCATE, MessageWriteVec::new()).finish(),
+            now,
+        );
+        assert!(matches!(ret, TurnProtocolRecv::Ignored(_)));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_initial_allocate_reply_missing_attributes() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        let ret = allocate_response(
+            &mut client,
+            |msg| {
+                let mut reply = Message::builder_error(&msg, MessageWriteVec::new());
+                reply.add_attribute(&Nonce::new("nonce").unwrap()).unwrap();
+                reply
+                    .add_attribute(
+                        &ErrorCode::builder(ErrorCode::INSUFFICIENT_CAPACITY)
+                            .build()
+                            .unwrap(),
+                    )
+                    .unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        check_allocate_reply_failed(&mut client, ret);
+
+        let mut client = new_protocol();
+        let ret = allocate_response(
+            &mut client,
+            |msg| {
+                let mut reply = Message::builder_error(&msg, MessageWriteVec::new());
+                reply.add_attribute(&Realm::new("realm").unwrap()).unwrap();
+                reply
+                    .add_attribute(
+                        &ErrorCode::builder(ErrorCode::INSUFFICIENT_CAPACITY)
+                            .build()
+                            .unwrap(),
+                    )
+                    .unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        check_allocate_reply_failed(&mut client, ret);
+
+        let mut client = new_protocol();
+        let ret = allocate_response(
+            &mut client,
+            |msg| {
+                let mut reply = Message::builder_error(&msg, MessageWriteVec::new());
+                reply.add_attribute(&Realm::new("realm").unwrap()).unwrap();
+                reply.add_attribute(&Nonce::new("nonce").unwrap()).unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        check_allocate_reply_failed(&mut client, ret);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_initial_allocate_reply_wrong_errorcode() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        let ret = allocate_response(
+            &mut client,
+            |msg| {
+                let mut reply = Message::builder_error(&msg, MessageWriteVec::new());
+                reply.add_attribute(&Realm::new("realm").unwrap()).unwrap();
+                reply.add_attribute(&Nonce::new("nonce").unwrap()).unwrap();
+                reply
+                    .add_attribute(
+                        &ErrorCode::builder(ErrorCode::INSUFFICIENT_CAPACITY)
+                            .build()
+                            .unwrap(),
+                    )
+                    .unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        check_allocate_reply_failed(&mut client, ret);
+    }
+
+    fn initial_allocate(client: &mut TurnClientProtocol, now: Instant) {
+        assert!(matches!(
+            allocate_response(
+                client,
+                |msg| {
+                    let mut reply = Message::builder_error(&msg, MessageWriteVec::new());
+                    reply.add_attribute(&Realm::new("realm").unwrap()).unwrap();
+                    reply.add_attribute(&Nonce::new("nonce").unwrap()).unwrap();
+                    reply
+                        .add_attribute(
+                            &ErrorCode::builder(ErrorCode::UNAUTHORIZED).build().unwrap(),
+                        )
+                        .unwrap();
+                    reply.finish()
+                },
+                now,
+            ),
+            TurnProtocolRecv::Handled
+        ));
+    }
+
+    fn client_credentials(client: &TurnClientProtocol) -> LongTermCredentials {
+        client
+            .credentials
+            .clone()
+            .into_long_term_credentials("realm")
+    }
+
+    #[test]
+    fn test_turn_client_protocol_authenticated_allocate_reply_with_request() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        let credentials = client_credentials(&client);
+        let ret = allocate_response(
+            &mut client,
+            |_msg| {
+                let mut reply = Message::builder_request(ALLOCATE, MessageWriteVec::new());
+                reply
+                    .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                    .unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        assert!(matches!(ret, TurnProtocolRecv::Ignored(_)));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_authenticated_allocate_reply_bad_request() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        let credentials = client_credentials(&client);
+        let ret = allocate_response(
+            &mut client,
+            |msg| {
+                let mut reply = Message::bad_request(&msg, MessageWriteVec::new());
+                reply
+                    .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                    .unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        check_allocate_reply_failed(&mut client, ret);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_authenticated_allocate_reply_error() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        let credentials = client_credentials(&client);
+        let ret = allocate_response(
+            &mut client,
+            |msg| {
+                let mut reply = Message::builder_error(&msg, MessageWriteVec::new());
+                reply
+                    .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                    .unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        check_allocate_reply_failed(&mut client, ret);
+    }
+
+    fn generate_xor_peer_address() -> SocketAddr {
+        "10.0.0.3:9000".parse().unwrap()
+    }
+
+    static TEST_ALLOCATION_LIFETIME: u32 = 600;
+
+    #[test]
+    fn test_turn_client_protocol_authenticated_allocate_reply_missing_attribute() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        let credentials = client_credentials(&client);
+        let ret = allocate_response(
+            &mut client,
+            |msg| {
+                let mut reply = Message::builder_success(&msg, MessageWriteVec::new());
+                reply
+                    .add_attribute(&Lifetime::new(TEST_ALLOCATION_LIFETIME))
+                    .unwrap();
+                reply
+                    .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                    .unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        check_allocate_reply_failed(&mut client, ret);
+
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        let credentials = client_credentials(&client);
+        let ret = allocate_response(
+            &mut client,
+            |msg| {
+                let mut reply = Message::builder_success(&msg, MessageWriteVec::new());
+                let transaction_id = reply.transaction_id();
+                reply
+                    .add_attribute(&XorRelayedAddress::new(
+                        generate_xor_peer_address(),
+                        transaction_id,
+                    ))
+                    .unwrap();
+                reply
+                    .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                    .unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        check_allocate_reply_failed(&mut client, ret);
+    }
+
+    fn authenticated_allocate(client: &mut TurnClientProtocol, now: Instant) {
+        let credentials = client_credentials(client);
+        let ret = allocate_response(
+            client,
+            |msg| {
+                let mut reply = Message::builder_success(&msg, MessageWriteVec::new());
+                let transaction_id = reply.transaction_id();
+                reply
+                    .add_attribute(&XorRelayedAddress::new(
+                        generate_xor_peer_address(),
+                        transaction_id,
+                    ))
+                    .unwrap();
+                reply.add_attribute(&Lifetime::new(600)).unwrap();
+                reply
+                    .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                    .unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        assert!(matches!(ret, TurnProtocolRecv::Handled));
+        assert!(matches!(
+            client.poll_event(),
+            Some(TurnEvent::AllocationCreated(_, _))
+        ));
+    }
+
+    fn refresh_response<F: FnOnce(Message<'_>) -> Vec<u8>>(
+        client: &mut TurnClientProtocol,
+        reply: F,
+        now: Instant,
+    ) -> TurnProtocolRecv<Vec<u8>> {
+        response(client, REFRESH, reply, now)
+    }
+
+    #[test]
+    fn test_turn_client_protocol_refresh_error() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        // produces the wait
+        let TurnPollRet::WaitUntil(expiry) = client.poll(now) else {
+            unreachable!();
+        };
+        assert!(expiry > now);
+        let now = expiry;
+        let credentials = client_credentials(&client);
+        let ret = refresh_response(
+            &mut client,
+            |msg| {
+                let mut reply = Message::builder_error(&msg, MessageWriteVec::new());
+                reply
+                    .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                    .unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        assert!(matches!(ret, TurnProtocolRecv::Handled));
+        let TurnPollRet::WaitUntil(_now) = client.poll(
+            now + Duration::from_secs(TEST_ALLOCATION_LIFETIME as u64) - EXPIRY_BUFFER
+                + Duration::from_secs(1),
+        ) else {
+            unreachable!();
+        };
     }
 
     #[test]
