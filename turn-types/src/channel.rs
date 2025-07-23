@@ -52,6 +52,13 @@ impl<'a> ChannelData<'a> {
     pub fn parse(data: &'a [u8]) -> Result<Self, StunParseError> {
         let (id, len) = Self::parse_header(data)?;
 
+        if len + 4 > data.len() {
+            return Err(stun_types::message::StunParseError::Truncated {
+                expected: 4 + len,
+                actual: data.len(),
+            });
+        }
+
         Ok(ChannelData {
             id,
             data: &data[4..4 + len],
@@ -81,12 +88,6 @@ impl<'a> ChannelData<'a> {
         }
         let id = u16::from_be_bytes([data[0], data[1]]);
         let len = u16::from_be_bytes([data[2], data[3]]) as usize;
-        if len + 4 > data.len() {
-            return Err(stun_types::message::StunParseError::Truncated {
-                expected: 4 + len,
-                actual: data.len(),
-            });
-        }
 
         if !(0x4000..=0xFFFE).contains(&id) {
             return Err(stun_types::message::StunParseError::InvalidAttributeData);
@@ -151,6 +152,7 @@ mod tests {
         };
         assert_eq!(expected, 5);
         assert_eq!(actual, 4);
+        assert_eq!(ChannelData::parse_header(&data).unwrap(), (0x4000, 1));
     }
 
     #[test]
