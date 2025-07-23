@@ -25,6 +25,7 @@ use stun_types::message::LongTermCredentials;
 pub mod attribute;
 pub mod channel;
 pub mod message;
+pub mod tcp;
 
 /// Initialize the library.
 pub fn debug_init() {
