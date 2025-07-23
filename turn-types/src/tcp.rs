@@ -11,7 +11,7 @@
 use std::ops::Range;
 
 use stun_proto::agent::Transmit;
-use stun_types::message::{Message, MessageHeader};
+use stun_types::message::MessageHeader;
 use tracing::{debug, trace};
 
 use crate::channel::ChannelData;
@@ -53,9 +53,8 @@ impl TurnTcpBuffer {
     }
 
     /// Provide incoming TCP data to parse.
-    #[tracing::instrument(ret,
+    #[tracing::instrument(
         level = "trace",
-        ret,
         skip(self, transmit),
         fields(
             transmit.data_len = transmit.data.as_ref().len(),
@@ -76,25 +75,25 @@ impl TurnTcpBuffer {
                 };
                 let channel_len = 4 + channel.data().len();
                 debug!(
-                    "Incoming data contains a channel with id {} and len {}",
-                    channel.id(),
-                    channel_len - 4
+                    channel.id = channel.id(),
+                    channel.len = channel_len - 4,
+                    "Incoming data contains a channel",
                 );
-                if channel_len > data.len() {
+                if channel_len < data.len() {
                     self.tcp_buffer.extend_from_slice(&data[channel_len..]);
                 }
                 return IncomingTcp::CompleteChannel(transmit, 0..channel_len);
             };
             let msg_len = MessageHeader::LENGTH + hdr.data_length() as usize;
+            debug!(
+                msg.transaction = %hdr.transaction_id(),
+                msg.len = msg_len,
+                "Incoming data contains a message",
+            );
             if data.len() < msg_len {
                 self.tcp_buffer.extend_from_slice(data);
                 return IncomingTcp::NeedMoreData;
             }
-            let Ok(_msg) = Message::from_bytes(&data[..msg_len]) else {
-                // XXX: this might need some other return value for a more serious error.
-                self.tcp_buffer.extend_from_slice(data);
-                return IncomingTcp::NeedMoreData;
-            };
             if msg_len < data.len() {
                 self.tcp_buffer.extend_from_slice(&data[msg_len..]);
             }
@@ -110,31 +109,60 @@ impl TurnTcpBuffer {
     }
 
     /// Return the next complete message (if any).
+    #[tracing::instrument(
+        level = "trace",
+        skip(self),
+        fields(
+            buffered_len = self.tcp_buffer.len(),
+        )
+    )]
     pub fn poll_recv(&mut self) -> Option<StoredTcp> {
-        trace!("poll_recv: tcp buffer: {:x?}", self.tcp_buffer);
         let Ok(hdr) = MessageHeader::from_bytes(&self.tcp_buffer) else {
-            trace!("poll_recv: failed message parse");
-            let Ok(channel) = ChannelData::parse(&self.tcp_buffer) else {
-                trace!("poll_recv: failed channel parse");
+            let Ok((id, channel_data_len)) = ChannelData::parse_header(&self.tcp_buffer) else {
+                trace!(
+                    buffered.len = self.tcp_buffer.len(),
+                    "cannot parse stored data"
+                );
                 return None;
             };
-            let channel_len = 4 + channel.data().len();
+            let channel_len = 4 + channel_data_len;
+            if self.tcp_buffer.len() < channel_len {
+                trace!(
+                    buffered.len = self.tcp_buffer.len(),
+                    required = channel_len,
+                    "need more bytes to complete channel data"
+                );
+                return None;
+            }
             let (data, remaining) = self.tcp_buffer.split_at(channel_len);
             let data_binding = data.to_vec();
+            debug!(
+                channel.id = id,
+                channel.len = channel_data_len,
+                remaining = remaining.len(),
+                "buffered data contains a channel",
+            );
             self.tcp_buffer = remaining.to_vec();
             return Some(StoredTcp::Channel(data_binding));
         };
         let msg_len = MessageHeader::LENGTH + hdr.data_length() as usize;
         if self.tcp_buffer.len() < msg_len {
+            trace!(
+                buffered.len = self.tcp_buffer.len(),
+                required = msg_len,
+                "need more bytes to complete STUN message"
+            );
             return None;
         }
         let (data, remaining) = self.tcp_buffer.split_at(msg_len);
         let data_binding = data.to_vec();
+        debug!(
+            msg.transaction = %hdr.transaction_id(),
+            msg.len = msg_len,
+            remaining = remaining.len(),
+            "stored data contains a message",
+        );
         self.tcp_buffer = remaining.to_vec();
-        let Ok(_msg) = Message::from_bytes(&data_binding) else {
-            // XXX: this might need some other return value for a more serious error.
-            return None;
-        };
         Some(StoredTcp::Message(data_binding))
     }
 }
@@ -145,7 +173,7 @@ mod tests {
 
     use stun_types::{
         attribute::Software,
-        message::MessageWriteVec,
+        message::{Message, MessageWriteVec},
         prelude::{MessageWrite, MessageWriteExt},
         TransportType,
     };
@@ -285,5 +313,27 @@ mod tests {
             unreachable!()
         };
         assert_eq!(produced, channel);
+    }
+
+    #[test]
+    fn test_incoming_tcp_channel_and_message() {
+        let _init = crate::tests::test_init_log();
+        let (local_addr, remote_addr) = generate_addresses();
+        let mut tcp = TurnTcpBuffer::new();
+        let msg = generate_message();
+        let channel = generate_message_in_channel();
+        let mut input = channel.clone();
+        input.extend_from_slice(&msg);
+        let IncomingTcp::CompleteChannel(transmit, channel_range) = tcp.incoming_tcp(
+            Transmit::new(input.clone(), TransportType::Tcp, remote_addr, local_addr),
+        ) else {
+            unreachable!()
+        };
+        assert_eq!(channel_range, 0..channel.len());
+        assert_eq!(transmit.data, input);
+        let Some(StoredTcp::Message(produced)) = tcp.poll_recv() else {
+            unreachable!()
+        };
+        assert_eq!(produced, msg);
     }
 }
