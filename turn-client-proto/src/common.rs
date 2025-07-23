@@ -221,6 +221,15 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> AsRef<[u8]> for DataRangeOrOwned<T> {
     }
 }
 
+impl<T: AsRef<[u8]> + std::fmt::Debug> DataRangeOrOwned<T> {
+    pub(crate) fn into_owned<R: AsRef<[u8]> + std::fmt::Debug>(self) -> DataRangeOrOwned<R> {
+        DataRangeOrOwned::Owned(match self {
+            Self::Range { data: _, range: _ } => self.as_ref().to_vec(),
+            Self::Owned(owned) => owned,
+        })
+    }
+}
+
 /// A piece of data that needs to be built before it can be transmitted.
 #[derive(Debug)]
 pub struct TransmitBuild<T: DelayedTransmitBuild + std::fmt::Debug> {
