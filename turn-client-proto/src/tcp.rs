@@ -171,7 +171,7 @@ impl TurnClientApi for TurnClientTcp {
             return TurnRecvRet::Ignored(transmit);
         }
 
-        match self.incoming_tcp_buffer.incoming_tcp(transmit) {
+        let ret = match self.incoming_tcp_buffer.incoming_tcp(transmit) {
             IncomingTcp::NeedMoreData => TurnRecvRet::Handled,
             IncomingTcp::CompleteMessage(transmit, msg_range) => {
                 match self.protocol.handle_message(transmit.data, now) {
@@ -230,7 +230,23 @@ impl TurnClientApi for TurnClientTcp {
                     }),
                 }
             }
+        };
+
+        if matches!(ret, TurnRecvRet::Handled | TurnRecvRet::Ignored(_)) {
+            if let Some(TurnPeerData {
+                data,
+                transport,
+                peer,
+            }) = self.poll_recv(now)
+            {
+                return TurnRecvRet::PeerData(TurnPeerData {
+                    data: data.into_owned(),
+                    transport,
+                    peer,
+                });
+            }
         }
+        ret
     }
 
     fn poll_recv(&mut self, now: Instant) -> Option<TurnPeerData<Vec<u8>>> {
@@ -259,7 +275,8 @@ impl TurnClientApi for TurnClientTcp {
                         range,
                         transport,
                         peer,
-                    } = self.protocol.handle_channel(channel, now) {
+                    } = self.protocol.handle_channel(channel, now)
+                    {
                         return Some(TurnPeerData {
                             data: DataRangeOrOwned::Range { data, range },
                             transport,
@@ -303,6 +320,7 @@ pub(crate) fn ensure_data_owned(data: Vec<u8>, range: Range<usize>) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use turn_server_proto::api::TurnServerApi;
     use turn_server_proto::server::TurnServer;
 
     use crate::common::tests::turn_allocate_permission;
@@ -441,5 +459,82 @@ mod tests {
         let now = Instant::now();
         let mut test = create_test(0);
         turn_offpath_data(&mut test, now);
+    }
+
+    fn peer_transmit<A: TurnClientApi, S: TurnServerApi>(
+        test: &TurnTest<A, S>,
+        data: &[u8],
+    ) -> Transmit<Vec<u8>> {
+        Transmit::new(
+            data.to_vec(),
+            TransportType::Udp,
+            test.peer_addr,
+            test.turn_alloc_addr,
+        )
+    }
+
+    fn combine_transmit<T: AsRef<[u8]> + std::fmt::Debug, R: AsRef<[u8]> + std::fmt::Debug>(
+        a: &Transmit<T>,
+        b: &Transmit<R>,
+    ) -> Transmit<Vec<u8>> {
+        assert_eq!(a.transport, b.transport);
+        assert_eq!(a.from, b.from);
+        assert_eq!(a.to, b.to);
+        let mut data = a.data.as_ref().to_vec();
+        data.extend_from_slice(b.data.as_ref());
+        Transmit::new(data, a.transport, a.from, a.to)
+    }
+
+    #[test]
+    fn test_tcp_combined_message_channel() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test(0);
+        turn_allocate_permission(&mut test, now);
+        let TurnPollRet::WaitUntil(now) = test.client.poll(now) else {
+            unreachable!();
+        };
+        let transmit = test.client.poll_transmit(now).unwrap();
+        let msg_reply = test.server.recv(transmit, now).unwrap().unwrap();
+        let peer_data = [8; 9];
+        let peer_transmit = test
+            .server
+            .recv(peer_transmit(&test, peer_data.as_slice()), now)
+            .unwrap()
+            .unwrap();
+        let TurnRecvRet::PeerData(peer) = test
+            .client
+            .recv(combine_transmit(&msg_reply, &peer_transmit), now)
+        else {
+            unreachable!();
+        };
+        assert_eq!(peer.data(), peer_data.as_slice());
+    }
+
+    #[test]
+    fn test_tcp_combined_channel_message() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut test = create_test(0);
+        turn_allocate_permission(&mut test, now);
+        tracing::error!("{:?}", test.client);
+        let TurnPollRet::WaitUntil(now) = test.client.poll(now) else {
+            unreachable!();
+        };
+        let transmit = test.client.poll_transmit(now).unwrap();
+        let msg_reply = test.server.recv(transmit, now).unwrap().unwrap();
+        let peer_data = [8; 9];
+        let peer_transmit = test
+            .server
+            .recv(peer_transmit(&test, peer_data.as_slice()), now)
+            .unwrap()
+            .unwrap();
+        let TurnRecvRet::PeerData(peer) = test
+            .client
+            .recv(combine_transmit(&peer_transmit, &msg_reply), now)
+        else {
+            unreachable!();
+        };
+        assert_eq!(peer.data(), peer_data.as_slice());
     }
 }

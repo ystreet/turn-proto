@@ -1465,9 +1465,13 @@ impl TurnClientProtocol {
             ip: peer_addr.ip(),
             pending_refresh: None,
         };
-        allocation
-            .pending_permissions
-            .push_back((permission, transaction_id));
+        if !allocation.have_permission(peer_addr.ip())
+            && !allocation.have_pending_permission(peer_addr.ip())
+        {
+            allocation
+                .pending_permissions
+                .push_back((permission, transaction_id));
+        }
         let channel = Channel {
             id: channel_id,
             expires_at: now,
@@ -1541,6 +1545,18 @@ impl Allocation {
             } else {
                 self.lifetime / 2
             }
+    }
+
+    fn have_permission(&self, peer_addr: IpAddr) -> bool {
+        self.permissions
+            .iter()
+            .any(|permission| !permission.expired && permission.ip == peer_addr)
+    }
+
+    fn have_pending_permission(&self, peer_addr: IpAddr) -> bool {
+        self.pending_permissions
+            .iter()
+            .any(|(permission, _transaction_id)| !permission.expired && permission.ip == peer_addr)
     }
 }
 
