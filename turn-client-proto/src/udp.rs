@@ -24,12 +24,12 @@ use turn_types::TurnCredentials;
 
 use tracing::{trace, warn};
 
-use crate::common::{
+use crate::api::{
     DataRangeOrOwned, DelayedMessageOrChannelSend, TransmitBuild, TurnClientApi, TurnPeerData,
 };
 use crate::protocol::{TurnClientProtocol, TurnProtocolChannelRecv, TurnProtocolRecv};
 
-pub use crate::common::{
+pub use crate::api::{
     BindChannelError, CreatePermissionError, DeleteError, TurnEvent, TurnPollRet, TurnRecvRet,
 };
 pub use crate::protocol::SendError;
@@ -226,27 +226,31 @@ pub(crate) mod tests {
 
     use super::*;
 
-    use crate::common::tests::{
-        turn_allocate_delete, turn_allocate_expire_client, turn_allocate_expire_server,
-        turn_allocate_permission, turn_allocate_refresh, turn_channel_bind,
-        turn_channel_bind_refresh, turn_create_permission_refresh, turn_create_permission_timeout,
-        turn_offpath_data, turn_peer_incoming_stun, turn_unparseable_data, TurnTest,
+    use crate::{
+        api::tests::{
+            turn_allocate_delete, turn_allocate_expire_client, turn_allocate_expire_server,
+            turn_allocate_permission, turn_allocate_refresh, turn_channel_bind,
+            turn_channel_bind_refresh, turn_create_permission_refresh,
+            turn_create_permission_timeout, turn_offpath_data, turn_peer_incoming_stun,
+            turn_unparseable_data, TurnTest,
+        },
+        client::TurnClient,
     };
 
     pub(crate) fn turn_udp_new(
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         credentials: TurnCredentials,
-    ) -> TurnClientUdp {
-        TurnClientUdp::allocate(local_addr, remote_addr, credentials)
+    ) -> TurnClient {
+        TurnClientUdp::allocate(local_addr, remote_addr, credentials).into()
     }
 
     fn turn_server_udp_new(listen_address: SocketAddr, realm: String) -> TurnServer {
         TurnServer::new(TransportType::Udp, listen_address, realm)
     }
 
-    pub(crate) fn create_test() -> TurnTest<TurnClientUdp, TurnServer> {
-        TurnTest::<TurnClientUdp, TurnServer>::builder().build(turn_udp_new, turn_server_udp_new)
+    pub(crate) fn create_test() -> TurnTest<TurnClient, TurnServer> {
+        TurnTest::<TurnClient, TurnServer>::builder().build(turn_udp_new, turn_server_udp_new)
     }
 
     #[test]

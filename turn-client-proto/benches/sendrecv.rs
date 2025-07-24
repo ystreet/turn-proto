@@ -13,12 +13,13 @@ use std::time::Instant;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use stun_proto::agent::Transmit;
-use turn_client_proto::common::{
+use turn_client_proto::api::{
     DelayedMessageOrChannelSend, DelayedTransmitBuild, TurnEvent, TurnRecvRet,
 };
 use turn_client_proto::prelude::*;
 use turn_client_proto::udp::TurnClientUdp;
-use turn_server_proto::{TurnServer, TurnServerPollRet};
+use turn_server_proto::api::{TurnServerApi, TurnServerPollRet};
+use turn_server_proto::server::TurnServer;
 use turn_types::{stun::TransportType, TurnCredentials};
 
 struct TurnTest<T: TurnClientApi> {

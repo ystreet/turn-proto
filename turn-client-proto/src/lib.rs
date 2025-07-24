@@ -20,7 +20,8 @@
 
 pub use stun_proto as stun;
 pub use turn_types as types;
-pub mod common;
+pub mod api;
+pub mod client;
 pub mod protocol;
 pub mod tcp;
 pub mod udp;
@@ -30,7 +31,7 @@ pub mod rustls;
 
 /// Public prelude
 pub mod prelude {
-    pub use crate::common::{DelayedTransmitBuild, TurnClientApi};
+    pub use crate::api::{DelayedTransmitBuild, TurnClientApi};
 }
 
 #[cfg(test)]

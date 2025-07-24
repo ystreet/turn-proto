@@ -25,12 +25,12 @@ use turn_types::TurnCredentials;
 
 use tracing::{trace, warn};
 
-use crate::common::{
+use crate::api::{
     DataRangeOrOwned, DelayedMessageOrChannelSend, TransmitBuild, TurnClientApi, TurnPeerData,
 };
 use crate::protocol::{SendError, TurnClientProtocol, TurnProtocolChannelRecv, TurnProtocolRecv};
 
-pub use crate::common::{
+pub use crate::api::{
     BindChannelError, CreatePermissionError, DeleteError, TurnEvent, TurnPollRet, TurnRecvRet,
 };
 
@@ -323,13 +323,15 @@ mod tests {
     use turn_server_proto::api::TurnServerApi;
     use turn_server_proto::server::TurnServer;
 
-    use crate::common::tests::turn_allocate_permission;
-    use crate::common::tests::{
-        turn_allocate_delete, turn_allocate_expire_client, turn_allocate_expire_server,
-        turn_allocate_refresh, turn_channel_bind, turn_channel_bind_refresh,
-        turn_create_permission_refresh, turn_create_permission_timeout, turn_peer_incoming_stun,
+    use crate::{
+        api::tests::{
+            turn_allocate_delete, turn_allocate_expire_client, turn_allocate_expire_server,
+            turn_allocate_permission, turn_allocate_refresh, turn_channel_bind,
+            turn_channel_bind_refresh, turn_create_permission_refresh,
+            turn_create_permission_timeout, turn_offpath_data, turn_peer_incoming_stun, TurnTest,
+        },
+        client::TurnClient,
     };
-    use crate::common::tests::{turn_offpath_data, TurnTest};
 
     use super::*;
 
@@ -337,16 +339,16 @@ mod tests {
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         credentials: TurnCredentials,
-    ) -> TurnClientTcp {
-        TurnClientTcp::allocate(local_addr, remote_addr, credentials)
+    ) -> TurnClient {
+        TurnClientTcp::allocate(local_addr, remote_addr, credentials).into()
     }
 
     fn turn_server_tcp_new(listen_addr: SocketAddr, realm: String) -> TurnServer {
         TurnServer::new(TransportType::Tcp, listen_addr, realm)
     }
 
-    fn create_test(split_transmit_bytes: usize) -> TurnTest<TurnClientTcp, TurnServer> {
-        TurnTest::<TurnClientTcp, TurnServer>::builder()
+    fn create_test(split_transmit_bytes: usize) -> TurnTest<TurnClient, TurnServer> {
+        TurnTest::<TurnClient, TurnServer>::builder()
             .split_transmit_bytes(split_transmit_bytes)
             .build(turn_tcp_new, turn_server_tcp_new)
     }
