@@ -844,33 +844,15 @@ impl TurnClientProtocol {
                                 .push_front(TurnEvent::AllocationCreateFailed);
                             return TurnProtocolRecv::Handled;
                         };
-                        match error_code.code() {
-                            ErrorCode::STALE_NONCE => {
-                                let Some((new_nonce, _realm)) = Self::validate_stale_nonce(&msg)
-                                else {
-                                    return TurnProtocolRecv::Ignored(data);
-                                };
-                                stun_agent.remove_outstanding_request(*transaction_id);
-                                let (transmit, new_transaction_id) =
-                                    Self::send_authenticating_request(
-                                        stun_agent,
-                                        credentials.clone(),
-                                        nonce,
-                                        now,
-                                    );
-                                *nonce = new_nonce;
-                                *transaction_id = new_transaction_id;
-                                self.pending_transmits.push_back(transmit);
-                                return TurnProtocolRecv::Handled;
-                            }
-                            code => {
-                                warn!("Unknown error code returned while authenticating: {code:?}");
-                                self.state = AuthState::Error;
-                                self.pending_events
-                                    .push_front(TurnEvent::AllocationCreateFailed);
-                                return TurnProtocolRecv::Handled;
-                            }
-                        }
+                        warn!(
+                            "Unknown error code {} returned while authenticating: {}",
+                            error_code.code(),
+                            error_code.reason()
+                        );
+                        self.state = AuthState::Error;
+                        self.pending_events
+                            .push_front(TurnEvent::AllocationCreateFailed);
+                        return TurnProtocolRecv::Handled;
                     }
                     stun_proto::types::message::MessageClass::Success => {
                         let xor_relayed_address = msg.attribute::<XorRelayedAddress>();
