@@ -1097,6 +1097,43 @@ impl TurnClientProtocol {
                         continue;
                     }
 
+                    if let Some(t) = cancelled_transaction {
+                        let mut channel_idx = None;
+                        for (idx, (channel, pending_transaction)) in
+                            alloc.pending_channels.iter_mut().enumerate()
+                        {
+                            if t == *pending_transaction {
+                                channel_idx = Some(idx);
+                                self.pending_events
+                                    .push_back(TurnEvent::PermissionCreateFailed(
+                                        alloc.transport,
+                                        channel.peer_addr.ip(),
+                                    ));
+                                break;
+                            }
+                        }
+                        if let Some(idx) = channel_idx {
+                            alloc.pending_channels.remove(idx);
+                        }
+                        let mut permission_idx = None;
+                        for (idx, (permission, pending_transaction)) in
+                            alloc.pending_permissions.iter_mut().enumerate()
+                        {
+                            if t == *pending_transaction {
+                                permission_idx = Some(idx);
+                                self.pending_events
+                                    .push_back(TurnEvent::PermissionCreateFailed(
+                                        alloc.transport,
+                                        permission.ip,
+                                    ));
+                                break;
+                            }
+                        }
+                        if let Some(idx) = permission_idx {
+                            alloc.pending_permissions.remove(idx);
+                        }
+                    }
+
                     for channel in alloc.channels.iter_mut() {
                         trace!(
                             "channel {} {} {} refresh time in {:?}",
@@ -2258,6 +2295,58 @@ mod tests {
         );
         assert!(matches!(ret, TurnProtocolRecv::Handled));
         check_closed(&mut client, now);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_channel_bind_timeout() {
+        let _log = crate::tests::test_init_log();
+        let mut now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        client
+            .bind_channel(TransportType::Udp, generate_xor_peer_address(), now)
+            .unwrap();
+        let _transmit = client.poll_transmit(now);
+        while let TurnPollRet::WaitUntil(new_now) = client.poll(now) {
+            let (transport, relayed) = client.relayed_addresses().next().unwrap();
+            assert_eq!(client.permissions(transport, relayed).count(), 0);
+            if now == new_now {
+                break;
+            }
+            now = new_now;
+            let _transmit = client.poll_transmit(now);
+        }
+        assert!(matches!(
+            client.poll_event(),
+            Some(TurnEvent::PermissionCreateFailed(_, _))
+        ));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_create_permission_timeout() {
+        let _log = crate::tests::test_init_log();
+        let mut now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        client
+            .create_permission(TransportType::Udp, generate_xor_peer_address().ip(), now)
+            .unwrap();
+        let _transmit = client.poll_transmit(now);
+        while let TurnPollRet::WaitUntil(new_now) = client.poll(now) {
+            let (transport, relayed) = client.relayed_addresses().next().unwrap();
+            assert_eq!(client.permissions(transport, relayed).count(), 0);
+            if now == new_now {
+                break;
+            }
+            now = new_now;
+            let _transmit = client.poll_transmit(now);
+        }
+        assert!(matches!(
+            client.poll_event(),
+            Some(TurnEvent::PermissionCreateFailed(_, _))
+        ));
     }
 
     #[test]
