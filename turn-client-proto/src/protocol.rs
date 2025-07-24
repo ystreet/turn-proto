@@ -30,7 +30,7 @@ use turn_types::stun::message::MessageWriteVec;
 use turn_types::stun::prelude::{MessageWrite, MessageWriteExt};
 use turn_types::TurnCredentials;
 
-use crate::common::{
+use crate::api::{
     BindChannelError, CreatePermissionError, DelayedMessageOrChannelSend, DeleteError,
     TransmitBuild, TurnEvent, TurnPollRet,
 };
@@ -1702,8 +1702,8 @@ mod tests {
     use turn_server_proto::api::TurnServerApi;
     use turn_types::stun::message::{IntegrityAlgorithm, MessageHeader, Method};
 
-    use crate::common::tests::generate_addresses;
-    use crate::common::TurnClientApi;
+    use crate::api::tests::generate_addresses;
+    use crate::api::TurnClientApi;
     use crate::tcp::TurnRecvRet;
 
     use super::*;

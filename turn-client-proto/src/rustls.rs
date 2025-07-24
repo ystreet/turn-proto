@@ -28,12 +28,12 @@ use turn_types::TurnCredentials;
 
 use tracing::{trace, warn};
 
-use crate::common::{
+use crate::api::{
     DataRangeOrOwned, DelayedMessageOrChannelSend, TransmitBuild, TurnClientApi, TurnPeerData,
 };
 use crate::protocol::{TurnClientProtocol, TurnProtocolChannelRecv, TurnProtocolRecv};
 
-pub use crate::common::{
+pub use crate::api::{
     BindChannelError, CreatePermissionError, DeleteError, TurnEvent, TurnPollRet, TurnRecvRet,
 };
 pub use crate::protocol::SendError;
@@ -43,7 +43,7 @@ use crate::tcp::{ensure_data_owned, IncomingTcp, StoredTcp, TurnTcpBuffer};
 #[derive(Debug)]
 pub struct TurnClientTls {
     protocol: TurnClientProtocol,
-    conn: ClientConnection,
+    conn: Box<ClientConnection>,
     incoming_tcp_buffer: TurnTcpBuffer,
     closing: bool,
 }
@@ -62,7 +62,7 @@ impl TurnClientTls {
             .build();
         Self {
             protocol: TurnClientProtocol::new(stun_agent, credentials),
-            conn: ClientConnection::new(config, server_name).unwrap(),
+            conn: Box::new(ClientConnection::new(config, server_name).unwrap()),
             incoming_tcp_buffer: TurnTcpBuffer::new(),
             closing: false,
         }
@@ -431,7 +431,8 @@ impl TurnClientApi for TurnClientTls {
 mod tests {
     use std::time::Duration;
 
-    use crate::common::tests::{transmit_send_build, TurnTest};
+    use crate::api::tests::{transmit_send_build, TurnTest};
+    use crate::client::TurnClient;
     use turn_types::message::CREATE_PERMISSION;
     use turn_types::stun::message::{Message, MessageType, MessageWriteVec, TransactionId};
     use turn_types::stun::prelude::MessageWrite;
@@ -536,7 +537,7 @@ mod tests {
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         credentials: TurnCredentials,
-    ) -> TurnClientTls {
+    ) -> TurnClient {
         TurnClientTls::allocate(
             local_addr,
             remote_addr,
@@ -544,14 +545,15 @@ mod tests {
             remote_addr.ip().into(),
             client_config(),
         )
+        .into()
     }
 
     fn turn_server_rustls_new(listen_address: SocketAddr, realm: String) -> RustlsTurnServer {
         RustlsTurnServer::new(listen_address, realm, server_config())
     }
 
-    fn create_test() -> TurnTest<TurnClientTls, RustlsTurnServer> {
-        TurnTest::<TurnClientTls, RustlsTurnServer>::builder()
+    fn create_test() -> TurnTest<TurnClient, RustlsTurnServer> {
+        TurnTest::<TurnClient, RustlsTurnServer>::builder()
             .build(turn_rustls_new, turn_server_rustls_new)
     }
 
