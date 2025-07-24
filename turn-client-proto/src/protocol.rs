@@ -2073,6 +2073,22 @@ mod tests {
     }
 
     #[test]
+    fn test_turn_client_protocol_refresh_timeout() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        let mut now = wait_advance(&mut client, now);
+        let _transmit = client.poll_transmit(now).unwrap();
+        while let TurnPollRet::WaitUntil(new_now) = client.poll(now) {
+            now = new_now;
+            let _transmit = client.poll_transmit(now);
+        }
+        check_closed(&mut client, now + EXPIRY_BUFFER);
+    }
+
+    #[test]
     fn test_turn_client_protocol_refresh_reply_missing_attributes() {
         let _log = crate::tests::test_init_log();
         let now = Instant::now();
