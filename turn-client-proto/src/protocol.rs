@@ -1034,7 +1034,10 @@ impl TurnClientProtocol {
             AuthState::InitialSent(transaction_id) => {
                 if cancelled_transaction.is_some_and(|cancelled| &cancelled == transaction_id) {
                     info!("Initial transaction timed out or was cancelled");
+                    self.pending_events
+                        .push_back(TurnEvent::AllocationCreateFailed);
                     self.state = AuthState::Error;
+                    return TurnPollRet::Closed;
                 }
                 return TurnPollRet::WaitUntil(earliest_wait);
             }
@@ -1668,12 +1671,14 @@ mod tests {
     fn check_allocate_reply_failed(
         client: &mut TurnClientProtocol,
         ret: TurnProtocolRecv<Vec<u8>>,
+        now: Instant,
     ) {
         assert!(matches!(ret, TurnProtocolRecv::Handled));
         assert!(matches!(
             client.poll_event(),
             Some(TurnEvent::AllocationCreateFailed)
         ));
+        assert!(matches!(client.poll(now), TurnPollRet::Closed));
     }
 
     #[test]
@@ -1686,7 +1691,7 @@ mod tests {
             |msg| Message::bad_request(&msg, MessageWriteVec::new()).finish(),
             now,
         );
-        check_allocate_reply_failed(&mut client, ret);
+        check_allocate_reply_failed(&mut client, ret, now);
     }
 
     #[test]
@@ -1723,7 +1728,7 @@ mod tests {
             },
             now,
         );
-        check_allocate_reply_failed(&mut client, ret);
+        check_allocate_reply_failed(&mut client, ret, now);
 
         let mut client = new_protocol();
         let ret = allocate_response(
@@ -1742,7 +1747,7 @@ mod tests {
             },
             now,
         );
-        check_allocate_reply_failed(&mut client, ret);
+        check_allocate_reply_failed(&mut client, ret, now);
 
         let mut client = new_protocol();
         let ret = allocate_response(
@@ -1755,7 +1760,7 @@ mod tests {
             },
             now,
         );
-        check_allocate_reply_failed(&mut client, ret);
+        check_allocate_reply_failed(&mut client, ret, now);
     }
 
     #[test]
@@ -1780,7 +1785,20 @@ mod tests {
             },
             now,
         );
-        check_allocate_reply_failed(&mut client, ret);
+        check_allocate_reply_failed(&mut client, ret, now);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_initial_allocate_timeout() {
+        let _log = crate::tests::test_init_log();
+        let mut now = Instant::now();
+        let mut client = new_protocol();
+        let _transmit = client.poll_transmit(now).unwrap();
+        while let TurnPollRet::WaitUntil(new_now) = client.poll(now) {
+            now = new_now;
+            let _transmit = client.poll_transmit(now);
+        }
+        check_allocate_reply_failed(&mut client, TurnProtocolRecv::Handled, now + EXPIRY_BUFFER);
     }
 
     fn initial_allocate(client: &mut TurnClientProtocol, now: Instant) {
@@ -1850,7 +1868,7 @@ mod tests {
             },
             now,
         );
-        check_allocate_reply_failed(&mut client, ret);
+        check_allocate_reply_failed(&mut client, ret, now);
     }
 
     #[test]
@@ -1871,7 +1889,7 @@ mod tests {
             },
             now,
         );
-        check_allocate_reply_failed(&mut client, ret);
+        check_allocate_reply_failed(&mut client, ret, now);
     }
 
     fn generate_xor_peer_address() -> SocketAddr {
@@ -1901,7 +1919,7 @@ mod tests {
             },
             now,
         );
-        check_allocate_reply_failed(&mut client, ret);
+        check_allocate_reply_failed(&mut client, ret, now);
 
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
@@ -1924,7 +1942,7 @@ mod tests {
             },
             now,
         );
-        check_allocate_reply_failed(&mut client, ret);
+        check_allocate_reply_failed(&mut client, ret, now);
     }
 
     fn authenticated_allocate(client: &mut TurnClientProtocol, now: Instant) {
