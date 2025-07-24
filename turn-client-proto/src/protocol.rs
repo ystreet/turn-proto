@@ -268,35 +268,67 @@ impl TurnClientProtocol {
                     break 'outer;
                 }
             }
-            for permission in alloc.permissions.iter_mut() {
-                if permission
+
+            let mut channel_resent = None;
+            for (channel, transaction_id) in alloc.pending_channels.iter_mut() {
+                if *transaction_id != msg.transaction_id() {
+                    continue;
+                }
+                info!("Received STALE_NONCE in response to BIND_CHANNEL {} for transaction {}, resending", channel.peer_addr, msg.transaction_id());
+                let credentials = LongTermCredentials::new(
+                    credentials.username().to_string(),
+                    credentials.password().to_string(),
+                    realm.clone(),
+                );
+                let (transmit, new_transaction_id) = Self::send_channel_bind_request(
+                    stun_agent,
+                    credentials.clone(),
+                    &nonce,
+                    channel.id,
+                    channel.peer_addr,
+                    now,
+                );
+                *transaction_id = new_transaction_id;
+                pending_transmits.push_back(transmit);
+                new_credentials = Some(credentials);
+                stun_agent.remove_outstanding_request(msg.transaction_id());
+                channel_resent = Some(new_transaction_id);
+                break;
+            }
+            for channel in alloc.channels.iter_mut() {
+                if channel
                     .pending_refresh
                     .is_some_and(|pending| pending == msg.transaction_id())
                 {
-                    info!("Received STALE_NONCE in response to CREATE_PERMISSION {} for transaction {}, resending", permission.ip, msg.transaction_id());
+                    info!("Received STALE_NONCE in response to BIND_CHANNEL {} for transaction {}, resending", channel.peer_addr, msg.transaction_id());
                     let credentials = LongTermCredentials::new(
                         credentials.username().to_string(),
                         credentials.password().to_string(),
-                        realm,
+                        realm.clone(),
                     );
-                    let peer_addr = permission.ip;
-                    let (transmit, transaction_id) = Self::send_create_permission_request(
+                    let (transmit, transaction_id) = Self::send_channel_bind_request(
                         stun_agent,
                         credentials.clone(),
                         &nonce,
-                        peer_addr,
+                        channel.id,
+                        channel.peer_addr,
                         now,
                     );
-                    permission.pending_refresh = Some(transaction_id);
+                    channel.pending_refresh = Some(transaction_id);
                     pending_transmits.push_back(transmit);
                     new_credentials = Some(credentials);
                     stun_agent.remove_outstanding_request(msg.transaction_id());
-                    break 'outer;
+                    channel_resent = Some(transaction_id);
+                    break;
                 }
             }
             for (permission, transaction_id) in alloc.pending_permissions.iter_mut() {
                 if *transaction_id != msg.transaction_id() {
                     continue;
+                }
+                if let Some(new_transaction_id) = channel_resent {
+                    *transaction_id = new_transaction_id;
+                    break 'outer;
                 }
                 info!("Received STALE_NONCE in response to CREATE_PERMISSION {} for transaction {}, resending", permission.ip, msg.transaction_id());
                 let credentials = LongTermCredentials::new(
@@ -318,55 +350,35 @@ impl TurnClientProtocol {
                 stun_agent.remove_outstanding_request(msg.transaction_id());
                 break 'outer;
             }
-            for channel in alloc.channels.iter_mut() {
-                if channel
+            for permission in alloc.permissions.iter_mut() {
+                if permission
                     .pending_refresh
                     .is_some_and(|pending| pending == msg.transaction_id())
                 {
-                    info!("Received STALE_NONCE in response to BIND_CHANNEL {} for transaction {}, resending", channel.peer_addr, msg.transaction_id());
+                    if let Some(new_transaction_id) = channel_resent {
+                        permission.pending_refresh = Some(new_transaction_id);
+                        break 'outer;
+                    }
+                    info!("Received STALE_NONCE in response to CREATE_PERMISSION {} for transaction {}, resending", permission.ip, msg.transaction_id());
                     let credentials = LongTermCredentials::new(
                         credentials.username().to_string(),
                         credentials.password().to_string(),
                         realm,
                     );
-                    let (transmit, transaction_id) = Self::send_channel_bind_request(
+                    let peer_addr = permission.ip;
+                    let (transmit, transaction_id) = Self::send_create_permission_request(
                         stun_agent,
                         credentials.clone(),
                         &nonce,
-                        channel.id,
-                        channel.peer_addr,
+                        peer_addr,
                         now,
                     );
-                    channel.pending_refresh = Some(transaction_id);
+                    permission.pending_refresh = Some(transaction_id);
                     pending_transmits.push_back(transmit);
                     new_credentials = Some(credentials);
                     stun_agent.remove_outstanding_request(msg.transaction_id());
                     break 'outer;
                 }
-            }
-            for (channel, transaction_id) in alloc.pending_channels.iter_mut() {
-                if *transaction_id != msg.transaction_id() {
-                    continue;
-                }
-                info!("Received STALE_NONCE in response to BIND_CHANNEL {} for transaction {}, resending", channel.peer_addr, msg.transaction_id());
-                let credentials = LongTermCredentials::new(
-                    credentials.username().to_string(),
-                    credentials.password().to_string(),
-                    realm,
-                );
-                let (transmit, new_transaction_id) = Self::send_channel_bind_request(
-                    stun_agent,
-                    credentials.clone(),
-                    &nonce,
-                    channel.id,
-                    channel.peer_addr,
-                    now,
-                );
-                *transaction_id = new_transaction_id;
-                pending_transmits.push_back(transmit);
-                new_credentials = Some(credentials);
-                stun_agent.remove_outstanding_request(msg.transaction_id());
-                break 'outer;
             }
         }
 
@@ -390,6 +402,7 @@ impl TurnClientProtocol {
     }
 
     #[tracing::instrument(
+        level = "trace",
         ret,
         skip(
             stun_agent,
@@ -489,6 +502,7 @@ impl TurnClientProtocol {
                     }
                 }
                 CHANNEL_BIND => {
+                    error!("allocations: {allocations:?}");
                     if let Some((alloc_idx, channel_idx)) =
                         allocations
                             .iter()
@@ -500,7 +514,7 @@ impl TurnClientProtocol {
                                     .position(|(_channel, transaction_id)| {
                                         transaction_id == &msg.transaction_id()
                                     })
-                                    .map(|perm_idx| (idx, perm_idx))
+                                    .map(|channel_idx| (idx, channel_idx))
                             })
                     {
                         let (mut channel, _transaction_id) = allocations[alloc_idx]
@@ -518,27 +532,51 @@ impl TurnClientProtocol {
                         }
                         info!("Succesfully created/refreshed {channel:?}");
                         Self::update_permission_state(allocations, pending_events, msg, now);
-                        if let Some(existing_idx) =
-                            allocations[alloc_idx].channels.iter().enumerate().find_map(
-                                |(idx, existing_channel)| {
-                                    if channel.peer_addr == existing_channel.peer_addr {
+                        channel.expires_at = now + CHANNEL_DURATION;
+                        pending_events.push_front(TurnEvent::ChannelCreated(
+                            allocations[alloc_idx].transport,
+                            channel.peer_addr,
+                        ));
+                        allocations[alloc_idx].channels.push(channel);
+                        return InternalHandleStunReply::Handled;
+                    } else if let Some((alloc_idx, existing_idx)) = allocations
+                        .iter()
+                        .enumerate()
+                        .find_map(|(idx, allocation)| {
+                            allocation
+                                .channels
+                                .iter()
+                                .enumerate()
+                                .find_map(|(idx, existing_channel)| {
+                                    if existing_channel.pending_refresh.is_some_and(
+                                        |refresh_transaction| {
+                                            refresh_transaction == msg.transaction_id()
+                                        },
+                                    ) {
                                         Some(idx)
                                     } else {
                                         None
                                     }
-                                },
-                            )
-                        {
-                            allocations[alloc_idx].channels[existing_idx].expires_at =
-                                now + CHANNEL_DURATION;
-                        } else {
-                            channel.expires_at = now + CHANNEL_DURATION;
-                            pending_events.push_front(TurnEvent::ChannelCreated(
-                                allocations[alloc_idx].transport,
+                                })
+                                .map(|pending_idx| (idx, pending_idx))
+                        })
+                    {
+                        let transport = allocations[alloc_idx].transport;
+                        let channel = &mut allocations[alloc_idx].channels[existing_idx];
+                        channel.pending_refresh = None;
+                        if msg.has_class(stun_proto::types::message::MessageClass::Error) {
+                            error!("Received error response to channel bind request");
+                            pending_events.push_front(TurnEvent::ChannelCreateFailed(
+                                transport,
                                 channel.peer_addr,
                             ));
-                            allocations[alloc_idx].channels.push(channel);
+                            channel.expires_at = now;
+                            return InternalHandleStunReply::Handled;
                         }
+                        info!("Succesfully created/refreshed {channel:?}");
+                        Self::update_permission_state(allocations, pending_events, msg, now);
+                        allocations[alloc_idx].channels[existing_idx].expires_at =
+                            now + CHANNEL_DURATION;
                         return InternalHandleStunReply::Handled;
                     }
                     InternalHandleStunReply::Ignored
@@ -2398,10 +2436,7 @@ mod tests {
         check_channel_bind_failed(&mut client, ret);
     }
 
-    fn channel_bind(client: &mut TurnClientProtocol, now: Instant) {
-        client
-            .bind_channel(TransportType::Udp, generate_xor_peer_address(), now)
-            .unwrap();
+    fn channel_bind_refresh_success_response(client: &mut TurnClientProtocol, now: Instant) {
         let credentials = client_credentials(client);
         assert!(matches!(
             channel_bind_response(
@@ -2418,6 +2453,11 @@ mod tests {
             TurnProtocolRecv::Handled
         ));
         let (transport, _relayed) = client.relayed_addresses().next().unwrap();
+        assert!(client.have_permission(transport, generate_xor_peer_address().ip()));
+    }
+
+    fn channel_bind_success_response(client: &mut TurnClientProtocol, now: Instant) {
+        channel_bind_refresh_success_response(client, now);
         assert!(matches!(
             client.poll_event(),
             Some(TurnEvent::PermissionCreated(_, _))
@@ -2426,7 +2466,13 @@ mod tests {
             client.poll_event(),
             Some(TurnEvent::ChannelCreated(_, _))
         ));
-        assert!(client.have_permission(transport, generate_xor_peer_address().ip()));
+    }
+
+    fn channel_bind(client: &mut TurnClientProtocol, now: Instant) {
+        client
+            .bind_channel(TransportType::Udp, generate_xor_peer_address(), now)
+            .unwrap();
+        channel_bind_success_response(client, now);
     }
 
     #[test]
@@ -2457,6 +2503,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_turn_client_protocol_channel_bind_stale_nonce() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        client
+            .bind_channel(TransportType::Udp, generate_xor_peer_address(), now)
+            .unwrap();
+        let ret = channel_bind_response(&mut client, |msg| generate_stale_nonce(&msg), now);
+        assert!(matches!(ret, TurnProtocolRecv::Handled));
+        channel_bind_success_response(&mut client, now);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_channel_bind_refresh_stale_nonce() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        channel_bind(&mut client, now);
+        let TurnPollRet::WaitUntil(now) = client.poll(now) else {
+            unreachable!();
+        };
+        create_permission_success_response(&mut client, now);
+        let TurnPollRet::WaitUntil(now) = client.poll(now) else {
+            unreachable!();
+        };
+        create_permission_success_response(&mut client, now);
+        let TurnPollRet::WaitUntil(now) = client.poll(now) else {
+            unreachable!();
+        };
+        let ret = channel_bind_response(&mut client, |msg| generate_stale_nonce(&msg), now);
+        assert!(matches!(ret, TurnProtocolRecv::Handled));
+        channel_bind_refresh_success_response(&mut client, now);
     }
 
     #[test]
@@ -2571,6 +2656,37 @@ mod tests {
             client.poll_event(),
             Some(TurnEvent::PermissionCreateFailed(_, _))
         ));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_create_permission_stale_nonce() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        client
+            .create_permission(TransportType::Udp, generate_xor_peer_address().ip(), now)
+            .unwrap();
+        let ret = create_permission_response(&mut client, |msg| generate_stale_nonce(&msg), now);
+        assert!(matches!(ret, TurnProtocolRecv::Handled));
+        create_permission_success_response(&mut client, now);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_create_permission_refresh_stale_nonce() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        create_permission(&mut client, now);
+        let TurnPollRet::WaitUntil(now) = client.poll(now) else {
+            unreachable!();
+        };
+        let ret = create_permission_response(&mut client, |msg| generate_stale_nonce(&msg), now);
+        assert!(matches!(ret, TurnProtocolRecv::Handled));
+        create_permission_success_response(&mut client, now);
     }
 
     #[test]
