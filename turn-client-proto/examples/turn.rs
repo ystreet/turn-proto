@@ -734,6 +734,13 @@ fn main() -> io::Result<()> {
                 error!("Permission create failed for {transport:?}, {peer_addr}");
                 client.close()
             }
+            TurnEvent::ChannelCreated(transport, peer_addr) => {
+                println!("Channel created failed for {transport:?}, {peer_addr}");
+            }
+            TurnEvent::ChannelCreateFailed(transport, peer_addr) => {
+                error!("Channel create failed for {transport:?}, {peer_addr}");
+                client.close();
+            }
         }
     }
     Ok(())

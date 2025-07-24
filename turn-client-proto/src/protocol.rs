@@ -151,7 +151,7 @@ impl TurnClientProtocol {
                 permission.expired = true;
                 permission.expires_at = now;
                 permission.pending_refresh = None;
-                pending_events.push_back(TurnEvent::PermissionCreateFailed(
+                pending_events.push_front(TurnEvent::PermissionCreateFailed(
                     allocations[alloc_idx].transport,
                     permission.ip,
                 ));
@@ -509,9 +509,9 @@ impl TurnClientProtocol {
                             .unwrap();
                         if msg.has_class(stun_proto::types::message::MessageClass::Error) {
                             error!("Received error response to channel bind request");
-                            pending_events.push_back(TurnEvent::PermissionCreateFailed(
+                            pending_events.push_front(TurnEvent::ChannelCreateFailed(
                                 allocations[alloc_idx].transport,
-                                channel.peer_addr.ip(),
+                                channel.peer_addr,
                             ));
                             channel.expires_at = now;
                             return InternalHandleStunReply::Handled;
@@ -533,6 +533,10 @@ impl TurnClientProtocol {
                                 now + CHANNEL_DURATION;
                         } else {
                             channel.expires_at = now + CHANNEL_DURATION;
+                            pending_events.push_front(TurnEvent::ChannelCreated(
+                                allocations[alloc_idx].transport,
+                                channel.peer_addr,
+                            ));
                             allocations[alloc_idx].channels.push(channel);
                         }
                         return InternalHandleStunReply::Handled;
@@ -725,7 +729,7 @@ impl TurnClientProtocol {
     }
 
     #[tracing::instrument(
-        name = "turn_handle_message",
+        name = "turn_client_handle_message",
         skip(self, data),
         fields(
             data_len = data.as_ref().len(),
@@ -1013,7 +1017,7 @@ impl TurnClientProtocol {
             })
     }
 
-    #[tracing::instrument(name = "turn_client_poll", ret, skip(self))]
+    #[tracing::instrument(name = "turn_client_poll", level = "trace", ret, skip(self))]
     pub(crate) fn poll(&mut self, now: Instant) -> TurnPollRet {
         if !self.pending_events.is_empty() || !self.pending_transmits.is_empty() {
             return TurnPollRet::WaitUntil(now);
@@ -1109,9 +1113,9 @@ impl TurnClientProtocol {
                             if t == *pending_transaction {
                                 channel_idx = Some(idx);
                                 self.pending_events
-                                    .push_back(TurnEvent::PermissionCreateFailed(
+                                    .push_back(TurnEvent::ChannelCreateFailed(
                                         alloc.transport,
-                                        channel.peer_addr.ip(),
+                                        channel.peer_addr,
                                     ));
                                 break;
                             }
@@ -1151,6 +1155,11 @@ impl TurnClientProtocol {
                                 // TODO: need to eventually fail when the permission times out.
                                 warn!("{} channel {} from {} to {} refresh timed out or was cancelled", alloc.transport, channel.id, alloc.relayed_address, channel.peer_addr);
                                 expires_at = channel.expires_at;
+                                self.pending_events
+                                    .push_back(TurnEvent::ChannelCreateFailed(
+                                        alloc.transport,
+                                        channel.peer_addr,
+                                    ));
                             } else if channel.expires_at <= now {
                                 info!(
                                     "{} channel {} from {} to {} has expired",
@@ -1159,7 +1168,11 @@ impl TurnClientProtocol {
                                     alloc.relayed_address,
                                     channel.peer_addr
                                 );
-                                self.stun_agent.remove_outstanding_request(pending);
+                                self.pending_events
+                                    .push_back(TurnEvent::ChannelCreateFailed(
+                                        alloc.transport,
+                                        channel.peer_addr,
+                                    ));
                             } else {
                                 expires_at = expires_at.min(channel.expires_at);
                             }
@@ -1194,7 +1207,6 @@ impl TurnClientProtocol {
                                         alloc.transport,
                                         permission.ip,
                                     ));
-                                self.stun_agent.remove_outstanding_request(pending);
                             } else {
                                 expires_at = expires_at.min(permission.expires_at);
                             }
@@ -1422,6 +1434,7 @@ impl TurnClientProtocol {
         Ok(())
     }
 
+    #[tracing::instrument(name = "turn_client_bind_channel", skip(self, now), err)]
     pub(crate) fn bind_channel(
         &mut self,
         transport: TransportType,
@@ -1504,7 +1517,6 @@ impl TurnClientProtocol {
             peer_addr,
             pending_refresh: None,
         };
-        info!("Creating channel {channel:?}");
         allocation
             .pending_channels
             .push_back((channel, transaction_id));
@@ -1513,7 +1525,7 @@ impl TurnClientProtocol {
     }
 
     pub(crate) fn error(&mut self) {
-        info!("user produced an error");
+        warn!("user produced an error");
         self.state = AuthState::Error;
     }
 }
@@ -1650,7 +1662,7 @@ pub(crate) enum TurnProtocolChannelRecv {
 #[cfg(test)]
 mod tests {
     use turn_server_proto::api::TurnServerApi;
-    use turn_types::stun::message::{IntegrityAlgorithm, Method};
+    use turn_types::stun::message::{IntegrityAlgorithm, MessageHeader, Method};
 
     use crate::common::tests::generate_addresses;
     use crate::common::TurnClientApi;
@@ -1937,7 +1949,7 @@ mod tests {
         "10.0.0.3:9000".parse().unwrap()
     }
 
-    static TEST_ALLOCATION_LIFETIME: u32 = 600;
+    static TEST_ALLOCATION_LIFETIME: u32 = 1000;
 
     #[test]
     fn test_turn_client_protocol_authenticated_allocate_reply_missing_attribute() {
@@ -2204,7 +2216,8 @@ mod tests {
         reply.finish()
     }
 
-    fn refresh(client: &mut TurnClientProtocol, credentials: LongTermCredentials, now: Instant) {
+    fn refresh(client: &mut TurnClientProtocol, now: Instant) {
+        let credentials = client_credentials(client);
         let ret = refresh_response(
             client,
             |msg| generate_refresh_response(&msg, credentials),
@@ -2223,8 +2236,7 @@ mod tests {
         let now = wait_advance(&mut client, now);
         let ret = refresh_response(&mut client, |msg| generate_stale_nonce(&msg), now);
         assert!(matches!(ret, TurnProtocolRecv::Handled));
-        let credentials = client_credentials(&client);
-        refresh(&mut client, credentials, now);
+        refresh(&mut client, now);
         let TurnPollRet::WaitUntil(_now) =
             client.poll(now + EXPIRY_BUFFER + Duration::from_secs(1))
         else {
@@ -2348,6 +2360,16 @@ mod tests {
         ));
     }
 
+    fn check_channel_bind_failed(client: &mut TurnClientProtocol, ret: TurnProtocolRecv<Vec<u8>>) {
+        let (transport, relayed) = client.relayed_addresses().next().unwrap();
+        assert_eq!(client.permissions(transport, relayed).count(), 0);
+        assert!(matches!(ret, TurnProtocolRecv::Handled));
+        assert!(matches!(
+            client.poll_event(),
+            Some(TurnEvent::ChannelCreateFailed(_, _))
+        ));
+    }
+
     #[test]
     fn test_turn_client_protocol_channel_bind_error() {
         let _log = crate::tests::test_init_log();
@@ -2373,7 +2395,68 @@ mod tests {
             },
             now,
         );
-        check_permission_create_failed(&mut client, ret);
+        check_channel_bind_failed(&mut client, ret);
+    }
+
+    fn channel_bind(client: &mut TurnClientProtocol, now: Instant) {
+        client
+            .bind_channel(TransportType::Udp, generate_xor_peer_address(), now)
+            .unwrap();
+        let credentials = client_credentials(client);
+        assert!(matches!(
+            channel_bind_response(
+                client,
+                |msg| {
+                    let mut reply = Message::builder_success(&msg, MessageWriteVec::new());
+                    reply
+                        .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                        .unwrap();
+                    reply.finish()
+                },
+                now,
+            ),
+            TurnProtocolRecv::Handled
+        ));
+        let (transport, _relayed) = client.relayed_addresses().next().unwrap();
+        assert!(matches!(
+            client.poll_event(),
+            Some(TurnEvent::PermissionCreated(_, _))
+        ));
+        assert!(matches!(
+            client.poll_event(),
+            Some(TurnEvent::ChannelCreated(_, _))
+        ));
+        assert!(client.have_permission(transport, generate_xor_peer_address().ip()));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_channel_bind_refresh_timeout() {
+        let _log = crate::tests::test_init_log();
+        let mut now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        channel_bind(&mut client, now);
+        while let TurnPollRet::WaitUntil(new_now) = client.poll(now) {
+            if now == new_now {
+                break;
+            }
+            now = new_now;
+            if let Some(transmit) = client.poll_transmit(now) {
+                let hdr = MessageHeader::from_bytes(&transmit.data).unwrap();
+                match hdr.get_type().method() {
+                    CREATE_PERMISSION => {
+                        client.pending_transmits.push_front(transmit);
+                        create_permission_success_response(&mut client, now);
+                    }
+                    REFRESH => {
+                        client.pending_transmits.push_front(transmit);
+                        refresh(&mut client, now);
+                    }
+                    _ => (),
+                }
+            }
+        }
     }
 
     #[test]
@@ -2436,6 +2519,58 @@ mod tests {
             now,
         );
         check_permission_create_failed(&mut client, ret);
+    }
+
+    fn create_permission_success_response(client: &mut TurnClientProtocol, now: Instant) {
+        let credentials = client_credentials(client);
+        assert!(matches!(
+            create_permission_response(
+                client,
+                |msg| {
+                    let mut reply = Message::builder_success(&msg, MessageWriteVec::new());
+                    reply
+                        .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                        .unwrap();
+                    reply.finish()
+                },
+                now,
+            ),
+            TurnProtocolRecv::Handled
+        ));
+    }
+
+    fn create_permission(client: &mut TurnClientProtocol, now: Instant) {
+        client
+            .create_permission(TransportType::Udp, generate_xor_peer_address().ip(), now)
+            .unwrap();
+        create_permission_success_response(client, now);
+        let (transport, _relayed) = client.relayed_addresses().next().unwrap();
+        assert!(matches!(
+            client.poll_event(),
+            Some(TurnEvent::PermissionCreated(_, _))
+        ));
+        assert!(client.have_permission(transport, generate_xor_peer_address().ip()));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_create_permission_refresh_timeout() {
+        let _log = crate::tests::test_init_log();
+        let mut now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        create_permission(&mut client, now);
+        while let TurnPollRet::WaitUntil(new_now) = client.poll(now) {
+            if now == new_now {
+                break;
+            }
+            now = new_now;
+            let _transmit = client.poll_transmit(now);
+        }
+        assert!(matches!(
+            client.poll_event(),
+            Some(TurnEvent::PermissionCreateFailed(_, _))
+        ));
     }
 
     #[test]

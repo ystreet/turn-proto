@@ -163,6 +163,10 @@ pub enum TurnEvent {
     PermissionCreated(TransportType, IpAddr),
     /// A permission could not be installed for the provided transport and IP address.
     PermissionCreateFailed(TransportType, IpAddr),
+    /// A channel was created for the provided transport and IP address.
+    ChannelCreated(TransportType, SocketAddr),
+    /// A channel could not be installed for the provided transport and IP address.
+    ChannelCreateFailed(TransportType, SocketAddr),
 }
 
 /// Errors produced when attempting to bind a channel.
@@ -1089,6 +1093,12 @@ pub(crate) mod tests {
 
         test.sendrecv_data(now);
         test.bind_channel(now);
+        let Some(TurnEvent::ChannelCreated(TransportType::Udp, channel_addr)) =
+            test.client.poll_event()
+        else {
+            unreachable!();
+        };
+        assert_eq!(channel_addr, test.peer_addr);
         test.sendrecv_data_channel(now);
     }
 
@@ -1376,6 +1386,12 @@ pub(crate) mod tests {
             unreachable!();
         };
         assert_eq!(permission_ip, test.peer_addr.ip());
+        let Some(TurnEvent::ChannelCreated(TransportType::Udp, channel_addr)) =
+            test.client.poll_event()
+        else {
+            unreachable!();
+        };
+        assert_eq!(channel_addr, test.peer_addr);
 
         // two permission refreshes
         let mut permissions_done = now;
