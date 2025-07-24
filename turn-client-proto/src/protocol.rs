@@ -509,7 +509,11 @@ impl TurnClientProtocol {
                             .unwrap();
                         if msg.has_class(stun_proto::types::message::MessageClass::Error) {
                             error!("Received error response to channel bind request");
-                            // TODO: handle
+                            pending_events.push_back(TurnEvent::PermissionCreateFailed(
+                                allocations[alloc_idx].transport,
+                                channel.peer_addr.ip(),
+                            ));
+                            channel.expires_at = now;
                             return InternalHandleStunReply::Handled;
                         }
                         info!("Succesfully created/refreshed {channel:?}");
@@ -2323,6 +2327,55 @@ mod tests {
         ));
     }
 
+    fn channel_bind_response<F: FnOnce(Message<'_>) -> Vec<u8>>(
+        client: &mut TurnClientProtocol,
+        reply: F,
+        now: Instant,
+    ) -> TurnProtocolRecv<Vec<u8>> {
+        response(client, CHANNEL_BIND, reply, now)
+    }
+
+    fn check_permission_create_failed(
+        client: &mut TurnClientProtocol,
+        ret: TurnProtocolRecv<Vec<u8>>,
+    ) {
+        let (transport, relayed) = client.relayed_addresses().next().unwrap();
+        assert_eq!(client.permissions(transport, relayed).count(), 0);
+        assert!(matches!(ret, TurnProtocolRecv::Handled));
+        assert!(matches!(
+            client.poll_event(),
+            Some(TurnEvent::PermissionCreateFailed(_, _))
+        ));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_channel_bind_error() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        client
+            .bind_channel(TransportType::Udp, generate_xor_peer_address(), now)
+            .unwrap();
+        let credentials = client_credentials(&client);
+        let ret = channel_bind_response(
+            &mut client,
+            |msg| {
+                let mut reply = Message::builder_error(&msg, MessageWriteVec::new());
+                reply
+                    .add_attribute(&ErrorCode::builder(ErrorCode::FORBIDDEN).build().unwrap())
+                    .unwrap();
+                reply
+                    .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                    .unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        check_permission_create_failed(&mut client, ret);
+    }
+
     #[test]
     fn test_turn_client_protocol_create_permission_timeout() {
         let _log = crate::tests::test_init_log();
@@ -2347,6 +2400,42 @@ mod tests {
             client.poll_event(),
             Some(TurnEvent::PermissionCreateFailed(_, _))
         ));
+    }
+
+    fn create_permission_response<F: FnOnce(Message<'_>) -> Vec<u8>>(
+        client: &mut TurnClientProtocol,
+        reply: F,
+        now: Instant,
+    ) -> TurnProtocolRecv<Vec<u8>> {
+        response(client, CREATE_PERMISSION, reply, now)
+    }
+
+    #[test]
+    fn test_turn_client_protocol_create_permission_error() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        client
+            .create_permission(TransportType::Udp, generate_xor_peer_address().ip(), now)
+            .unwrap();
+        let credentials = client_credentials(&client);
+        let ret = create_permission_response(
+            &mut client,
+            |msg| {
+                let mut reply = Message::builder_error(&msg, MessageWriteVec::new());
+                reply
+                    .add_attribute(&ErrorCode::builder(ErrorCode::FORBIDDEN).build().unwrap())
+                    .unwrap();
+                reply
+                    .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                    .unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        check_permission_create_failed(&mut client, ret);
     }
 
     #[test]
