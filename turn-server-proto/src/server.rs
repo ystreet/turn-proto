@@ -31,6 +31,7 @@ use turn_types::attribute::{
     ChannelNumber, Lifetime, RequestedTransport, XorPeerAddress, XorRelayedAddress,
 };
 use turn_types::message::{ALLOCATE, CHANNEL_BIND, DATA, REFRESH, SEND};
+use turn_types::stun::message::IntegrityAlgorithm;
 use turn_types::TurnCredentials;
 
 use tracing::{debug, error, info, trace, warn};
@@ -101,6 +102,11 @@ impl TurnServer {
             users: HashMap::default(),
             nonce_expiry_duration: DEFAULT_NONCE_EXPIRY_DURATION,
         }
+    }
+
+    /// The [`TransportType`] of this TURN server.
+    pub fn transport(&self) -> TransportType {
+        self.stun.transport()
     }
 
     fn validate_stun(
@@ -236,6 +242,14 @@ impl TurnServer {
             return Err(builder);
         }
 
+        // All requests after the initial Allocate must use the same username as
+        // that used to create the allocation, to prevent attackers from
+        // hijacking the client's allocation.  Specifically, if the server
+        // requires the use of the long-term credential mechanism, and if a non-
+        // Allocate request passes authentication under this mechanism, and if
+        // the 5-tuple identifies an existing allocation, but the request does
+        // not use the same username as used to create the allocation, then the
+        // request MUST be rejected with a 441 (Wrong Credentials) error.
         if let Some(client) = self.client_from_5tuple(ttype, to, from) {
             if client.credentials.username() != username.username() {
                 let mut builder = Message::builder_error(msg, MessageWriteVec::new());
@@ -254,6 +268,41 @@ impl TurnServer {
         }
 
         Ok(credentials)
+    }
+
+    fn server_error(msg: &Message<'_>) -> MessageWriteVec {
+        let mut response = Message::builder_error(msg, MessageWriteVec::new());
+        let error = ErrorCode::builder(ErrorCode::SERVER_ERROR).build().unwrap();
+        response.add_attribute(&error).unwrap();
+        response.add_fingerprint().unwrap();
+        response
+    }
+
+    fn allocation_mismatch_response(msg: &Message<'_>) -> MessageWriteVec {
+        let mut response = Message::builder_error(msg, MessageWriteVec::new());
+        let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
+            .build()
+            .unwrap();
+        response.add_attribute(&error).unwrap();
+        response
+    }
+
+    fn allocation_mismatch(msg: &Message<'_>) -> MessageWriteVec {
+        let mut response = Self::allocation_mismatch_response(msg);
+        response.add_fingerprint().unwrap();
+        response
+    }
+
+    fn allocation_mismatch_signed(
+        msg: &Message<'_>,
+        credentials: LongTermCredentials,
+    ) -> MessageWriteVec {
+        let mut response = Self::allocation_mismatch_response(msg);
+        response
+            .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+            .unwrap();
+        response.add_fingerprint().unwrap();
+        response
     }
 
     fn handle_stun_binding(
@@ -279,11 +328,7 @@ impl TurnServer {
 
         let Ok(transmit) = self.stun.send(response, to, now) else {
             error!("Failed to send");
-            let mut response = Message::builder_error(msg, MessageWriteVec::new());
-            let error = ErrorCode::builder(ErrorCode::SERVER_ERROR).build().unwrap();
-            response.add_attribute(&error).unwrap();
-            response.add_fingerprint().unwrap();
-            return Err(response);
+            return Err(Self::server_error(msg));
         };
 
         Ok(transmit)
@@ -300,12 +345,7 @@ impl TurnServer {
         let credentials = self.validate_stun(msg, ttype, from, to, now)?;
 
         if let Some(_client) = self.mut_client_from_5tuple(ttype, to, from) {
-            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
-            let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
-                .build()
-                .unwrap();
-            builder.add_attribute(&error).unwrap();
-            return Err(builder);
+            return Err(Self::allocation_mismatch(msg));
         };
 
         let Ok(requested_transport) = msg.attribute::<RequestedTransport>() else {
@@ -371,12 +411,7 @@ impl TurnServer {
         let _credentials = self.validate_stun(msg, ttype, from, to, now)?;
 
         let Some(client) = self.mut_client_from_5tuple(ttype, to, from) else {
-            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
-            let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
-                .build()
-                .unwrap();
-            builder.add_attribute(&error).unwrap();
-            return Err(builder);
+            return Err(Self::allocation_mismatch(msg));
         };
 
         // TODO: proper lifetime handling
@@ -408,11 +443,7 @@ impl TurnServer {
         let response = builder.finish();
         let Ok(transmit) = self.stun.send(response, from, now) else {
             error!("Failed to send");
-            let mut response = Message::builder_error(msg, MessageWriteVec::new());
-            let error = ErrorCode::builder(ErrorCode::SERVER_ERROR).build().unwrap();
-            response.add_attribute(&error).unwrap();
-            response.add_fingerprint().unwrap();
-            return Err(response);
+            return Err(Self::server_error(msg));
         };
 
         info!("Successfully refreshed allocation {ttype}, from {from} to {to}");
@@ -431,12 +462,7 @@ impl TurnServer {
         let credentials = self.validate_stun(msg, ttype, from, to, now)?;
 
         let Some(client) = self.mut_client_from_5tuple(ttype, to, from) else {
-            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
-            let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
-                .build()
-                .unwrap();
-            builder.add_attribute(&error).unwrap();
-            return Err(builder);
+            return Err(Self::allocation_mismatch(msg));
         };
 
         let mut peer_addresses = vec![];
@@ -465,26 +491,25 @@ impl TurnServer {
                 .iter_mut()
                 .find(|a| a.addr.is_ipv4() == peer_addr.is_ipv4())
             else {
-                // XXX: Should always be an allocation available.
-                // TODO: support IPv6
-                unreachable!();
+                let mut response = Message::builder_error(msg, MessageWriteVec::new());
+                response
+                    .add_attribute(
+                        &ErrorCode::builder(ErrorCode::PEER_ADDRESS_FAMILY_MISMATCH)
+                            .build()
+                            .unwrap(),
+                    )
+                    .unwrap();
+                response
+                    .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                    .unwrap();
+                response.add_fingerprint().unwrap();
+                return Err(response);
             };
 
             if now > alloc.expires_at {
                 trace!("allocation has expired");
                 // allocation has expired
-                let mut builder = Message::builder_error(msg, MessageWriteVec::new());
-                let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
-                    .build()
-                    .unwrap();
-                builder.add_attribute(&error).unwrap();
-                builder
-                    .add_message_integrity(
-                        &MessageIntegrityCredentials::LongTerm(client.credentials.clone()),
-                        stun_proto::types::message::IntegrityAlgorithm::Sha1,
-                    )
-                    .unwrap();
-                return Err(builder);
+                return Err(Self::allocation_mismatch_signed(msg, credentials));
             }
 
             // TODO: support TCP allocations
@@ -528,11 +553,7 @@ impl TurnServer {
 
         let Ok(transmit) = self.stun.send(response, from, now) else {
             error!("Failed to send");
-            let mut response = Message::builder_error(msg, MessageWriteVec::new());
-            let error = ErrorCode::builder(ErrorCode::SERVER_ERROR).build().unwrap();
-            response.add_attribute(&error).unwrap();
-            response.add_fingerprint().unwrap();
-            return Err(response);
+            return Err(Self::server_error(msg));
         };
         debug!(
             "allocation {ttype} from {from} to {to} successfully created permission for {:?}",
@@ -553,12 +574,7 @@ impl TurnServer {
         let credentials = self.validate_stun(msg, ttype, from, to, now)?;
 
         let Some(client) = self.mut_client_from_5tuple(ttype, to, from) else {
-            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
-            let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
-                .build()
-                .unwrap();
-            builder.add_attribute(&error).unwrap();
-            return Err(builder);
+            return Err(Self::allocation_mismatch(msg));
         };
 
         let bad_request = move |msg: &Message<'_>, credentials: LongTermCredentials| {
@@ -588,29 +604,25 @@ impl TurnServer {
             .iter_mut()
             .find(|allocation| allocation.addr.is_ipv4() == peer_addr.is_ipv4())
         else {
-            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
-            let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
-                .build()
+            let mut response = Message::builder_error(msg, MessageWriteVec::new());
+            response
+                .add_attribute(
+                    &ErrorCode::builder(ErrorCode::PEER_ADDRESS_FAMILY_MISMATCH)
+                        .build()
+                        .unwrap(),
+                )
                 .unwrap();
-            builder.add_attribute(&error).unwrap();
-            return Err(builder);
+            response
+                .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                .unwrap();
+            response.add_fingerprint().unwrap();
+            return Err(response);
         };
 
         if now > alloc.expires_at {
             trace!("allocation has expired");
             // allocation has expired
-            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
-            let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
-                .build()
-                .unwrap();
-            builder.add_attribute(&error).unwrap();
-            builder
-                .add_message_integrity(
-                    &MessageIntegrityCredentials::LongTerm(client.credentials.clone()),
-                    stun_proto::types::message::IntegrityAlgorithm::Sha1,
-                )
-                .unwrap();
-            return Err(builder);
+            return Err(Self::allocation_mismatch_signed(msg, credentials));
         }
 
         let mut existing = alloc.channels.iter_mut().find(|channel| {
@@ -674,11 +686,7 @@ impl TurnServer {
 
         let Ok(transmit) = self.stun.send(response, from, now) else {
             error!("Failed to send");
-            let mut response = Message::builder_error(msg, MessageWriteVec::new());
-            let error = ErrorCode::builder(ErrorCode::SERVER_ERROR).build().unwrap();
-            response.add_attribute(&error).unwrap();
-            response.add_fingerprint().unwrap();
-            return Err(response);
+            return Err(Self::server_error(msg));
         };
 
         debug!("allocation {ttype} from {from} to {to} successfully created channel {channel_no} for {:?}", peer_addr.ip());
@@ -699,7 +707,6 @@ impl TurnServer {
 
         let Some(client) = self.client_from_5tuple(ttype, to, from) else {
             trace!("no client for transport {ttype:?} from {from:?}, to {to:?}");
-            trace!("clients: {:?}", self.clients);
             return Err(());
         };
 
@@ -708,30 +715,17 @@ impl TurnServer {
             .iter()
             .find(|allocation| allocation.addr.ip().is_ipv4() == peer_address.is_ipv4())
         else {
-            trace!("no allocation for transport {ttype:?} from {from:?}, to {to:?}");
-            trace!("allocations: {:?}", client.allocations);
+            trace!("no allocation available");
             return Err(());
         };
         if now > alloc.expires_at {
-            trace!("allocation has expired");
-            // allocation has expired
+            debug!("{} allocation {} expired", alloc.ttype, alloc.addr);
             return Err(());
         }
 
-        let Some(permission) = alloc
-            .permissions
-            .iter()
-            .find(|permission| permission.addr == peer_address.ip())
-        else {
-            trace!("permission not installed");
-            // no permission installed for this peer, ignoring
+        let Some(permission) = alloc.have_permission(peer_address.ip(), now) else {
             return Err(());
         };
-        if now > permission.expires_at {
-            trace!("permission has expired");
-            // permission has expired
-            return Err(());
-        }
 
         let data = msg.attribute::<AData>().map_err(|_| ())?;
         trace!("have {} to send to {:?}", data.data().len(), peer_address);
@@ -928,7 +922,7 @@ impl TurnServerApi for TurnServer {
             // A packet from the relayed address needs to be sent to the client that set up
             // the allocation.
             let Some(_permission) =
-                allocation.permissions_from_5tuple(transmit.transport, transmit.to, transmit.from)
+                allocation.permission_from_5tuple(transmit.transport, transmit.to, transmit.from)
             else {
                 warn!(
                     "no permission for {:?} for this allocation {:?}",
@@ -1041,7 +1035,7 @@ impl TurnServerApi for TurnServer {
 
                         // A packet from the client needs to be sent to the peer referenced by the
                         // configured channel.
-                        let Some(_permission) = allocation.permissions_from_5tuple(
+                        let Some(_permission) = allocation.permission_from_5tuple(
                             allocation.ttype,
                             allocation.addr,
                             existing.peer_addr,
@@ -1213,12 +1207,15 @@ struct Allocation {
 }
 
 impl Allocation {
-    fn permissions_from_5tuple(
+    fn permission_from_5tuple(
         &self,
         ttype: TransportType,
-        _local_addr: SocketAddr,
+        local_addr: SocketAddr,
         remote_addr: SocketAddr,
     ) -> Option<&Permission> {
+        if local_addr != self.addr {
+            return None;
+        }
         self.permissions
             .iter()
             .find(|permission| permission.ttype == ttype && remote_addr.ip() == permission.addr)
@@ -1241,6 +1238,24 @@ impl Allocation {
             .iter()
             .find(|channel| transport == channel.peer_transport && remote_addr == channel.peer_addr)
     }
+
+    #[tracing::instrument(ret, level = "trace", skip(self, now), fields(ttype = %self.ttype, relayed = %self.addr))]
+    fn have_permission(&self, addr: IpAddr, now: Instant) -> Option<&Permission> {
+        let Some(permission) = self
+            .permissions
+            .iter()
+            .find(|permission| permission.addr == addr)
+        else {
+            trace!("no permission available");
+            // no permission installed for this peer, ignoring
+            return None;
+        };
+        if now > permission.expires_at {
+            trace!("permission has expired");
+            return None;
+        }
+        Some(permission)
+    }
 }
 
 #[derive(Debug)]
@@ -1258,4 +1273,698 @@ struct Channel {
     peer_transport: TransportType,
 
     expires_at: Instant,
+}
+
+#[cfg(test)]
+mod tests {
+    use turn_types::stun::message::{IntegrityAlgorithm, Method};
+
+    use super::*;
+
+    fn listen_address() -> SocketAddr {
+        "127.0.0.1:3478".parse().unwrap()
+    }
+
+    fn client_address() -> SocketAddr {
+        "127.0.0.1:1000".parse().unwrap()
+    }
+
+    fn relayed_address() -> SocketAddr {
+        "10.0.0.1:2222".parse().unwrap()
+    }
+
+    fn peer_address() -> SocketAddr {
+        "10.0.0.2:44444".parse().unwrap()
+    }
+
+    fn ipv6_peer_address() -> SocketAddr {
+        "[fd12:3456:789a:1::1]:44444".parse().unwrap()
+    }
+
+    fn credentials() -> TurnCredentials {
+        TurnCredentials::new("tuser", "tpass")
+    }
+
+    fn new_server(transport: TransportType) -> TurnServer {
+        let mut server = TurnServer::new(transport, listen_address(), "realm".to_string());
+        let credentials = credentials();
+        server.add_user(
+            credentials.username().to_string(),
+            credentials.password().to_string(),
+        );
+        server
+    }
+
+    fn client_transmit<T: AsRef<[u8]> + std::fmt::Debug>(
+        data: T,
+        transport: TransportType,
+    ) -> Transmit<T> {
+        Transmit::new(data, transport, client_address(), listen_address())
+    }
+
+    #[test]
+    fn test_server_stun_binding() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (_realm, _nonce) = initial_allocate(&mut server, now);
+        let reply = server
+            .recv(
+                client_transmit(
+                    {
+                        let binding = Message::builder_request(BINDING, MessageWriteVec::new());
+                        binding.finish()
+                    },
+                    server.transport(),
+                ),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        let msg = Message::from_bytes(&reply.data).unwrap();
+        assert!(msg.has_method(BINDING));
+        assert!(msg.has_class(MessageClass::Success));
+        assert_eq!(
+            msg.attribute::<XorMappedAddress>()
+                .unwrap()
+                .addr(msg.transaction_id()),
+            client_address()
+        );
+    }
+
+    fn initial_allocate_msg() -> Vec<u8> {
+        let allocate = Message::builder_request(ALLOCATE, MessageWriteVec::new());
+        allocate.finish()
+    }
+
+    fn validate_unsigned_error_reply(msg: &[u8], method: Method, code: u16) -> Message<'_> {
+        let msg = Message::from_bytes(msg).unwrap();
+        assert!(msg.has_method(method));
+        assert!(msg.has_class(MessageClass::Error));
+        let err = msg.attribute::<ErrorCode>().unwrap();
+        assert_eq!(err.code(), code);
+        msg
+    }
+
+    fn validate_signed_error_reply(
+        msg: &[u8],
+        method: Method,
+        code: u16,
+        credentials: LongTermCredentials,
+    ) -> Message<'_> {
+        let msg = Message::from_bytes(msg).unwrap();
+        assert!(msg.has_method(method));
+        assert!(msg.has_class(MessageClass::Error));
+        let err = msg.attribute::<ErrorCode>().unwrap();
+        assert_eq!(err.code(), code);
+        msg.validate_integrity(&credentials.into()).unwrap();
+        msg
+    }
+
+    fn validate_initial_allocate_reply(msg: &[u8]) -> (String, String) {
+        let msg = validate_unsigned_error_reply(msg, ALLOCATE, ErrorCode::UNAUTHORIZED);
+        let realm = msg.attribute::<Realm>().unwrap();
+        let nonce = msg.attribute::<Nonce>().unwrap();
+        (realm.realm().to_string(), nonce.nonce().to_string())
+    }
+
+    #[test]
+    fn test_server_initial_allocate_unauthorized_reply() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let reply = server
+            .recv(
+                client_transmit(initial_allocate_msg(), server.transport()),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        validate_initial_allocate_reply(&reply.data);
+    }
+
+    #[test]
+    fn test_server_duplicate_initial_allocate_unauthorized_reply() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let reply = server
+            .recv(
+                client_transmit(initial_allocate_msg(), server.transport()),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        let (realm, nonce) = validate_initial_allocate_reply(&reply.data);
+        let reply = server
+            .recv(
+                client_transmit(initial_allocate_msg(), server.transport()),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        let (realm2, nonce2) = validate_initial_allocate_reply(&reply.data);
+        assert_eq!(nonce, nonce2);
+        assert_eq!(realm, realm2);
+    }
+
+    fn initial_allocate(server: &mut TurnServer, now: Instant) -> (String, String) {
+        let reply = server
+            .recv(
+                client_transmit(initial_allocate_msg(), server.transport()),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        validate_initial_allocate_reply(&reply.data)
+    }
+
+    #[test]
+    fn test_server_authenticated_allocate_missing_attributes() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let attributes = [
+            Nonce::TYPE,
+            Realm::TYPE,
+            Username::TYPE,
+            RequestedTransport::TYPE,
+        ];
+        for attr in attributes {
+            let mut server = new_server(TransportType::Udp);
+            let (realm, nonce) = initial_allocate(&mut server, now);
+            let creds = credentials().into_long_term_credentials(&realm);
+            let mut allocate = Message::builder_request(ALLOCATE, MessageWriteVec::new());
+            if attr != Nonce::TYPE {
+                allocate
+                    .add_attribute(&Nonce::new(&nonce).unwrap())
+                    .unwrap();
+            }
+            if attr != Realm::TYPE {
+                allocate
+                    .add_attribute(&Realm::new(&realm).unwrap())
+                    .unwrap();
+            }
+            if attr != Username::TYPE {
+                allocate
+                    .add_attribute(&Username::new(creds.username()).unwrap())
+                    .unwrap();
+            }
+            if attr != RequestedTransport::TYPE {
+                allocate
+                    .add_attribute(&RequestedTransport::new(RequestedTransport::UDP))
+                    .unwrap();
+            }
+            allocate
+                .add_message_integrity(&creds.clone().into(), IntegrityAlgorithm::Sha1)
+                .unwrap();
+            let reply = server
+                .recv(client_transmit(allocate.finish(), server.transport()), now)
+                .unwrap()
+                .unwrap();
+            if attr != RequestedTransport::TYPE {
+                validate_unsigned_error_reply(&reply.data, ALLOCATE, ErrorCode::BAD_REQUEST);
+            } else {
+                validate_signed_error_reply(&reply.data, ALLOCATE, ErrorCode::BAD_REQUEST, creds);
+            }
+        }
+    }
+
+    fn add_authenticated_request_required_attributes(
+        msg: &mut MessageWriteVec,
+        credentials: LongTermCredentials,
+        nonce: &str,
+    ) {
+        msg.add_attribute(&Nonce::new(nonce).unwrap()).unwrap();
+        msg.add_attribute(&Realm::new(credentials.realm()).unwrap())
+            .unwrap();
+        msg.add_attribute(&Username::new(credentials.username()).unwrap())
+            .unwrap();
+    }
+
+    fn authenticated_allocate_with_credentials_transport(
+        server: &mut TurnServer,
+        credentials: LongTermCredentials,
+        nonce: &str,
+        transport: u8,
+        now: Instant,
+    ) -> Transmit<Vec<u8>> {
+        let ret = server
+            .recv(
+                client_transmit(
+                    {
+                        let mut allocate =
+                            Message::builder_request(ALLOCATE, MessageWriteVec::new());
+                        add_authenticated_request_required_attributes(
+                            &mut allocate,
+                            credentials.clone(),
+                            nonce,
+                        );
+                        allocate
+                            .add_attribute(&RequestedTransport::new(transport))
+                            .unwrap();
+                        allocate
+                            .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                            .unwrap();
+                        allocate.finish()
+                    },
+                    server.transport(),
+                ),
+                now,
+            )
+            .unwrap();
+        if let Some(transmit) = ret {
+            return transmit;
+        }
+        let TurnServerPollRet::AllocateSocketUdp {
+            transport,
+            local_addr,
+            remote_addr,
+        } = server.poll(now)
+        else {
+            unreachable!();
+        };
+        server.allocated_udp_socket(
+            transport,
+            local_addr,
+            remote_addr,
+            Ok(relayed_address()),
+            now,
+        );
+        server.poll_transmit(now).unwrap()
+    }
+
+    fn authenticated_allocate_with_credentials(
+        server: &mut TurnServer,
+        credentials: LongTermCredentials,
+        nonce: &str,
+        now: Instant,
+    ) -> Transmit<Vec<u8>> {
+        authenticated_allocate_with_credentials_transport(
+            server,
+            credentials,
+            nonce,
+            RequestedTransport::UDP,
+            now,
+        )
+    }
+
+    #[test]
+    fn test_server_authenticated_allocate_wrong_credentials() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials();
+        let creds = TurnCredentials::new(creds.username(), "another-password")
+            .into_long_term_credentials(&realm);
+        let reply =
+            authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        validate_initial_allocate_reply(&reply.data);
+
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials();
+        let creds = TurnCredentials::new("another-user", creds.password())
+            .into_long_term_credentials(&realm);
+        let reply =
+            authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        validate_initial_allocate_reply(&reply.data);
+
+        let mut server = new_server(TransportType::Udp);
+        let (_realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials();
+        let creds = TurnCredentials::new(creds.username(), creds.password())
+            .into_long_term_credentials("another-realm");
+        let reply =
+            authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        validate_initial_allocate_reply(&reply.data);
+    }
+
+    #[test]
+    fn test_server_authenticated_allocate_wrong_transport_type() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply = authenticated_allocate_with_credentials_transport(
+            &mut server,
+            creds.clone(),
+            &nonce,
+            0x0,
+            now,
+        );
+        validate_signed_error_reply(
+            &reply.data,
+            ALLOCATE,
+            ErrorCode::UNSUPPORTED_TRANSPORT_PROTOCOL,
+            creds,
+        );
+    }
+
+    fn create_permission_request(credentials: LongTermCredentials, nonce: &str) -> Vec<u8> {
+        let mut request = Message::builder_request(CREATE_PERMISSION, MessageWriteVec::new());
+        request
+            .add_attribute(&XorPeerAddress::new(
+                peer_address(),
+                request.transaction_id(),
+            ))
+            .unwrap();
+        add_authenticated_request_required_attributes(&mut request, credentials.clone(), nonce);
+        request
+            .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+            .unwrap();
+        request.finish()
+    }
+
+    #[test]
+    fn test_server_create_permission_without_allocation() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply = server
+            .recv(
+                client_transmit(create_permission_request(creds, &nonce), server.transport()),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        validate_unsigned_error_reply(
+            &reply.data,
+            CREATE_PERMISSION,
+            ErrorCode::ALLOCATION_MISMATCH,
+        );
+    }
+
+    #[test]
+    fn test_server_create_permission_without_peer_address() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        let reply = server
+            .recv(
+                client_transmit(
+                    {
+                        let mut request =
+                            Message::builder_request(CREATE_PERMISSION, MessageWriteVec::new());
+                        add_authenticated_request_required_attributes(
+                            &mut request,
+                            creds.clone(),
+                            &nonce,
+                        );
+                        request
+                            .add_message_integrity(&creds.clone().into(), IntegrityAlgorithm::Sha1)
+                            .unwrap();
+                        request.finish()
+                    },
+                    server.transport(),
+                ),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        validate_signed_error_reply(
+            &reply.data,
+            CREATE_PERMISSION,
+            ErrorCode::BAD_REQUEST,
+            creds,
+        );
+    }
+
+    #[test]
+    fn test_server_create_permission_wrong_family() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        let reply = server
+            .recv(
+                client_transmit(
+                    {
+                        let mut request =
+                            Message::builder_request(CREATE_PERMISSION, MessageWriteVec::new());
+                        request
+                            .add_attribute(&XorPeerAddress::new(
+                                ipv6_peer_address(),
+                                request.transaction_id(),
+                            ))
+                            .unwrap();
+                        add_authenticated_request_required_attributes(
+                            &mut request,
+                            creds.clone(),
+                            &nonce,
+                        );
+                        request
+                            .add_message_integrity(&creds.clone().into(), IntegrityAlgorithm::Sha1)
+                            .unwrap();
+                        request.finish()
+                    },
+                    server.transport(),
+                ),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        validate_signed_error_reply(
+            &reply.data,
+            CREATE_PERMISSION,
+            ErrorCode::PEER_ADDRESS_FAMILY_MISMATCH,
+            creds,
+        );
+    }
+
+    fn channel_bind_request(credentials: LongTermCredentials, nonce: &str) -> Vec<u8> {
+        let mut request = Message::builder_request(CHANNEL_BIND, MessageWriteVec::new());
+        request.add_attribute(&ChannelNumber::new(0x4000)).unwrap();
+        request
+            .add_attribute(&XorPeerAddress::new(
+                peer_address(),
+                request.transaction_id(),
+            ))
+            .unwrap();
+        add_authenticated_request_required_attributes(&mut request, credentials.clone(), nonce);
+        request
+            .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+            .unwrap();
+        request.finish()
+    }
+
+    #[test]
+    fn test_server_channel_bind_without_allocation() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply = server
+            .recv(
+                client_transmit(channel_bind_request(creds, &nonce), server.transport()),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        validate_unsigned_error_reply(&reply.data, CHANNEL_BIND, ErrorCode::ALLOCATION_MISMATCH);
+    }
+
+    #[test]
+    fn test_server_channel_bind_missing_attributes() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        let reply = server
+            .recv(
+                client_transmit(
+                    {
+                        let mut request =
+                            Message::builder_request(CHANNEL_BIND, MessageWriteVec::new());
+                        request
+                            .add_attribute(&XorPeerAddress::new(
+                                peer_address(),
+                                request.transaction_id(),
+                            ))
+                            .unwrap();
+                        add_authenticated_request_required_attributes(
+                            &mut request,
+                            creds.clone(),
+                            &nonce,
+                        );
+                        request
+                            .add_message_integrity(&creds.clone().into(), IntegrityAlgorithm::Sha1)
+                            .unwrap();
+                        request.finish()
+                    },
+                    server.transport(),
+                ),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        validate_signed_error_reply(
+            &reply.data,
+            CHANNEL_BIND,
+            ErrorCode::BAD_REQUEST,
+            creds.clone(),
+        );
+
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        let reply = server
+            .recv(
+                client_transmit(
+                    {
+                        let mut request =
+                            Message::builder_request(CHANNEL_BIND, MessageWriteVec::new());
+                        request.add_attribute(&ChannelNumber::new(0x4000)).unwrap();
+                        add_authenticated_request_required_attributes(
+                            &mut request,
+                            creds.clone(),
+                            &nonce,
+                        );
+                        request
+                            .add_message_integrity(&creds.clone().into(), IntegrityAlgorithm::Sha1)
+                            .unwrap();
+                        request.finish()
+                    },
+                    server.transport(),
+                ),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        validate_signed_error_reply(
+            &reply.data,
+            CHANNEL_BIND,
+            ErrorCode::BAD_REQUEST,
+            creds.clone(),
+        );
+    }
+
+    #[test]
+    fn test_server_channel_bind_invalid_id() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        let reply = server
+            .recv(
+                client_transmit(
+                    {
+                        let mut request =
+                            Message::builder_request(CHANNEL_BIND, MessageWriteVec::new());
+                        request.add_attribute(&ChannelNumber::new(0x0)).unwrap();
+                        request
+                            .add_attribute(&XorPeerAddress::new(
+                                peer_address(),
+                                request.transaction_id(),
+                            ))
+                            .unwrap();
+                        add_authenticated_request_required_attributes(
+                            &mut request,
+                            creds.clone(),
+                            &nonce,
+                        );
+                        request
+                            .add_message_integrity(&creds.clone().into(), IntegrityAlgorithm::Sha1)
+                            .unwrap();
+                        request.finish()
+                    },
+                    server.transport(),
+                ),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        validate_signed_error_reply(
+            &reply.data,
+            CHANNEL_BIND,
+            ErrorCode::BAD_REQUEST,
+            creds.clone(),
+        );
+    }
+
+    #[test]
+    fn test_server_channel_bind_wrong_family() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        let reply = server
+            .recv(
+                client_transmit(
+                    {
+                        let mut request =
+                            Message::builder_request(CHANNEL_BIND, MessageWriteVec::new());
+                        request.add_attribute(&ChannelNumber::new(0x4000)).unwrap();
+                        request
+                            .add_attribute(&XorPeerAddress::new(
+                                ipv6_peer_address(),
+                                request.transaction_id(),
+                            ))
+                            .unwrap();
+                        add_authenticated_request_required_attributes(
+                            &mut request,
+                            creds.clone(),
+                            &nonce,
+                        );
+                        request
+                            .add_message_integrity(&creds.clone().into(), IntegrityAlgorithm::Sha1)
+                            .unwrap();
+                        request.finish()
+                    },
+                    server.transport(),
+                ),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        validate_signed_error_reply(
+            &reply.data,
+            CHANNEL_BIND,
+            ErrorCode::PEER_ADDRESS_FAMILY_MISMATCH,
+            creds,
+        );
+    }
+
+    fn refresh_request(credentials: LongTermCredentials, nonce: &str) -> Vec<u8> {
+        let mut request = Message::builder_request(REFRESH, MessageWriteVec::new());
+        request.add_attribute(&Lifetime::new(1800)).unwrap();
+        add_authenticated_request_required_attributes(&mut request, credentials.clone(), nonce);
+        request
+            .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+            .unwrap();
+        request.finish()
+    }
+
+    #[test]
+    fn test_server_refresh_without_allocation() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply = server
+            .recv(
+                client_transmit(refresh_request(creds, &nonce), server.transport()),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        validate_unsigned_error_reply(&reply.data, REFRESH, ErrorCode::ALLOCATION_MISMATCH);
+    }
 }
