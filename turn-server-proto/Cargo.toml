@@ -21,6 +21,7 @@ stun-proto.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 turn-types = { path = "../turn-types", version = "0.1.0" }
+rand.workspace = true
 rustls = { workspace = true, optional = true }
 
 [dev-dependencies]

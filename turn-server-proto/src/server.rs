@@ -12,6 +12,7 @@ use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
+use rand::Rng;
 use stun_proto::agent::{StunAgent, StunError, Transmit};
 use stun_proto::types::attribute::{
     ErrorCode, Fingerprint, MessageIntegrity, Nonce, Realm, Username, XorMappedAddress,
@@ -109,6 +110,11 @@ impl TurnServer {
         self.stun.transport()
     }
 
+    fn generate_nonce() -> String {
+        let mut rng = rand::rng();
+        String::from_iter((0..16).map(|_| rng.sample(rand::distr::Alphanumeric) as char))
+    }
+
     fn validate_stun(
         &mut self,
         msg: &Message<'_>,
@@ -134,8 +140,7 @@ impl TurnServer {
                     transport: ttype,
                     remote_addr: from,
                     local_addr: to,
-                    // FIXME: use an actual random source.
-                    nonce: String::from("random"),
+                    nonce: Self::generate_nonce(),
                     expires_at: now + self.nonce_expiry_duration,
                 });
                 self.nonces.last().unwrap()
@@ -181,7 +186,7 @@ impl TurnServer {
         let mut stale_nonce = false;
         let nonce_value = if let Some(nonce_data) = nonce_data {
             if nonce_data.expires_at < now {
-                nonce_data.nonce = String::from("random");
+                nonce_data.nonce = Self::generate_nonce();
                 nonce_data.expires_at = now + nonce_expiry_duration;
                 stale_nonce = true;
             } else if nonce_data.nonce != nonce.nonce() {
@@ -189,12 +194,11 @@ impl TurnServer {
             }
             nonce_data.nonce.clone()
         } else {
-            let nonce_value = String::from("randome");
+            let nonce_value = Self::generate_nonce();
             self.nonces.push(NonceData {
                 transport: ttype,
                 remote_addr: from,
                 local_addr: to,
-                // FIXME: use an actual random source.
                 nonce: nonce_value.clone(),
                 expires_at: now + self.nonce_expiry_duration,
             });
