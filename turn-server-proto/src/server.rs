@@ -115,6 +115,34 @@ impl TurnServer {
         String::from_iter((0..16).map(|_| rng.sample(rand::distr::Alphanumeric) as char))
     }
 
+    fn validate_nonce(&mut self, ttype: TransportType, from: SocketAddr, to: SocketAddr, now: Instant) -> String {
+        //   o  If the NONCE is no longer valid, the server MUST generate an error
+        //      response with an error code of 438 (Stale Nonce).  This response
+        //      MUST include NONCE and REALM attributes and SHOULD NOT include the
+        //      USERNAME or MESSAGE-INTEGRITY attribute.  Servers can invalidate
+        //      nonces in order to provide additional security.  See Section 4.3
+        //      of [RFC2617] for guidelines.
+        let nonce_expiry_duration = self.nonce_expiry_duration;
+        let nonce_data = self.mut_nonce_from_5tuple(ttype, to, from);
+        if let Some(nonce_data) = nonce_data {
+            if nonce_data.expires_at < now {
+                nonce_data.nonce = Self::generate_nonce();
+                nonce_data.expires_at = now + nonce_expiry_duration;
+            }
+            nonce_data.nonce.clone()
+        } else {
+            let nonce_value = Self::generate_nonce();
+            self.nonces.push(NonceData {
+                transport: ttype,
+                remote_addr: from,
+                local_addr: to,
+                nonce: nonce_value.clone(),
+                expires_at: now + self.nonce_expiry_duration,
+            });
+            nonce_value
+        }
+    }
+
     fn validate_stun(
         &mut self,
         msg: &Message<'_>,
@@ -133,24 +161,12 @@ impl TurnServer {
             //      provider of the STUN server.  The response MUST include a NONCE,
             //      selected by the server.  The response SHOULD NOT contain a
             //      USERNAME or MESSAGE-INTEGRITY attribute.
-            let nonce = if let Some(nonce) = self.nonce_from_5tuple(ttype, to, from) {
-                nonce
-            } else {
-                self.nonces.push(NonceData {
-                    transport: ttype,
-                    remote_addr: from,
-                    local_addr: to,
-                    nonce: Self::generate_nonce(),
-                    expires_at: now + self.nonce_expiry_duration,
-                });
-                self.nonces.last().unwrap()
-            };
+            let nonce_value = self.validate_nonce(ttype, from, to, now);
             trace!(
-                "no message-integrity, returning unauthorized with nonce: {}",
-                nonce.nonce
+                "no message-integrity, returning unauthorized with nonce: {nonce_value}",
             );
             let mut builder = Message::builder_error(msg, MessageWriteVec::new());
-            let nonce = Nonce::new(&nonce.nonce).unwrap();
+            let nonce = Nonce::new(&nonce_value).unwrap();
             builder.add_attribute(&nonce).unwrap();
             let realm = Realm::new(&self.realm).unwrap();
             builder.add_attribute(&realm).unwrap();
@@ -175,38 +191,8 @@ impl TurnServer {
             return Err(builder);
         };
 
-        //   o  If the NONCE is no longer valid, the server MUST generate an error
-        //      response with an error code of 438 (Stale Nonce).  This response
-        //      MUST include NONCE and REALM attributes and SHOULD NOT include the
-        //      USERNAME or MESSAGE-INTEGRITY attribute.  Servers can invalidate
-        //      nonces in order to provide additional security.  See Section 4.3
-        //      of [RFC2617] for guidelines.
-        let nonce_expiry_duration = self.nonce_expiry_duration;
-        let nonce_data = self.mut_nonce_from_5tuple(ttype, to, from);
-        let mut stale_nonce = false;
-        let nonce_value = if let Some(nonce_data) = nonce_data {
-            if nonce_data.expires_at < now {
-                nonce_data.nonce = Self::generate_nonce();
-                nonce_data.expires_at = now + nonce_expiry_duration;
-                stale_nonce = true;
-            } else if nonce_data.nonce != nonce.nonce() {
-                stale_nonce = true;
-            }
-            nonce_data.nonce.clone()
-        } else {
-            let nonce_value = Self::generate_nonce();
-            self.nonces.push(NonceData {
-                transport: ttype,
-                remote_addr: from,
-                local_addr: to,
-                nonce: nonce_value.clone(),
-                expires_at: now + self.nonce_expiry_duration,
-            });
-            stale_nonce = true;
-            nonce_value
-        };
-
-        if stale_nonce {
+        let nonce_value = self.validate_nonce(ttype, from, to, now);
+        if nonce_value != nonce.nonce() {
             let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::STALE_NONCE).build().unwrap();
             builder.add_attribute(&error).unwrap();
@@ -216,7 +202,7 @@ impl TurnServer {
             builder.add_attribute(&nonce).unwrap();
 
             return Err(builder);
-        };
+        }
 
         //   o  Using the password associated with the username in the USERNAME
         //      attribute, compute the value for the message integrity as
@@ -796,19 +782,6 @@ impl TurnServer {
         };
         debug!("result: {ret:?}");
         ret
-    }
-
-    fn nonce_from_5tuple(
-        &self,
-        ttype: TransportType,
-        local_addr: SocketAddr,
-        remote_addr: SocketAddr,
-    ) -> Option<&NonceData> {
-        self.nonces.iter().find(|nonce| {
-            nonce.transport == ttype
-                && nonce.remote_addr == remote_addr
-                && nonce.local_addr == local_addr
-        })
     }
 
     fn mut_nonce_from_5tuple(
@@ -1602,6 +1575,19 @@ mod tests {
         let reply =
             authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
         validate_initial_allocate_reply(&reply.data);
+    }
+
+    #[test]
+    fn test_server_authenticated_allocate_without_initial() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let nonce = String::from("random");
+        let creds = credentials();
+        let creds = creds.into_long_term_credentials("realm");
+        let reply =
+            authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        validate_unsigned_error_reply(&reply.data, ALLOCATE, ErrorCode::STALE_NONCE);
     }
 
     #[test]
