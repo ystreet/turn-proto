@@ -6,7 +6,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! # API module
+//! TURN client API.
+//!
+//! Provides a consistent interface between multiple implementations of TURN clients for different
+//! transports (TCP, and UDP) and wrappers (TLS).
 
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Range;
@@ -26,7 +29,7 @@ use turn_types::message::SEND;
 
 /// The public API of a TURN client.
 pub trait TurnClientApi: std::fmt::Debug + Send {
-    /// The error produced when attemptingo to send to a peer.
+    /// The error produced when attempting to send data to a peer.
     type SendError: std::error::Error;
 
     /// The transport of the connection to the TURN server.
@@ -75,7 +78,7 @@ pub trait TurnClientApi: std::fmt::Debug + Send {
     ///
     /// The provided transport, address and data are the data to send to the peer.
     ///
-    /// The returned value will instruct the caller to send a message to the turn server.
+    /// The returned value may instruct the caller to send a message to the turn server.
     fn send_to<T: AsRef<[u8]> + std::fmt::Debug>(
         &mut self,
         transport: TransportType,
@@ -86,14 +89,14 @@ pub trait TurnClientApi: std::fmt::Debug + Send {
 
     /// Provide received data to the TURN client for handling.
     ///
-    /// The returned data outlines what to do with this data.
+    /// The return value outlines what to do with this data.
     fn recv<T: AsRef<[u8]> + std::fmt::Debug>(
         &mut self,
         transmit: Transmit<T>,
         now: Instant,
     ) -> TurnRecvRet<T>;
 
-    /// Poll the client for any further recevied data.
+    /// Poll the client for any further received data.
     fn poll_recv(&mut self, now: Instant) -> Option<TurnPeerData<Vec<u8>>>;
 
     /// Poll the client for further progress.
@@ -284,17 +287,19 @@ impl<T: DelayedTransmitBuild + std::fmt::Debug> TransmitBuild<T> {
 pub trait DelayedTransmitBuild {
     /// Write the packet in to a new Vec.
     fn build(self) -> Vec<u8>;
-    /// The length of any generated data
+    /// The length (in bytes) of the produced data.
     fn len(&self) -> usize;
-    /// Whether the resulting data would be empty
+    /// Whether the resulting data would be empty.
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    /// Write the data into a provided output buffer. Returns the number of bytes written.
+    /// Write the data into a provided output buffer.
+    ///
+    /// Returns the number of bytes written.
     fn write_into(self, data: &mut [u8]) -> usize;
 }
 
-/// A `Transmit` where the data is some subset of the provided region.
+/// A `Transmit` where the data is some subset of the provided data.
 #[derive(Debug)]
 pub struct DelayedTransmit<T: AsRef<[u8]> + std::fmt::Debug> {
     data: T,
@@ -371,7 +376,7 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedMessageSe
     }
 }
 
-/// A `Transmit` that will construct a channel message towards a TURN client.
+/// A `Transmit` that will construct a channel message towards a TURN server.
 #[derive(Debug)]
 pub struct DelayedChannelSend<T: AsRef<[u8]> + std::fmt::Debug> {
     data: T,
@@ -410,7 +415,7 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedChannelSe
     }
 }
 
-/// A delayed `Transmit` that will produce data for a TURN client.
+/// A delayed `Transmit` that will produce data for a TURN server.
 #[derive(Debug)]
 pub enum DelayedMessageOrChannelSend<T: AsRef<[u8]> + std::fmt::Debug> {
     /// A [`DelayedChannelSend`].

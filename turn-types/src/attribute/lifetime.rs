@@ -10,7 +10,11 @@ use byteorder::{BigEndian, ByteOrder};
 
 use stun_types::{attribute::*, message::StunParseError};
 
-/// The lifetime [`Attribute`]
+/// The [`Lifetime`] [`Attribute`].
+///
+/// The lifetime (in seconds) of a TURN allocation on the server.
+///
+/// Reference: [RFC5766 Section 14.2](https://datatracker.ietf.org/doc/html/rfc5766#section-14.2).
 #[derive(Debug, Clone)]
 pub struct Lifetime {
     seconds: u32,
@@ -63,7 +67,7 @@ impl TryFrom<&RawAttribute<'_>> for Lifetime {
 }
 
 impl Lifetime {
-    /// Create a new [`Lifetime`] [`Attribute`]
+    /// Create a new [`Lifetime`] [`Attribute`].
     ///
     /// # Examples
     ///
@@ -76,7 +80,7 @@ impl Lifetime {
         Self { seconds }
     }
 
-    /// The number of seconds stored in a [`Lifetime`] [`Attribute`]
+    /// The number of seconds stored in a [`Lifetime`] [`Attribute`].
     ///
     /// # Examples
     ///

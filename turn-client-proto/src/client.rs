@@ -6,7 +6,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! # Client module
+//! TURN Client.
+//!
+//! A cohesive TURN client that can be one of the transport specific (UDP, TCP, TLS) implementations.
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;

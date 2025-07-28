@@ -6,7 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! # TCP TURN client
+//! TCP TURN client.
 //!
 //! An implementation of a TURN client suitable for TCP connections.
 

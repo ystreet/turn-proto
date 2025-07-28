@@ -6,7 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! # TLS TURN client
+//! TLS TURN client using Rustls.
 //!
 //! An implementation of a TURN client suitable for TLS over TCP connections.
 

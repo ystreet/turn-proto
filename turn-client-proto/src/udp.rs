@@ -6,7 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! # TURN client
+//! UDP TURN client.
 //!
 //! An implementation of a TURN client suitable for UDP connections.
 
