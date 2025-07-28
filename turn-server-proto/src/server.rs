@@ -971,7 +971,6 @@ impl TurnServerApi for TurnServer {
             // TODO: TCP buffering requirements
             match Message::from_bytes(transmit.data.as_ref()) {
                 Ok(msg) => {
-                    trace!("received {} from {:?}", msg, transmit.from);
                     match self.handle_stun(
                         &msg,
                         transmit.transport,
