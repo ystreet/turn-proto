@@ -37,7 +37,8 @@ pub use crate::api::{
     BindChannelError, CreatePermissionError, DeleteError, SendError, TurnEvent, TurnPollRet,
     TurnRecvRet,
 };
-use crate::tcp::{ensure_data_owned, IncomingTcp, StoredTcp, TurnTcpBuffer};
+use crate::tcp::ensure_data_owned;
+use turn_types::tcp::{IncomingTcp, StoredTcp, TurnTcpBuffer};
 
 /// A TURN client that communicates over TLS.
 #[derive(Debug)]
