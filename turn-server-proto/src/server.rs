@@ -2173,4 +2173,119 @@ mod tests {
             .unwrap();
         validate_unsigned_error_reply(&reply.data, REFRESH, ErrorCode::ALLOCATION_MISMATCH);
     }
+
+    fn send_indication(peer_addr: SocketAddr) -> Vec<u8> {
+        let mut msg = Message::builder(
+            MessageType::from_class_method(MessageClass::Indication, SEND),
+            TransactionId::generate(),
+            MessageWriteVec::new(),
+        );
+        msg.add_attribute(&XorPeerAddress::new(peer_addr, msg.transaction_id()))
+            .unwrap();
+        msg.add_attribute(&AData::new([8; 9].as_slice())).unwrap();
+        msg.finish()
+    }
+
+    #[test]
+    fn test_server_send_without_allocation() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        assert!(server
+            .recv(
+                client_transmit(send_indication(peer_address()), server.transport()),
+                now,
+            )
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_server_send_allocation_expired() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply =
+            authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        let lifetime = validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        let now = now + Duration::from_secs(lifetime as u64 + 1);
+        assert!(server
+            .recv(
+                client_transmit(send_indication(peer_address()), server.transport()),
+                now,
+            )
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_server_send_no_allocation() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply =
+            authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        let lifetime = validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        let now = now + Duration::from_secs(lifetime as u64 + 1);
+        assert!(server
+            .recv(
+                client_transmit(send_indication(ipv6_peer_address()), server.transport()),
+                now,
+            )
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_server_send_without_permission() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply =
+            authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        assert!(server
+            .recv(
+                client_transmit(send_indication(peer_address()), server.transport()),
+                now,
+            )
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_server_send_indication_with_permission() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply =
+            authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        let reply = server
+            .recv(
+                client_transmit(create_permission_request(creds.clone(), &nonce), server.transport()),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        validate_signed_success(&reply.data, CREATE_PERMISSION, creds);
+        let reply =server
+            .recv(
+                client_transmit(send_indication(peer_address()), server.transport()),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.transport, TransportType::Udp);
+        assert_eq!(reply.from, relayed_address());
+        assert_eq!(reply.to, peer_address());
+    }
 }
