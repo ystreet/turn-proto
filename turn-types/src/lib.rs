@@ -30,6 +30,7 @@ pub mod tcp;
 /// Initialize the library.
 pub fn debug_init() {
     attribute::attributes_init();
+    message::debug_init();
 }
 
 /// Credentials used for a TURN user.

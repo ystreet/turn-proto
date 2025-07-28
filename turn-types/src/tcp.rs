@@ -7,11 +7,20 @@
 // except according to those terms.
 
 //! Handle TURN over TCP.
+//!
+//! A TURN connection between a client and a server can have two types of data:
+//! - STUN [`Message`]s, and
+//! - [`ChannelData`]s
+//!
+//! Unlike a UDP connection which inherently contains a size for every message, TCP is a
+//! stream-based protocol and the size of a message must be infered from the contained data. This
+//! module performs the relevant buffering of incoming data over a TCP connection and produces
+//! [`Message`]s or [`ChannelData`] as they are completely received.
 
 use std::ops::Range;
 
 use stun_proto::agent::Transmit;
-use stun_types::message::MessageHeader;
+use stun_types::message::{Message, MessageHeader};
 use tracing::{debug, trace};
 
 use crate::channel::ChannelData;
@@ -19,11 +28,13 @@ use crate::channel::ChannelData;
 /// Reply to [`TurnTcpBuffer::incoming_tcp()`]
 #[derive(Debug)]
 pub enum IncomingTcp<T: AsRef<[u8]> + std::fmt::Debug> {
-    /// Not enough data for processing to complete.
-    NeedMoreData,
-    /// Input data contains a complete STUN Message.
+    /// Input data (with the provided range) contains a complete STUN Message.
+    ///
+    /// Any extra data after the range is stored for later processing.
     CompleteMessage(Transmit<T>, Range<usize>),
-    /// Input data contains a complete Channel data message.
+    /// Input data (with the provided range) contains a complete Channel data message.
+    ///
+    /// Any extra data after the range is stored for later processing.
     CompleteChannel(Transmit<T>, Range<usize>),
     /// A STUN message has been produced from the buffered data.
     StoredMessage(Vec<u8>, Transmit<T>),
@@ -31,13 +42,83 @@ pub enum IncomingTcp<T: AsRef<[u8]> + std::fmt::Debug> {
     StoredChannel(Vec<u8>, Transmit<T>),
 }
 
-/// A Stored TCP Message or Channel
+impl<T: AsRef<[u8]> + std::fmt::Debug> IncomingTcp<T> {
+    /// The byte slice for this incoming or stored data.
+    pub fn data(&self) -> &[u8] {
+        match self {
+            Self::CompleteMessage(transmit, range) => {
+                &transmit.data.as_ref()[range.start..range.end]
+            }
+            Self::CompleteChannel(transmit, range) => {
+                &transmit.data.as_ref()[range.start..range.end]
+            }
+            Self::StoredMessage(data, _transmit) => data,
+            Self::StoredChannel(data, _transmit) => data,
+        }
+    }
+
+    /// The [`Message`] contained in this incoming or stored data.
+    pub fn message(&self) -> Option<Message<'_>> {
+        if !matches!(
+            self,
+            Self::CompleteMessage(_, _) | Self::StoredMessage(_, _)
+        ) {
+            return None;
+        }
+        Message::from_bytes(self.data()).ok()
+    }
+
+    /// The [`ChannelData`] contained in this incoming or stored data.
+    pub fn channel(&self) -> Option<ChannelData<'_>> {
+        if !matches!(
+            self,
+            Self::CompleteChannel(_, _) | Self::StoredChannel(_, _)
+        ) {
+            return None;
+        }
+        ChannelData::parse(self.data()).ok()
+    }
+}
+
+impl<T: AsRef<[u8]> + std::fmt::Debug> AsRef<[u8]> for IncomingTcp<T> {
+    fn as_ref(&self) -> &[u8] {
+        self.data()
+    }
+}
+
+/// A stored [`Message`] or [`ChannelData`]
 #[derive(Debug)]
 pub enum StoredTcp {
     /// Message
     Message(Vec<u8>),
     /// Channel
     Channel(Vec<u8>),
+}
+
+impl StoredTcp {
+    /// The byte slice for this stored data.
+    pub fn data(&self) -> &[u8] {
+        match self {
+            Self::Message(data) => data,
+            Self::Channel(data) => data,
+        }
+    }
+
+    fn into_incoming<T: AsRef<[u8]> + std::fmt::Debug>(
+        self,
+        transmit: Transmit<T>,
+    ) -> IncomingTcp<T> {
+        match self {
+            Self::Message(msg) => IncomingTcp::StoredMessage(msg, transmit),
+            Self::Channel(channel) => IncomingTcp::StoredChannel(channel, transmit),
+        }
+    }
+}
+
+impl AsRef<[u8]> for StoredTcp {
+    fn as_ref(&self) -> &[u8] {
+        self.data()
+    }
 }
 
 /// A TCP buffer for TURN messages.
@@ -53,6 +134,9 @@ impl TurnTcpBuffer {
     }
 
     /// Provide incoming TCP data to parse.
+    ///
+    /// A return value of `None` indicates that the more data is required to provide a complete
+    /// STUN [`Message`] or a [`ChannelData`].
     #[tracing::instrument(
         level = "trace",
         skip(self, transmit),
@@ -64,14 +148,14 @@ impl TurnTcpBuffer {
     pub fn incoming_tcp<T: AsRef<[u8]> + std::fmt::Debug>(
         &mut self,
         transmit: Transmit<T>,
-    ) -> IncomingTcp<T> {
+    ) -> Option<IncomingTcp<T>> {
         if self.tcp_buffer.is_empty() {
             let data = transmit.data.as_ref();
             trace!("Trying to parse incoming data as a complete message/channel");
             let Ok(hdr) = MessageHeader::from_bytes(data) else {
                 let Ok(channel) = ChannelData::parse(data) else {
                     self.tcp_buffer.extend_from_slice(data);
-                    return IncomingTcp::NeedMoreData;
+                    return None;
                 };
                 let channel_len = 4 + channel.data().len();
                 debug!(
@@ -82,7 +166,7 @@ impl TurnTcpBuffer {
                 if channel_len < data.len() {
                     self.tcp_buffer.extend_from_slice(&data[channel_len..]);
                 }
-                return IncomingTcp::CompleteChannel(transmit, 0..channel_len);
+                return Some(IncomingTcp::CompleteChannel(transmit, 0..channel_len));
             };
             let msg_len = MessageHeader::LENGTH + hdr.data_length() as usize;
             debug!(
@@ -92,20 +176,16 @@ impl TurnTcpBuffer {
             );
             if data.len() < msg_len {
                 self.tcp_buffer.extend_from_slice(data);
-                return IncomingTcp::NeedMoreData;
+                return None;
             }
             if msg_len < data.len() {
                 self.tcp_buffer.extend_from_slice(&data[msg_len..]);
             }
-            return IncomingTcp::CompleteMessage(transmit, 0..msg_len);
+            return Some(IncomingTcp::CompleteMessage(transmit, 0..msg_len));
         }
 
         self.tcp_buffer.extend_from_slice(transmit.data.as_ref());
-        match self.poll_recv() {
-            None => IncomingTcp::NeedMoreData,
-            Some(StoredTcp::Message(msg)) => IncomingTcp::StoredMessage(msg, transmit),
-            Some(StoredTcp::Channel(channel)) => IncomingTcp::StoredChannel(channel, transmit),
-        }
+        self.poll_recv().map(|recv| recv.into_incoming(transmit))
     }
 
     /// Return the next complete message (if any).
@@ -212,13 +292,17 @@ mod tests {
         let (local_addr, remote_addr) = generate_addresses();
         let mut tcp = TurnTcpBuffer::new();
         let msg = generate_message();
-        let ret = tcp.incoming_tcp(Transmit::new(
-            msg,
-            TransportType::Tcp,
-            remote_addr,
-            local_addr,
-        ));
+        let ret = tcp
+            .incoming_tcp(Transmit::new(
+                msg.clone(),
+                TransportType::Tcp,
+                remote_addr,
+                local_addr,
+            ))
+            .unwrap();
         assert!(matches!(ret, IncomingTcp::CompleteMessage(_, _)));
+        assert_eq!(ret.data(), &msg);
+        assert!(ret.message().is_some());
     }
 
     #[test]
@@ -227,13 +311,17 @@ mod tests {
         let (local_addr, remote_addr) = generate_addresses();
         let mut tcp = TurnTcpBuffer::new();
         let msg = generate_message_in_channel();
-        let ret = tcp.incoming_tcp(Transmit::new(
-            msg,
-            TransportType::Tcp,
-            remote_addr,
-            local_addr,
-        ));
+        let ret = tcp
+            .incoming_tcp(Transmit::new(
+                msg.clone(),
+                TransportType::Tcp,
+                remote_addr,
+                local_addr,
+            ))
+            .unwrap();
         assert!(matches!(ret, IncomingTcp::CompleteChannel(_, _)));
+        assert_eq!(ret.data(), &msg);
+        assert!(ret.channel().is_some());
     }
 
     #[test]
@@ -250,15 +338,20 @@ mod tests {
                 remote_addr,
                 local_addr,
             ));
-            assert!(matches!(ret, IncomingTcp::NeedMoreData));
+            assert!(ret.is_none());
         }
-        let IncomingTcp::StoredMessage(produced, _) = tcp.incoming_tcp(Transmit::new(
-            &msg[msg.len() - 1..],
-            TransportType::Tcp,
-            remote_addr,
-            local_addr,
-        )) else {
-            unreachable!()
+        let ret = tcp
+            .incoming_tcp(Transmit::new(
+                &msg[msg.len() - 1..],
+                TransportType::Tcp,
+                remote_addr,
+                local_addr,
+            ))
+            .unwrap();
+        assert_eq!(ret.data(), &msg);
+        assert!(ret.message().is_some());
+        let IncomingTcp::StoredMessage(produced, _) = ret else {
+            unreachable!();
         };
         assert_eq!(produced, msg);
     }
@@ -277,14 +370,19 @@ mod tests {
                 remote_addr,
                 local_addr,
             ));
-            assert!(matches!(ret, IncomingTcp::NeedMoreData));
+            assert!(ret.is_none());
         }
-        let IncomingTcp::StoredChannel(produced, _) = tcp.incoming_tcp(Transmit::new(
-            &channel[channel.len() - 1..],
-            TransportType::Tcp,
-            remote_addr,
-            local_addr,
-        )) else {
+        let ret = tcp
+            .incoming_tcp(Transmit::new(
+                &channel[channel.len() - 1..],
+                TransportType::Tcp,
+                remote_addr,
+                local_addr,
+            ))
+            .unwrap();
+        assert_eq!(ret.data(), &channel);
+        assert!(ret.channel().is_some());
+        let IncomingTcp::StoredChannel(produced, _) = ret else {
             unreachable!()
         };
         assert_eq!(produced, channel);
@@ -299,17 +397,24 @@ mod tests {
         let channel = generate_message_in_channel();
         let mut input = msg.clone();
         input.extend_from_slice(&channel);
-        let IncomingTcp::CompleteMessage(transmit, msg_range) = tcp.incoming_tcp(Transmit::new(
-            input.clone(),
-            TransportType::Tcp,
-            remote_addr,
-            local_addr,
-        )) else {
-            unreachable!()
+        let ret = tcp
+            .incoming_tcp(Transmit::new(
+                input.clone(),
+                TransportType::Tcp,
+                remote_addr,
+                local_addr,
+            ))
+            .unwrap();
+        assert_eq!(ret.data(), &msg);
+        assert!(ret.message().is_some());
+        let IncomingTcp::CompleteMessage(transmit, msg_range) = ret else {
+            unreachable!();
         };
         assert_eq!(msg_range, 0..msg.len());
         assert_eq!(transmit.data, input);
-        let Some(StoredTcp::Channel(produced)) = tcp.poll_recv() else {
+        let ret = tcp.poll_recv().unwrap();
+        assert_eq!(ret.data(), &channel);
+        let StoredTcp::Channel(produced) = ret else {
             unreachable!()
         };
         assert_eq!(produced, channel);
@@ -324,14 +429,24 @@ mod tests {
         let channel = generate_message_in_channel();
         let mut input = channel.clone();
         input.extend_from_slice(&msg);
-        let IncomingTcp::CompleteChannel(transmit, channel_range) = tcp.incoming_tcp(
-            Transmit::new(input.clone(), TransportType::Tcp, remote_addr, local_addr),
-        ) else {
+        let ret = tcp
+            .incoming_tcp(Transmit::new(
+                input.clone(),
+                TransportType::Tcp,
+                remote_addr,
+                local_addr,
+            ))
+            .unwrap();
+        assert_eq!(ret.data(), &channel);
+        assert!(ret.channel().is_some());
+        let IncomingTcp::CompleteChannel(transmit, channel_range) = ret else {
             unreachable!()
         };
         assert_eq!(channel_range, 0..channel.len());
         assert_eq!(transmit.data, input);
-        let Some(StoredTcp::Message(produced)) = tcp.poll_recv() else {
+        let ret = tcp.poll_recv().unwrap();
+        assert_eq!(ret.data(), &msg);
+        let StoredTcp::Message(produced) = ret else {
             unreachable!()
         };
         assert_eq!(produced, msg);

@@ -74,8 +74,8 @@ impl TurnClientTls {
         now: Instant,
     ) -> TurnRecvRet<T> {
         match self.incoming_tcp_buffer.incoming_tcp(transmit) {
-            IncomingTcp::NeedMoreData => TurnRecvRet::Handled,
-            IncomingTcp::CompleteMessage(transmit, msg_range) => {
+            None => TurnRecvRet::Handled,
+            Some(IncomingTcp::CompleteMessage(transmit, msg_range)) => {
                 match self.protocol.handle_message(
                     &transmit.data.as_slice()[msg_range.start..msg_range.end],
                     now,
@@ -95,7 +95,7 @@ impl TurnClientTls {
                     }),
                 }
             }
-            IncomingTcp::CompleteChannel(transmit, msg_range) => {
+            Some(IncomingTcp::CompleteChannel(transmit, msg_range)) => {
                 let channel =
                     ChannelData::parse(&transmit.data.as_slice()[msg_range.start..msg_range.end])
                         .unwrap();
@@ -112,7 +112,7 @@ impl TurnClientTls {
                     }),
                 }
             }
-            IncomingTcp::StoredMessage(data, transmit) => {
+            Some(IncomingTcp::StoredMessage(data, transmit)) => {
                 match self.protocol.handle_message(data, now) {
                     TurnProtocolRecv::Handled => TurnRecvRet::Handled,
                     TurnProtocolRecv::Ignored(_) => TurnRecvRet::Handled,
@@ -128,7 +128,7 @@ impl TurnClientTls {
                     }),
                 }
             }
-            IncomingTcp::StoredChannel(data, transmit) => {
+            Some(IncomingTcp::StoredChannel(data, transmit)) => {
                 let channel = ChannelData::parse(&data).unwrap();
                 match self.protocol.handle_channel(channel, now) {
                     TurnProtocolChannelRecv::Ignored => TurnRecvRet::Handled,

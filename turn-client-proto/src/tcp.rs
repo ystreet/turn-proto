@@ -172,8 +172,8 @@ impl TurnClientApi for TurnClientTcp {
         }
 
         let ret = match self.incoming_tcp_buffer.incoming_tcp(transmit) {
-            IncomingTcp::NeedMoreData => TurnRecvRet::Handled,
-            IncomingTcp::CompleteMessage(transmit, msg_range) => {
+            None => TurnRecvRet::Handled,
+            Some(IncomingTcp::CompleteMessage(transmit, msg_range)) => {
                 match self.protocol.handle_message(transmit.data, now) {
                     TurnProtocolRecv::Handled => TurnRecvRet::Handled,
                     // XXX: Ignored should probably produce an error for TCP
@@ -193,7 +193,7 @@ impl TurnClientApi for TurnClientTcp {
                     }),
                 }
             }
-            IncomingTcp::CompleteChannel(transmit, range) => {
+            Some(IncomingTcp::CompleteChannel(transmit, range)) => {
                 let channel =
                     ChannelData::parse(&transmit.data.as_ref()[range.start..range.end]).unwrap();
                 match self.protocol.handle_channel(channel, now) {
@@ -212,10 +212,10 @@ impl TurnClientApi for TurnClientTcp {
                     }),
                 }
             }
-            IncomingTcp::StoredMessage(msg, transmit) => {
+            Some(IncomingTcp::StoredMessage(msg, transmit)) => {
                 protocol_recv_to_api(self.protocol.handle_message(msg, now), transmit)
             }
-            IncomingTcp::StoredChannel(data, transmit) => {
+            Some(IncomingTcp::StoredChannel(data, transmit)) => {
                 let channel = ChannelData::parse(&data).unwrap();
                 match self.protocol.handle_channel(channel, now) {
                     TurnProtocolChannelRecv::Ignored => TurnRecvRet::Ignored(transmit),
