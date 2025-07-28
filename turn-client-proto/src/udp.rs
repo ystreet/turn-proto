@@ -30,9 +30,9 @@ use crate::api::{
 use crate::protocol::{TurnClientProtocol, TurnProtocolChannelRecv, TurnProtocolRecv};
 
 pub use crate::api::{
-    BindChannelError, CreatePermissionError, DeleteError, TurnEvent, TurnPollRet, TurnRecvRet,
+    BindChannelError, CreatePermissionError, DeleteError, SendError, TurnEvent, TurnPollRet,
+    TurnRecvRet,
 };
-pub use crate::protocol::SendError;
 
 /// A TURN client.
 #[derive(Debug)]
@@ -78,8 +78,6 @@ impl TurnClientUdp {
 }
 
 impl TurnClientApi for TurnClientUdp {
-    type SendError = SendError;
-
     fn transport(&self) -> TransportType {
         self.protocol.transport()
     }
@@ -148,7 +146,7 @@ impl TurnClientApi for TurnClientUdp {
         to: SocketAddr,
         data: T,
         now: Instant,
-    ) -> Result<Option<TransmitBuild<DelayedMessageOrChannelSend<T>>>, Self::SendError> {
+    ) -> Result<Option<TransmitBuild<DelayedMessageOrChannelSend<T>>>, SendError> {
         self.protocol.send_to(transport, to, data, now).map(Some)
     }
 

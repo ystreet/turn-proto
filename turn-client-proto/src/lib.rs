@@ -44,7 +44,7 @@ pub use stun_proto as stun;
 pub use turn_types as types;
 pub mod api;
 pub mod client;
-pub mod protocol;
+mod protocol;
 pub mod tcp;
 pub mod udp;
 

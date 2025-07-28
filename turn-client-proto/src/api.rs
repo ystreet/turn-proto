@@ -29,9 +29,6 @@ use turn_types::message::SEND;
 
 /// The public API of a TURN client.
 pub trait TurnClientApi: std::fmt::Debug + Send {
-    /// The error produced when attempting to send data to a peer.
-    type SendError: std::error::Error;
-
     /// The transport of the connection to the TURN server.
     fn transport(&self) -> TransportType;
 
@@ -85,7 +82,7 @@ pub trait TurnClientApi: std::fmt::Debug + Send {
         to: SocketAddr,
         data: T,
         now: Instant,
-    ) -> Result<Option<TransmitBuild<DelayedMessageOrChannelSend<T>>>, Self::SendError>;
+    ) -> Result<Option<TransmitBuild<DelayedMessageOrChannelSend<T>>>, SendError>;
 
     /// Provide received data to the TURN client for handling.
     ///
@@ -203,6 +200,18 @@ pub enum DeleteError {
     /// There is no connection to the TURN server.
     #[error("There is no connection to the TURN server")]
     NoAllocation,
+}
+
+/// Errors produced when attempting to send data to a peer.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum SendError {
+    /// There is no connection to the TURN server.
+    #[error("There is no connection to the TURN server")]
+    NoAllocation,
+    /// There is no permission installed for the requested peer.
+    #[error("There is no permission installed for the requested peer")]
+    NoPermission,
 }
 
 /// A slice range or an owned piece of data.
