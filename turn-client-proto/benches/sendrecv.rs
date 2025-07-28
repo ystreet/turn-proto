@@ -57,13 +57,13 @@ impl<T: TurnClientApi> TurnTest<T> {
 
     fn allocate(&mut self, now: Instant) {
         let transmit = self.client.poll_transmit(now).unwrap();
-        let transmit = self.server.recv(transmit, now).unwrap().unwrap();
+        let transmit = self.server.recv(transmit, now).unwrap();
         assert!(matches!(
             self.client.recv(transmit, now),
             TurnRecvRet::Handled
         ));
         let transmit = self.client.poll_transmit(now).unwrap();
-        self.server.recv(transmit, now).unwrap();
+        assert!(self.server.recv(transmit, now).is_none());
         let TurnServerPollRet::AllocateSocketUdp {
             transport: _,
             local_addr,
@@ -98,7 +98,7 @@ impl<T: TurnClientApi> TurnTest<T> {
             .create_permission(TransportType::Udp, self.peer_addr.ip(), now)
             .unwrap();
         let transmit = self.client.poll_transmit(now).unwrap();
-        let transmit = self.server.recv(transmit, now).unwrap().unwrap();
+        let transmit = self.server.recv(transmit, now).unwrap();
         assert!(matches!(
             self.client.recv(transmit, now),
             TurnRecvRet::Handled
@@ -114,7 +114,7 @@ impl<T: TurnClientApi> TurnTest<T> {
             .bind_channel(TransportType::Udp, self.peer_addr, now)
             .unwrap();
         let transmit = self.client.poll_transmit(now).unwrap();
-        let transmit = self.server.recv(transmit, now).unwrap().unwrap();
+        let transmit = self.server.recv(transmit, now).unwrap();
         assert!(matches!(
             self.client.recv(transmit, now),
             TurnRecvRet::Handled
@@ -246,7 +246,7 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
         group.throughput(criterion::Throughput::Bytes(*size as u64));
         let data = vec![9; *size];
         let transmit = Transmit::new(data, TransportType::Udp, test.peer_addr, test.relayed_addr);
-        let transmit = test.server.recv(transmit, now).unwrap().unwrap();
+        let transmit = test.server.recv(transmit, now).unwrap();
         assert!(matches!(
             test.client.recv(
                 Transmit::new(
@@ -285,7 +285,7 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
         group.throughput(criterion::Throughput::Bytes(*size as u64));
         let data = vec![9; *size];
         let transmit = Transmit::new(data, TransportType::Udp, test.peer_addr, test.relayed_addr);
-        let transmit = test.server.recv(transmit, now).unwrap().unwrap();
+        let transmit = test.server.recv(transmit, now).unwrap();
         assert!(matches!(
             test.client.recv(
                 Transmit::new(

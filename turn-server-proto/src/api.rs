@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use stun_proto::agent::{StunError, Transmit};
+use stun_proto::agent::Transmit;
 use turn_types::stun::TransportType;
 
 /// API for TURN servers.
@@ -32,7 +32,7 @@ pub trait TurnServerApi: Send + std::fmt::Debug {
         &mut self,
         transmit: Transmit<T>,
         now: Instant,
-    ) -> Result<Option<Transmit<Vec<u8>>>, StunError>;
+    ) -> Option<Transmit<Vec<u8>>>;
     /// Poll the [`TurnServerApi`] in order to make further progress.
     ///
     /// The returned value indicates what the caller should do.
