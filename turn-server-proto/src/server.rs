@@ -115,7 +115,13 @@ impl TurnServer {
         String::from_iter((0..16).map(|_| rng.sample(rand::distr::Alphanumeric) as char))
     }
 
-    fn validate_nonce(&mut self, ttype: TransportType, from: SocketAddr, to: SocketAddr, now: Instant) -> String {
+    fn validate_nonce(
+        &mut self,
+        ttype: TransportType,
+        from: SocketAddr,
+        to: SocketAddr,
+        now: Instant,
+    ) -> String {
         //   o  If the NONCE is no longer valid, the server MUST generate an error
         //      response with an error code of 438 (Stale Nonce).  This response
         //      MUST include NONCE and REALM attributes and SHOULD NOT include the
@@ -162,9 +168,7 @@ impl TurnServer {
             //      selected by the server.  The response SHOULD NOT contain a
             //      USERNAME or MESSAGE-INTEGRITY attribute.
             let nonce_value = self.validate_nonce(ttype, from, to, now);
-            trace!(
-                "no message-integrity, returning unauthorized with nonce: {nonce_value}",
-            );
+            trace!("no message-integrity, returning unauthorized with nonce: {nonce_value}",);
             let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let nonce = Nonce::new(&nonce_value).unwrap();
             builder.add_attribute(&nonce).unwrap();
@@ -1728,6 +1732,27 @@ mod tests {
             ErrorCode::PEER_ADDRESS_FAMILY_MISMATCH,
             creds,
         );
+    }
+
+    #[test]
+    fn test_server_create_permission_wrong_username() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        server.add_user("another-user".to_string(), creds.password().to_string());
+        authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        let creds = TurnCredentials::new("another-user", creds.password())
+            .into_long_term_credentials(&realm);
+        let reply = server
+            .recv(
+                client_transmit(create_permission_request(creds, &nonce), server.transport()),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        validate_unsigned_error_reply(&reply.data, CREATE_PERMISSION, ErrorCode::WRONG_CREDENTIALS);
     }
 
     fn channel_bind_request(credentials: LongTermCredentials, nonce: &str) -> Vec<u8> {
