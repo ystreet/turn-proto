@@ -20,7 +20,7 @@ use stun_proto::types::data::Data;
 use stun_proto::types::TransportType;
 
 use turn_types::channel::ChannelData;
-pub use turn_types::tcp::{IncomingTcp, StoredTcp, TurnTcpBuffer};
+use turn_types::tcp::{IncomingTcp, StoredTcp, TurnTcpBuffer};
 use turn_types::TurnCredentials;
 
 use tracing::{trace, warn};
