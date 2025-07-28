@@ -8,7 +8,11 @@
 
 use stun_types::{attribute::*, message::StunParseError};
 
-/// The DontFragment [`Attribute`]
+/// The [`DontFragment`] [`Attribute`].
+///
+/// Requests that the TURN server produce an allocation that does not fragment UDP packets.
+///
+/// Reference: [RFC5766 Section 14.8](https://datatracker.ietf.org/doc/html/rfc5766#section-14.6).
 #[derive(Default, Debug, Clone)]
 pub struct DontFragment {}
 impl AttributeStaticType for DontFragment {
@@ -52,7 +56,7 @@ impl TryFrom<&RawAttribute<'_>> for DontFragment {
 }
 
 impl DontFragment {
-    /// Create a new DontFragment [`Attribute`]
+    /// Create a new [`DontFragment`] [`Attribute`].
     ///
     /// # Examples
     ///

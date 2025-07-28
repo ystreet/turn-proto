@@ -13,7 +13,12 @@ use stun_types::{
     message::{StunParseError, TransactionId},
 };
 
-/// The XorPeerAddress [`Attribute`]
+/// The [`XorPeerAddress`] [`Attribute`].
+///
+/// Typically used for signalling the address of the peer that a TURN server should send data
+/// towards, or has received data from.
+///
+/// Reference: [RFC5766 Section 14.3](https://datatracker.ietf.org/doc/html/rfc5766#section-14.3).
 #[derive(Debug, Clone)]
 pub struct XorPeerAddress {
     // stored XOR-ed as we need the transaction id to get the original value
@@ -64,7 +69,7 @@ impl TryFrom<&RawAttribute<'_>> for XorPeerAddress {
 }
 
 impl XorPeerAddress {
-    /// Create a new XorPeerAddress [`Attribute`]
+    /// Create a new [`XorPeerAddress`] [`Attribute`].
     ///
     /// # Examples
     ///
@@ -81,7 +86,7 @@ impl XorPeerAddress {
         }
     }
 
-    /// Retrieve the address stored in a XorPeerAddress
+    /// Retrieve the address stored in a [`XorPeerAddress`].
     ///
     /// # Examples
     ///
@@ -103,7 +108,11 @@ impl std::fmt::Display for XorPeerAddress {
     }
 }
 
-/// The XorRelayedAddress [`Attribute`]
+/// The [`XorRelayedAddress`] [`Attribute`].
+///
+/// Used to reference the address allocated on the TURN server on behalf of the client.
+///
+/// Reference: [RFC5766 Section 14.5](https://datatracker.ietf.org/doc/html/rfc5766#section-14.5).
 #[derive(Debug, Clone)]
 pub struct XorRelayedAddress {
     addr: XorSocketAddr,
@@ -155,7 +164,7 @@ impl TryFrom<&RawAttribute<'_>> for XorRelayedAddress {
 }
 
 impl XorRelayedAddress {
-    /// Create a new XorRelayedAddress [`Attribute`]
+    /// Create a new [`XorRelayedAddress`] [`Attribute`].
     ///
     /// # Examples
     ///
@@ -172,7 +181,7 @@ impl XorRelayedAddress {
         }
     }
 
-    /// Retrieve the address stored in a XorRelayedAddress
+    /// Retrieve the address stored in a [`XorRelayedAddress`].
     ///
     /// # Examples
     ///

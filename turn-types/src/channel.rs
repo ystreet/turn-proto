@@ -8,8 +8,9 @@
 
 //! TURN [`ChannelData`] messages.
 //!
-//! Used as an optional more efficient data transfer mechanism between a TURN server and a TURN
-//! client.
+//! [`ChannelData`] is used as an optional more efficient data transfer mechanism between a TURN
+//! server and a TURN client. A [`ChannelData`] message contains a simple 4-byte header that
+//! contains the channel identifier and the length of the data.
 
 use stun_types::message::StunParseError;
 

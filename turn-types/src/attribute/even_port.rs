@@ -8,7 +8,11 @@
 
 use stun_types::{attribute::*, message::StunParseError};
 
-/// The EvenPort [`Attribute`]
+/// The [`EvenPort`] [`Attribute`].
+///
+/// Whether an even port is required to be allocated typically for RTP/RTCP purposes.
+///
+/// Reference: [RFC5766 Section 14.6](https://datatracker.ietf.org/doc/html/rfc5766#section-14.6).
 #[derive(Debug, Clone)]
 pub struct EvenPort {
     bits: u8,
@@ -58,7 +62,7 @@ impl TryFrom<&RawAttribute<'_>> for EvenPort {
 }
 
 impl EvenPort {
-    /// Create a new EvenPort [`Attribute`]
+    /// Create a new [`EvenPort`] [`Attribute`].
     ///
     /// # Examples
     ///
@@ -72,7 +76,7 @@ impl EvenPort {
         Self { bits }
     }
 
-    /// Retrieve the address stored in a EvenPort
+    /// Retrieve the address stored in a [`EvenPort`].
     ///
     /// # Examples
     ///

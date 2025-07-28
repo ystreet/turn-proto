@@ -10,7 +10,12 @@ use byteorder::{BigEndian, ByteOrder};
 
 use stun_types::{attribute::*, message::StunParseError};
 
-/// The channel number [`Attribute`]
+/// The [`ChannelNumber`] [`Attribute`].
+///
+/// Typically used when setting a TURN channel using the
+/// [`CHANNEL_BIND`](crate::message::CHANNEL_BIND) method.
+///
+/// Reference: [RFC5766 section 14.1](https://datatracker.ietf.org/doc/html/rfc5766#section-14.1).
 #[derive(Debug, Clone)]
 pub struct ChannelNumber {
     channel: u16,
@@ -62,7 +67,7 @@ impl TryFrom<&RawAttribute<'_>> for ChannelNumber {
 }
 
 impl ChannelNumber {
-    /// Create a new [`ChannelNumber`] [`Attribute`]
+    /// Create a new [`ChannelNumber`] [`Attribute`].
     ///
     /// # Examples
     ///
@@ -75,7 +80,7 @@ impl ChannelNumber {
         Self { channel }
     }
 
-    /// The channel number stored in a [`ChannelNumber`] [`Attribute`]
+    /// The channel number stored in a [`ChannelNumber`] [`Attribute`].
     ///
     /// # Examples
     ///

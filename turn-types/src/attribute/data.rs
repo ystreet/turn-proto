@@ -8,7 +8,11 @@
 
 use stun_types::{attribute::*, message::StunParseError};
 
-/// The Data [`Attribute`]
+/// The [`Data`] [`Attribute`].
+///
+/// Holds a sequence of bytes to transfer.
+///
+/// Reference: [RFC5766 Section 14.4](https://datatracker.ietf.org/doc/html/rfc5766#section-14.4).
 #[derive(Debug, Clone)]
 pub struct Data<'a> {
     data: stun_types::data::Data<'a>,
@@ -68,7 +72,7 @@ impl<'a> TryFrom<RawAttribute<'a>> for Data<'a> {
 }
 
 impl<'a> Data<'a> {
-    /// Create a new Data [`Attribute`]
+    /// Create a new Data [`Attribute`].
     ///
     /// # Examples
     ///
@@ -90,7 +94,7 @@ impl<'a> Data<'a> {
         }
     }
 
-    /// Retrieve the data stored in a [Data]
+    /// Retrieve the data stored in a [`Data`].
     ///
     /// # Examples
     ///

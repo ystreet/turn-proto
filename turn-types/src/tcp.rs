@@ -89,9 +89,9 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> AsRef<[u8]> for IncomingTcp<T> {
 /// A stored [`Message`] or [`ChannelData`]
 #[derive(Debug)]
 pub enum StoredTcp {
-    /// Message
+    /// A STUN [`Message`] has been received.
     Message(Vec<u8>),
-    /// Channel
+    /// A [`ChannelData`] has been received.
     Channel(Vec<u8>),
 }
 

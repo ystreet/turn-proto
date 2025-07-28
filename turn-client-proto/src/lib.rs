@@ -14,6 +14,28 @@
 //! - [RFC5766]
 //!
 //! [RFC5766]: https://datatracker.ietf.org/doc/html/rfc5766
+//!
+//! # Getting Started
+//!
+//! The entry point for starting with a TURN client implementation depends on the transport
+//! protocol that you are looking to use. For UDP connections, you should start in the [`udp`]
+//! module, for TCP connections, the [`tcp`] module, and for TLS connections, the [`rustls`] module
+//! (when the `rustls` feature is enabled).
+//!
+//! From there, the [`api`] module provides the interface that all of the TURN clients implement and
+//! the [`client`] module can be used to combine one of the above options into a single value for
+//! selection based on the underlying TURN client.
+//!
+//! # Examples
+//!
+//! ```
+//! use turn_client_proto::udp::TurnClientUdp;
+//! let turn_server_address = "127.0.0.1:3478".parse().unwrap();
+//! let local_address = "127.0.0.1:1000".parse().unwrap();
+//! let credentials = turn_types::TurnCredentials::new("username", "password");
+//!
+//! let client = TurnClientUdp::allocate(local_address, turn_server_address, credentials);
+//! ```
 
 #![deny(missing_debug_implementations)]
 #![deny(missing_docs)]

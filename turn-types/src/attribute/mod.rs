@@ -6,7 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! STUN Attributes for TURN
+//! STUN Attributes for TURN.
 //!
 //! Provides for generating, parsing and manipulating STUN attributes as specified in TURN
 //! [RFC5766].

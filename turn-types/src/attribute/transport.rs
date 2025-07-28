@@ -8,7 +8,11 @@
 
 use stun_types::{attribute::*, message::StunParseError};
 
-/// The RequestedTransport [`Attribute`]
+/// The [`RequestedTransport`] [`Attribute`].
+///
+/// Request a particular transport for an TURN allocation.
+///
+/// Reference: [RFC5766 Section 14.7](https://datatracker.ietf.org/doc/html/rfc5766#section-14.7).
 #[derive(Debug, Clone)]
 pub struct RequestedTransport {
     protocol: u8,
@@ -65,7 +69,7 @@ impl RequestedTransport {
     /// The UDP transport type.
     pub const UDP: u8 = 17;
 
-    /// Create a new RequestedTransport [`Attribute`]
+    /// Create a new [`RequestedTransport`] [`Attribute`].
     ///
     /// # Examples
     ///
@@ -78,7 +82,7 @@ impl RequestedTransport {
         Self { protocol }
     }
 
-    /// Retrieve the protocol stored in a RequestedTransport
+    /// Retrieve the protocol stored in a [`RequestedTransport`]
     ///
     /// # Examples
     ///

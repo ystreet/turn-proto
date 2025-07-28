@@ -11,12 +11,13 @@
 
 //! # turn-types
 //!
-//! `turn-types` provides an implementation for two things:
-//! 1. TURN specific STUN attributes using the `stun-types` crate.
-//! 2. Parsing to and from the actual data sent and received on the wire.
+//! `turn-types` provides an implementation for two main things related to TURN clients and servers:
+//! 1. TURN specific STUN attributes using the [`stun-types`] crate.
+//! 2. Parsing to and from the actual data sent and received on the wire between a TURN client and
+//!    a TURN server.
 //!
 //! This is based on the following standards:
-//! - [RFC5766]
+//! - [RFC5766]: Traversal Using Relays around NAT (TURN).
 //!
 //! [RFC5766]: https://tools.ietf.org/html/rfc5766
 
@@ -27,7 +28,10 @@ pub mod channel;
 pub mod message;
 pub mod tcp;
 
-/// Initialize the library.
+/// Initialize some debugging functionality of the library.
+///
+/// It is not required to call this function, however doing so allows debug functionality of
+/// stun-types to print much more human readable descriptions of attributes and messages.
 pub fn debug_init() {
     attribute::attributes_init();
     message::debug_init();

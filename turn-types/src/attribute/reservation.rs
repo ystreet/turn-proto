@@ -10,7 +10,12 @@ use byteorder::{BigEndian, ByteOrder};
 
 use stun_types::{attribute::*, message::StunParseError};
 
-/// The ReservationToken [`Attribute`]
+/// The [`ReservationToken`] [`Attribute`].
+///
+/// Reserves an allocation on the TURN server or acquires an already existing allocation on the
+/// TURN server.
+///
+/// Reference: [RFC5766 Section 14.9](https://datatracker.ietf.org/doc/html/rfc5766#section-14.9).
 #[derive(Debug, Clone)]
 pub struct ReservationToken {
     token: u64,
@@ -63,7 +68,7 @@ impl TryFrom<&RawAttribute<'_>> for ReservationToken {
 }
 
 impl ReservationToken {
-    /// Create a new ReservationToken [`Attribute`]
+    /// Create a new [`ReservationToken`] [`Attribute`].
     ///
     /// # Examples
     ///
@@ -76,7 +81,7 @@ impl ReservationToken {
         Self { token }
     }
 
-    /// Retrieve the token stored in a ReservationToken
+    /// Retrieve the token stored in a [`ReservationToken`].
     ///
     /// # Examples
     ///
