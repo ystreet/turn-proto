@@ -768,9 +768,17 @@ impl TurnServer {
                     .handle_stun_channel_bind(msg, ttype, from, to, now)
                     .map(Some),
                 _ => {
+                    let credentials = self.validate_stun(msg, ttype, from, to, now)?;
+                    let Some(_client) = self.mut_client_from_5tuple(ttype, to, from) else {
+                        return Err(Self::allocation_mismatch(msg));
+                    };
+
                     let mut builder = Message::builder_error(msg, MessageWriteVec::new());
                     let error = ErrorCode::builder(ErrorCode::BAD_REQUEST).build().unwrap();
                     builder.add_attribute(&error).unwrap();
+                    builder
+                        .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                        .unwrap();
                     Err(builder)
                 }
             }
@@ -2271,13 +2279,16 @@ mod tests {
         validate_authenticated_allocate_reply(&reply.data, creds.clone());
         let reply = server
             .recv(
-                client_transmit(create_permission_request(creds.clone(), &nonce), server.transport()),
+                client_transmit(
+                    create_permission_request(creds.clone(), &nonce),
+                    server.transport(),
+                ),
                 now,
             )
             .unwrap()
             .unwrap();
         validate_signed_success(&reply.data, CREATE_PERMISSION, creds);
-        let reply =server
+        let reply = server
             .recv(
                 client_transmit(send_indication(peer_address()), server.transport()),
                 now,
@@ -2287,5 +2298,77 @@ mod tests {
         assert_eq!(reply.transport, TransportType::Udp);
         assert_eq!(reply.from, relayed_address());
         assert_eq!(reply.to, peer_address());
+    }
+
+    #[test]
+    fn test_server_unknown_request() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply =
+            authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        let reply = server
+            .recv(
+                client_transmit(
+                    {
+                        let mut request =
+                            Message::builder_request(Method::new(0x123), MessageWriteVec::new());
+                        add_authenticated_request_required_attributes(
+                            &mut request,
+                            creds.clone(),
+                            &nonce,
+                        );
+                        request
+                            .add_message_integrity(&creds.clone().into(), IntegrityAlgorithm::Sha1)
+                            .unwrap();
+                        request.finish()
+                    },
+                    server.transport(),
+                ),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        validate_signed_error_reply(
+            &reply.data,
+            Method::new(0x123),
+            ErrorCode::BAD_REQUEST,
+            creds,
+        );
+    }
+
+    #[test]
+    fn test_server_unknown_indication() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply =
+            authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        assert!(server
+            .recv(
+                client_transmit(
+                    {
+                        let request = Message::builder(
+                            MessageType::from_class_method(
+                                MessageClass::Indication,
+                                Method::new(0x123),
+                            ),
+                            TransactionId::generate(),
+                            MessageWriteVec::new(),
+                        );
+                        request.finish()
+                    },
+                    server.transport(),
+                ),
+                now,
+            )
+            .unwrap()
+            .is_none());
     }
 }
