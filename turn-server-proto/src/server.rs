@@ -910,15 +910,19 @@ impl TurnServerApi for TurnServer {
         {
             // A packet from the relayed address needs to be sent to the client that set up
             // the allocation.
-            let Some(_permission) =
-                allocation.permission_from_5tuple(transmit.transport, transmit.to, transmit.from)
-            else {
-                warn!(
-                    "no permission for {:?} for this allocation {:?}",
-                    transmit.from, allocation.addr
+
+            // SAFETY: permission existence is checked by `allocation_from_public_5tuple()`
+            let permission = allocation
+                .permission_from_5tuple(transmit.transport, transmit.to, transmit.from)
+                .unwrap();
+            if permission.expires_at < now {
+                trace!(
+                    "permission for {} expired {:?} ago",
+                    permission.addr,
+                    now - permission.expires_at
                 );
                 return Ok(None);
-            };
+            }
 
             if let Some(existing) =
                 allocation.channel_from_5tuple(transmit.transport, transmit.to, transmit.from)
@@ -990,58 +994,9 @@ impl TurnServerApi for TurnServer {
                     }
                 }
                 Err(_) => {
-                    if let Some(client) =
+                    let Some(client) =
                         self.client_from_5tuple(transmit.transport, transmit.to, transmit.from)
-                    {
-                        trace!(
-                            "received {} bytes from {:?}",
-                            transmit.data.as_ref().len(),
-                            transmit.from
-                        );
-                        let Ok(channel) = ChannelData::parse(transmit.data.as_ref()) else {
-                            return Ok(None);
-                        };
-                        trace!(
-                            "parsed channel data with id {} and data length {}",
-                            channel.id(),
-                            channel.data().len()
-                        );
-                        let Some((allocation, existing)) =
-                            client.allocations.iter().find_map(|allocation| {
-                                allocation
-                                    .channel_from_id(channel.id())
-                                    .map(|perm| (allocation, perm))
-                            })
-                        else {
-                            warn!(
-                                "no channel id {} for this client {:?}",
-                                channel.id(),
-                                client.remote_addr
-                            );
-                            // no channel with that id
-                            return Ok(None);
-                        };
-
-                        // A packet from the client needs to be sent to the peer referenced by the
-                        // configured channel.
-                        let Some(_permission) = allocation.permission_from_5tuple(
-                            allocation.ttype,
-                            allocation.addr,
-                            existing.peer_addr,
-                        ) else {
-                            warn!(
-                                "no permission for {:?} for this allocation {:?}",
-                                existing.peer_addr, allocation.addr
-                            );
-                            return Ok(None);
-                        };
-                        Ok(Some(Transmit::new(
-                            channel.data().to_vec(),
-                            allocation.ttype,
-                            allocation.addr,
-                            existing.peer_addr,
-                        )))
-                    } else {
+                    else {
                         trace!(
                             "No handler for {} bytes over {:?} from {:?}, to {:?}. Ignoring",
                             transmit.data.as_ref().len(),
@@ -1049,8 +1004,72 @@ impl TurnServerApi for TurnServer {
                             transmit.from,
                             transmit.to
                         );
-                        Ok(None)
+                        return Ok(None);
+                    };
+                    trace!(
+                        "received {} bytes from {:?}",
+                        transmit.data.as_ref().len(),
+                        transmit.from
+                    );
+                    let Ok(channel) = ChannelData::parse(transmit.data.as_ref()) else {
+                        return Ok(None);
+                    };
+                    trace!(
+                        "parsed channel data with id {} and data length {}",
+                        channel.id(),
+                        channel.data().len()
+                    );
+                    let Some((allocation, existing)) =
+                        client.allocations.iter().find_map(|allocation| {
+                            allocation
+                                .channel_from_id(channel.id())
+                                .map(|perm| (allocation, perm))
+                        })
+                    else {
+                        warn!(
+                            "no channel id {} for this client {:?}",
+                            channel.id(),
+                            client.remote_addr
+                        );
+                        // no channel with that id
+                        return Ok(None);
+                    };
+                    if existing.expires_at < now {
+                        trace!(
+                            "channel for {} expired {:?} ago",
+                            transmit.from,
+                            now - existing.expires_at
+                        );
+                        return Ok(None);
                     }
+
+                    // A packet from the client needs to be sent to the peer referenced by the
+                    // configured channel.
+                    let Some(permission) = allocation.permission_from_5tuple(
+                        allocation.ttype,
+                        allocation.addr,
+                        existing.peer_addr,
+                    ) else {
+                        warn!(
+                            "no permission for {:?} for this allocation {:?}",
+                            existing.peer_addr, allocation.addr
+                        );
+                        return Ok(None);
+                    };
+                    if permission.expires_at < now {
+                        trace!(
+                            "permission for {} expired {:?} ago",
+                            transmit.from,
+                            now - permission.expires_at
+                        );
+                        return Ok(None);
+                    }
+                    Ok(Some(Transmit::new(
+                        channel.data().to_vec(),
+                        allocation.ttype,
+                        allocation.addr,
+                        existing.peer_addr,
+                    )))
                 }
             }
         }
@@ -2078,6 +2097,16 @@ mod tests {
         let reply =
             authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
         validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        channel_bind(&mut server, creds.clone(), &nonce, now);
+        channel_bind(&mut server, creds.clone(), &nonce, now);
+    }
+
+    fn channel_bind(
+        server: &mut TurnServer,
+        creds: LongTermCredentials,
+        nonce: &str,
+        now: Instant,
+    ) {
         let reply = server
             .recv(
                 client_transmit(
@@ -2089,17 +2118,6 @@ mod tests {
             .unwrap()
             .unwrap();
         validate_signed_success(&reply.data, CHANNEL_BIND, creds.clone());
-        let reply = server
-            .recv(
-                client_transmit(
-                    channel_bind_request(creds.clone(), &nonce),
-                    server.transport(),
-                ),
-                now,
-            )
-            .unwrap()
-            .unwrap();
-        validate_signed_success(&reply.data, CHANNEL_BIND, creds);
     }
 
     #[test]
@@ -2112,17 +2130,7 @@ mod tests {
         let reply =
             authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
         validate_authenticated_allocate_reply(&reply.data, creds.clone());
-        let reply = server
-            .recv(
-                client_transmit(
-                    channel_bind_request(creds.clone(), &nonce),
-                    server.transport(),
-                ),
-                now,
-            )
-            .unwrap()
-            .unwrap();
-        validate_signed_success(&reply.data, CHANNEL_BIND, creds.clone());
+        channel_bind(&mut server, creds.clone(), &nonce, now);
         let reply = server
             .recv(
                 client_transmit(
@@ -2267,6 +2275,25 @@ mod tests {
             .is_none());
     }
 
+    fn create_permission(
+        server: &mut TurnServer,
+        creds: LongTermCredentials,
+        nonce: &str,
+        now: Instant,
+    ) {
+        let reply = server
+            .recv(
+                client_transmit(
+                    create_permission_request(creds.clone(), nonce),
+                    server.transport(),
+                ),
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        validate_signed_success(&reply.data, CREATE_PERMISSION, creds);
+    }
+
     #[test]
     fn test_server_send_indication_with_permission() {
         let _init = crate::tests::test_init_log();
@@ -2277,17 +2304,7 @@ mod tests {
         let reply =
             authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
         validate_authenticated_allocate_reply(&reply.data, creds.clone());
-        let reply = server
-            .recv(
-                client_transmit(
-                    create_permission_request(creds.clone(), &nonce),
-                    server.transport(),
-                ),
-                now,
-            )
-            .unwrap()
-            .unwrap();
-        validate_signed_success(&reply.data, CREATE_PERMISSION, creds);
+        create_permission(&mut server, creds.clone(), &nonce, now);
         let reply = server
             .recv(
                 client_transmit(send_indication(peer_address()), server.transport()),
@@ -2367,6 +2384,115 @@ mod tests {
                     server.transport(),
                 ),
                 now,
+            )
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_server_unknown_source_address() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        assert!(server
+            .recv(client_transmit([4; 12], server.transport()), now)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_server_invalid_client_data() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply =
+            authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        assert!(server
+            .recv(client_transmit([4; 12], server.transport()), now)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_server_recv_no_channel() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply =
+            authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        assert!(server
+            .recv(
+                client_transmit(
+                    {
+                        let channel = ChannelData::new(0x4000, [7; 3].as_slice());
+                        let mut out = vec![0; 7];
+                        channel.write_into_unchecked(&mut out);
+                        out
+                    },
+                    server.transport()
+                ),
+                now
+            )
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_server_recv_channel_permission_expire() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply =
+            authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        channel_bind(&mut server, creds.clone(), &nonce, now);
+        let now = now + PERMISSION_DURATION + Duration::from_secs(1);
+        assert!(server
+            .recv(
+                client_transmit(
+                    {
+                        let channel = ChannelData::new(0x4000, [7; 3].as_slice());
+                        let mut out = vec![0; 7];
+                        channel.write_into_unchecked(&mut out);
+                        out
+                    },
+                    server.transport()
+                ),
+                now
+            )
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_server_peer_recv_permission_expire() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::now();
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply =
+            authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        create_permission(&mut server, creds.clone(), &nonce, now);
+        let now = now + PERMISSION_DURATION + Duration::from_secs(1);
+        assert!(server
+            .recv(
+                Transmit::new(
+                    [6; 7],
+                    TransportType::Udp,
+                    peer_address(),
+                    relayed_address()
+                ),
+                now
             )
             .unwrap()
             .is_none());
