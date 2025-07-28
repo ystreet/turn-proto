@@ -16,11 +16,11 @@ use std::time::Instant;
 use stun_proto::agent::Transmit;
 use turn_types::stun::{data::Data, TransportType};
 
-use crate::api::{
-    BindChannelError, CreatePermissionError, DelayedMessageOrChannelSend, DeleteError,
-    TransmitBuild, TurnClientApi, TurnEvent, TurnPeerData, TurnPollRet, TurnRecvRet,
+pub use crate::api::{
+    BindChannelError, CreatePermissionError, DeleteError, SendError, TurnEvent, TurnPollRet,
+    TurnRecvRet,
 };
-use crate::protocol::SendError;
+use crate::api::{DelayedMessageOrChannelSend, TransmitBuild, TurnClientApi, TurnPeerData};
 #[cfg(feature = "rustls")]
 use crate::rustls::TurnClientTls;
 use crate::tcp::TurnClientTcp;
@@ -39,9 +39,6 @@ pub enum TurnClient {
 }
 
 impl TurnClientApi for TurnClient {
-    /// The error produced when attemptingo to send to a peer.
-    type SendError = SendError;
-
     /// The transport of the connection to the TURN server.
     fn transport(&self) -> TransportType {
         match self {
@@ -158,7 +155,7 @@ impl TurnClientApi for TurnClient {
         to: SocketAddr,
         data: T,
         now: Instant,
-    ) -> Result<Option<TransmitBuild<DelayedMessageOrChannelSend<T>>>, Self::SendError> {
+    ) -> Result<Option<TransmitBuild<DelayedMessageOrChannelSend<T>>>, SendError> {
         match self {
             Self::Udp(udp) => udp.send_to(transport, to, data, now),
             Self::Tcp(tcp) => tcp.send_to(transport, to, data, now),

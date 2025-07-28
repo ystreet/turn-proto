@@ -34,9 +34,9 @@ use crate::api::{
 use crate::protocol::{TurnClientProtocol, TurnProtocolChannelRecv, TurnProtocolRecv};
 
 pub use crate::api::{
-    BindChannelError, CreatePermissionError, DeleteError, TurnEvent, TurnPollRet, TurnRecvRet,
+    BindChannelError, CreatePermissionError, DeleteError, SendError, TurnEvent, TurnPollRet,
+    TurnRecvRet,
 };
-pub use crate::protocol::SendError;
 use crate::tcp::{ensure_data_owned, IncomingTcp, StoredTcp, TurnTcpBuffer};
 
 /// A TURN client that communicates over TLS.
@@ -150,8 +150,6 @@ impl TurnClientTls {
 }
 
 impl TurnClientApi for TurnClientTls {
-    type SendError = SendError;
-
     fn transport(&self) -> TransportType {
         self.protocol.transport()
     }
@@ -294,7 +292,7 @@ impl TurnClientApi for TurnClientTls {
         to: SocketAddr,
         data: T,
         now: Instant,
-    ) -> Result<Option<TransmitBuild<DelayedMessageOrChannelSend<T>>>, Self::SendError> {
+    ) -> Result<Option<TransmitBuild<DelayedMessageOrChannelSend<T>>>, SendError> {
         let transmit = self.protocol.send_to(transport, to, data, now)?;
         let transmit = transmit.build();
         if let Err(e) = self.conn.writer().write_all(&transmit.data) {

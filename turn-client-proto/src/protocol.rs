@@ -31,7 +31,7 @@ use turn_types::stun::prelude::{MessageWrite, MessageWriteExt};
 use turn_types::TurnCredentials;
 
 use crate::api::{
-    BindChannelError, CreatePermissionError, DelayedMessageOrChannelSend, DeleteError,
+    BindChannelError, CreatePermissionError, DelayedMessageOrChannelSend, DeleteError, SendError,
     TransmitBuild, TurnEvent, TurnPollRet,
 };
 
@@ -1566,18 +1566,6 @@ impl TurnClientProtocol {
         warn!("user produced an error");
         self.state = AuthState::Error;
     }
-}
-
-/// Errors produced when attempting to send data to a peer.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum SendError {
-    /// There is no connection to the TURN server.
-    #[error("There is no connection to the TURN server")]
-    NoAllocation,
-    /// There is no permission installed for the requested peer.
-    #[error("There is no permission installed for the requested peer")]
-    NoPermission,
 }
 
 #[derive(Debug)]
