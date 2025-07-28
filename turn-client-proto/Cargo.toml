@@ -1,7 +1,7 @@
 [package]
 name = "turn-client-proto"
 description = "TURN protocol in a sans-IO fashion"
-version = "0.2.0"
+version.workspace = true
 authors = ["Matthew Waters <matthew@centricular.com>"]
 license = "MIT OR Apache-2.0"
 keywords = ["TURN"]
@@ -16,7 +16,7 @@ byteorder.workspace = true
 stun-proto.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-turn-types = { path = "../turn-types", version = "0.1.0" }
+turn-types = { path = "../turn-types", version = "0.3.0" }
 
 rustls = { workspace = true, optional = true }
 
