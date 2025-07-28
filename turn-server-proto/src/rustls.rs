@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustls::{ServerConfig, ServerConnection};
-use stun_proto::agent::{StunError, Transmit};
+use stun_proto::agent::Transmit;
 use tracing::{info, trace, warn};
 use turn_types::stun::TransportType;
 
@@ -72,7 +72,7 @@ impl TurnServerApi for RustlsTurnServer {
         &mut self,
         transmit: Transmit<T>,
         now: Instant,
-    ) -> Result<Option<Transmit<Vec<u8>>>, StunError> {
+    ) -> Option<Transmit<Vec<u8>>> {
         let listen_address = self.listen_address();
         if transmit.transport == TransportType::Tcp && transmit.to == listen_address {
             trace!("receiving TLS data: {:x?}", transmit.data.as_ref());
@@ -100,38 +100,35 @@ impl TurnServerApi for RustlsTurnServer {
                     Ok(io_state) => io_state,
                     Err(e) => {
                         warn!("Error processing incoming TLS: {e:?}");
-                        return Ok(None);
+                        return None;
                     }
                 },
                 Err(e) => {
                     warn!("Error receiving data: {e:?}");
-                    return Err(StunError::ProtocolViolation);
+                    return None;
                 }
             };
             if io_state.plaintext_bytes_to_read() == 0 {
-                return Ok(None);
+                return None;
             }
             let mut vec = vec![0; 2048];
             let n = match conn.reader().read(&mut vec) {
                 Ok(n) => n,
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::WouldBlock {
-                        return Ok(None);
+                        return None;
                     } else {
                         warn!("TLS error: {e:?}");
-                        return Err(StunError::ProtocolViolation);
+                        return None;
                     }
                 }
             };
             tracing::error!("io_state: {io_state:?}, n: {n}");
             vec.resize(n, 0);
-            let Some(transmit) = self.server.recv(
+            let transmit = self.server.recv(
                 Transmit::new(vec, transmit.transport, transmit.from, transmit.to),
                 now,
-            )?
-            else {
-                return Ok(None);
-            };
+            )?;
             if transmit.transport == TransportType::Tcp
                 && transmit.from == listen_address
                 && transmit.to == client_addr
@@ -139,16 +136,16 @@ impl TurnServerApi for RustlsTurnServer {
                 conn.writer().write_all(&transmit.data).unwrap();
                 let mut out = vec![];
                 conn.write_tls(&mut out).unwrap();
-                Ok(Some(Transmit::new(
+                Some(Transmit::new(
                     out,
                     TransportType::Tcp,
                     listen_address,
                     client_addr,
-                )))
+                ))
             } else {
-                Ok(Some(transmit))
+                Some(transmit)
             }
-        } else if let Some(transmit) = self.server.recv(transmit, now)? {
+        } else if let Some(transmit) = self.server.recv(transmit, now) {
             // incoming allocated address
             if transmit.transport == TransportType::Tcp && transmit.from == listen_address {
                 let Some((client_addr, conn)) = self
@@ -156,22 +153,22 @@ impl TurnServerApi for RustlsTurnServer {
                     .iter_mut()
                     .find(|(client_addr, _conn)| transmit.to == *client_addr)
                 else {
-                    return Ok(Some(transmit));
+                    return Some(transmit);
                 };
                 conn.writer().write_all(&transmit.data).unwrap();
                 let mut out = vec![];
                 conn.write_tls(&mut out).unwrap();
-                Ok(Some(Transmit::new(
+                Some(Transmit::new(
                     out,
                     TransportType::Tcp,
                     listen_address,
                     *client_addr,
-                )))
+                ))
             } else {
-                Ok(Some(transmit))
+                Some(transmit)
             }
         } else {
-            Ok(None)
+            None
         }
     }
 

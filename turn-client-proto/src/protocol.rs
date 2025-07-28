@@ -2730,7 +2730,6 @@ mod tests {
                 ),
                 now,
             )
-            .unwrap()
             .is_none());
     }
 }

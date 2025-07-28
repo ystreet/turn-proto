@@ -13,7 +13,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use rand::Rng;
-use stun_proto::agent::{StunAgent, StunError, Transmit};
+use stun_proto::agent::{StunAgent, Transmit};
 use stun_proto::types::attribute::{
     ErrorCode, Fingerprint, MessageIntegrity, Nonce, Realm, Username, XorMappedAddress,
 };
@@ -897,14 +897,13 @@ impl TurnServerApi for TurnServer {
             local_addr = %transmit.to,
             data_len = transmit.data.as_ref().len(),
         )
-        err,
         ret,
     )]
     fn recv<T: AsRef<[u8]>>(
         &mut self,
         transmit: Transmit<T>,
         now: Instant,
-    ) -> Result<Option<Transmit<Vec<u8>>>, StunError> {
+    ) -> Option<Transmit<Vec<u8>>> {
         if let Some((client, allocation)) =
             self.allocation_from_public_5tuple(transmit.transport, transmit.to, transmit.from)
         {
@@ -921,7 +920,7 @@ impl TurnServerApi for TurnServer {
                     permission.addr,
                     now - permission.expires_at
                 );
-                return Ok(None);
+                return None;
             }
 
             if let Some(existing) =
@@ -936,12 +935,12 @@ impl TurnServerApi for TurnServer {
                 data[2..4].copy_from_slice(&(transmit.data.as_ref().len() as u16).to_be_bytes());
                 // XXX: try to avoid copy?
                 data.extend_from_slice(transmit.data.as_ref());
-                Ok(Some(Transmit::new(
+                Some(Transmit::new(
                     data.into_boxed_slice().into(),
                     client.transport,
                     client.local_addr,
                     client.remote_addr,
-                )))
+                ))
             } else {
                 // no channel with that id
                 debug!(
@@ -961,12 +960,12 @@ impl TurnServerApi for TurnServer {
                 // XXX: try to avoid copy?
                 let msg_data = builder.finish();
 
-                Ok(Some(Transmit::new(
+                Some(Transmit::new(
                     msg_data.into_boxed_slice().into(),
                     client.transport,
                     client.local_addr,
                     client.remote_addr,
-                )))
+                ))
             }
         } else {
             // TODO: TCP buffering requirements
@@ -982,15 +981,14 @@ impl TurnServerApi for TurnServer {
                     ) {
                         Err(builder) => {
                             let data = builder.finish();
-                            return Ok(Some(Transmit::new(
+                            return Some(Transmit::new(
                                 data,
                                 transmit.transport,
                                 transmit.to,
                                 transmit.from,
-                            )));
+                            ));
                         }
-                        Ok(Some(transmit)) => Ok(Some(transmit)),
-                        Ok(None) => Ok(None),
+                        Ok(transmit) => transmit,
                     }
                 }
                 Err(_) => {
@@ -1004,7 +1002,7 @@ impl TurnServerApi for TurnServer {
                             transmit.from,
                             transmit.to
                         );
-                        return Ok(None);
+                        return None;
                     };
                     trace!(
                         "received {} bytes from {:?}",
@@ -1012,7 +1010,7 @@ impl TurnServerApi for TurnServer {
                         transmit.from
                     );
                     let Ok(channel) = ChannelData::parse(transmit.data.as_ref()) else {
-                        return Ok(None);
+                        return None;
                     };
                     trace!(
                         "parsed channel data with id {} and data length {}",
@@ -1032,7 +1030,7 @@ impl TurnServerApi for TurnServer {
                             client.remote_addr
                         );
                         // no channel with that id
-                        return Ok(None);
+                        return None;
                     };
                     if existing.expires_at < now {
                         trace!(
@@ -1040,7 +1038,7 @@ impl TurnServerApi for TurnServer {
                             transmit.from,
                             now - existing.expires_at
                         );
-                        return Ok(None);
+                        return None;
                     }
 
                     // A packet from the client needs to be sent to the peer referenced by the
@@ -1054,7 +1052,7 @@ impl TurnServerApi for TurnServer {
                             "no permission for {:?} for this allocation {:?}",
                             existing.peer_addr, allocation.addr
                         );
-                        return Ok(None);
+                        return None;
                     };
                     if permission.expires_at < now {
                         trace!(
@@ -1062,14 +1060,14 @@ impl TurnServerApi for TurnServer {
                             transmit.from,
                             now - permission.expires_at
                         );
-                        return Ok(None);
+                        return None;
                     }
-                    Ok(Some(Transmit::new(
+                    Some(Transmit::new(
                         channel.data().to_vec(),
                         allocation.ttype,
                         allocation.addr,
                         existing.peer_addr,
-                    )))
+                    ))
                 }
             }
         }
@@ -1347,7 +1345,6 @@ mod tests {
                 ),
                 now,
             )
-            .unwrap()
             .unwrap();
         let msg = Message::from_bytes(&reply.data).unwrap();
         assert!(msg.has_method(BINDING));
@@ -1406,7 +1403,6 @@ mod tests {
                 client_transmit(initial_allocate_msg(), server.transport()),
                 now,
             )
-            .unwrap()
             .unwrap();
         validate_initial_allocate_reply(&reply.data);
     }
@@ -1421,7 +1417,6 @@ mod tests {
                 client_transmit(initial_allocate_msg(), server.transport()),
                 now,
             )
-            .unwrap()
             .unwrap();
         let (realm, nonce) = validate_initial_allocate_reply(&reply.data);
         let reply = server
@@ -1429,7 +1424,6 @@ mod tests {
                 client_transmit(initial_allocate_msg(), server.transport()),
                 now,
             )
-            .unwrap()
             .unwrap();
         let (realm2, nonce2) = validate_initial_allocate_reply(&reply.data);
         assert_eq!(nonce, nonce2);
@@ -1442,7 +1436,6 @@ mod tests {
                 client_transmit(initial_allocate_msg(), server.transport()),
                 now,
             )
-            .unwrap()
             .unwrap();
         validate_initial_allocate_reply(&reply.data)
     }
@@ -1487,7 +1480,6 @@ mod tests {
                 .unwrap();
             let reply = server
                 .recv(client_transmit(allocate.finish(), server.transport()), now)
-                .unwrap()
                 .unwrap();
             if attr != RequestedTransport::TYPE {
                 validate_unsigned_error_reply(&reply.data, ALLOCATE, ErrorCode::BAD_REQUEST);
@@ -1516,30 +1508,27 @@ mod tests {
         transport: u8,
         now: Instant,
     ) -> Transmit<Vec<u8>> {
-        let ret = server
-            .recv(
-                client_transmit(
-                    {
-                        let mut allocate =
-                            Message::builder_request(ALLOCATE, MessageWriteVec::new());
-                        add_authenticated_request_required_attributes(
-                            &mut allocate,
-                            credentials.clone(),
-                            nonce,
-                        );
-                        allocate
-                            .add_attribute(&RequestedTransport::new(transport))
-                            .unwrap();
-                        allocate
-                            .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
-                            .unwrap();
-                        allocate.finish()
-                    },
-                    server.transport(),
-                ),
-                now,
-            )
-            .unwrap();
+        let ret = server.recv(
+            client_transmit(
+                {
+                    let mut allocate = Message::builder_request(ALLOCATE, MessageWriteVec::new());
+                    add_authenticated_request_required_attributes(
+                        &mut allocate,
+                        credentials.clone(),
+                        nonce,
+                    );
+                    allocate
+                        .add_attribute(&RequestedTransport::new(transport))
+                        .unwrap();
+                    allocate
+                        .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                        .unwrap();
+                    allocate.finish()
+                },
+                server.transport(),
+            ),
+            now,
+        );
         if let Some(transmit) = ret {
             return transmit;
         }
@@ -1670,7 +1659,6 @@ mod tests {
                 client_transmit(create_permission_request(creds, &nonce), server.transport()),
                 now,
             )
-            .unwrap()
             .unwrap();
         validate_unsigned_error_reply(
             &reply.data,
@@ -1727,7 +1715,6 @@ mod tests {
                 ),
                 now,
             )
-            .unwrap()
             .unwrap();
         validate_signed_error_reply(
             &reply.data,
@@ -1773,7 +1760,6 @@ mod tests {
                 ),
                 now,
             )
-            .unwrap()
             .unwrap();
         validate_signed_error_reply(
             &reply.data,
@@ -1801,7 +1787,6 @@ mod tests {
                 client_transmit(create_permission_request(creds, &nonce), server.transport()),
                 now,
             )
-            .unwrap()
             .unwrap();
         validate_unsigned_error_reply(&reply.data, CREATE_PERMISSION, ErrorCode::WRONG_CREDENTIALS);
     }
@@ -1844,7 +1829,6 @@ mod tests {
                 ),
                 now,
             )
-            .unwrap()
             .unwrap();
         validate_unsigned_error_reply(&reply.data, CREATE_PERMISSION, ErrorCode::BAD_REQUEST);
     }
@@ -1877,7 +1861,6 @@ mod tests {
                 client_transmit(channel_bind_request(creds, &nonce), server.transport()),
                 now,
             )
-            .unwrap()
             .unwrap();
         validate_unsigned_error_reply(&reply.data, CHANNEL_BIND, ErrorCode::ALLOCATION_MISMATCH);
     }
@@ -1918,7 +1901,6 @@ mod tests {
                 ),
                 now,
             )
-            .unwrap()
             .unwrap();
         validate_signed_error_reply(
             &reply.data,
@@ -1954,7 +1936,6 @@ mod tests {
                 ),
                 now,
             )
-            .unwrap()
             .unwrap();
         validate_signed_error_reply(
             &reply.data,
@@ -2001,7 +1982,6 @@ mod tests {
                 ),
                 now,
             )
-            .unwrap()
             .unwrap();
         validate_signed_error_reply(
             &reply.data,
@@ -2048,7 +2028,6 @@ mod tests {
                 ),
                 now,
             )
-            .unwrap()
             .unwrap();
         validate_signed_error_reply(
             &reply.data,
@@ -2077,7 +2056,6 @@ mod tests {
                 ),
                 now,
             )
-            .unwrap()
             .unwrap();
         validate_signed_error_reply(
             &reply.data,
@@ -2110,12 +2088,11 @@ mod tests {
         let reply = server
             .recv(
                 client_transmit(
-                    channel_bind_request(creds.clone(), &nonce),
+                    channel_bind_request(creds.clone(), nonce),
                     server.transport(),
                 ),
                 now,
             )
-            .unwrap()
             .unwrap();
         validate_signed_success(&reply.data, CHANNEL_BIND, creds.clone());
     }
@@ -2158,7 +2135,6 @@ mod tests {
                 ),
                 now,
             )
-            .unwrap()
             .unwrap();
         validate_signed_error_reply(&reply.data, CHANNEL_BIND, ErrorCode::BAD_REQUEST, creds);
     }
@@ -2185,7 +2161,6 @@ mod tests {
                 client_transmit(refresh_request(creds, &nonce), server.transport()),
                 now,
             )
-            .unwrap()
             .unwrap();
         validate_unsigned_error_reply(&reply.data, REFRESH, ErrorCode::ALLOCATION_MISMATCH);
     }
@@ -2212,7 +2187,6 @@ mod tests {
                 client_transmit(send_indication(peer_address()), server.transport()),
                 now,
             )
-            .unwrap()
             .is_none());
     }
 
@@ -2232,7 +2206,6 @@ mod tests {
                 client_transmit(send_indication(peer_address()), server.transport()),
                 now,
             )
-            .unwrap()
             .is_none());
     }
 
@@ -2252,7 +2225,6 @@ mod tests {
                 client_transmit(send_indication(ipv6_peer_address()), server.transport()),
                 now,
             )
-            .unwrap()
             .is_none());
     }
 
@@ -2271,7 +2243,6 @@ mod tests {
                 client_transmit(send_indication(peer_address()), server.transport()),
                 now,
             )
-            .unwrap()
             .is_none());
     }
 
@@ -2289,7 +2260,6 @@ mod tests {
                 ),
                 now,
             )
-            .unwrap()
             .unwrap();
         validate_signed_success(&reply.data, CREATE_PERMISSION, creds);
     }
@@ -2310,7 +2280,6 @@ mod tests {
                 client_transmit(send_indication(peer_address()), server.transport()),
                 now,
             )
-            .unwrap()
             .unwrap();
         assert_eq!(reply.transport, TransportType::Udp);
         assert_eq!(reply.from, relayed_address());
@@ -2347,7 +2316,6 @@ mod tests {
                 ),
                 now,
             )
-            .unwrap()
             .unwrap();
         validate_signed_error_reply(
             &reply.data,
@@ -2385,7 +2353,6 @@ mod tests {
                 ),
                 now,
             )
-            .unwrap()
             .is_none());
     }
 
@@ -2396,7 +2363,6 @@ mod tests {
         let mut server = new_server(TransportType::Udp);
         assert!(server
             .recv(client_transmit([4; 12], server.transport()), now)
-            .unwrap()
             .is_none());
     }
 
@@ -2412,7 +2378,6 @@ mod tests {
         validate_authenticated_allocate_reply(&reply.data, creds.clone());
         assert!(server
             .recv(client_transmit([4; 12], server.transport()), now)
-            .unwrap()
             .is_none());
     }
 
@@ -2439,7 +2404,6 @@ mod tests {
                 ),
                 now
             )
-            .unwrap()
             .is_none());
     }
 
@@ -2468,7 +2432,6 @@ mod tests {
                 ),
                 now
             )
-            .unwrap()
             .is_none());
     }
 
@@ -2494,7 +2457,6 @@ mod tests {
                 ),
                 now
             )
-            .unwrap()
             .is_none());
     }
 }

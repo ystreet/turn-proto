@@ -706,7 +706,7 @@ pub(crate) mod tests {
             assert!(!msg.has_attribute(MessageIntegrity::TYPE));
             assert!(!msg.has_attribute(MessageIntegritySha256::TYPE));
             // error reply
-            let transmit = self.server.recv(transmit, now).unwrap().unwrap();
+            let transmit = self.server.recv(transmit, now).unwrap();
             let msg = Message::from_bytes(&transmit.data).unwrap();
             assert!(msg.has_method(ALLOCATE));
             assert!(msg.has_class(stun_proto::types::message::MessageClass::Error));
@@ -729,9 +729,7 @@ pub(crate) mod tests {
             assert!(msg.has_attribute(Nonce::TYPE));
             assert!(msg.has_attribute(Username::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
-            let Ok(None) = self.server.recv(transmit, now) else {
-                unreachable!();
-            };
+            assert!(self.server.recv(transmit, now).is_none());
             let TurnServerPollRet::AllocateSocketUdp {
                 transport,
                 local_addr: alloc_local_addr,
@@ -787,9 +785,7 @@ pub(crate) mod tests {
             assert!(msg.has_attribute(Username::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
             // ok reply
-            let Ok(Some(transmit)) = self.server.recv(transmit, now) else {
-                unreachable!();
-            };
+            let transmit = self.server.recv(transmit, now).unwrap();
             let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
                 self.refresh(now);
                 return;
@@ -830,9 +826,7 @@ pub(crate) mod tests {
             assert!(msg.has_attribute(Username::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
             // ok reply
-            let Ok(Some(transmit)) = self.server.recv(transmit, now) else {
-                unreachable!();
-            };
+            let transmit = self.server.recv(transmit, now).unwrap();
             let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
                 let transmit = self.client.poll_transmit(now).unwrap();
                 self.handle_delete_allocation(transmit, now);
@@ -872,9 +866,7 @@ pub(crate) mod tests {
             assert!(msg.has_class(stun_proto::types::message::MessageClass::Request));
             assert!(msg.has_attribute(XorPeerAddress::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
-            let Ok(Some(transmit)) = self.server.recv(transmit, now) else {
-                unreachable!();
-            };
+            let transmit = self.server.recv(transmit, now).unwrap();
             let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
                 let transmit = self.client.poll_transmit(now).unwrap();
                 self.handle_create_permission(transmit, now);
@@ -931,9 +923,7 @@ pub(crate) mod tests {
             assert!(msg.has_class(stun_proto::types::message::MessageClass::Request));
             assert!(msg.has_attribute(XorPeerAddress::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
-            let Ok(Some(transmit)) = self.server.recv(transmit, now) else {
-                unreachable!();
-            };
+            let transmit = self.server.recv(transmit, now).unwrap();
             let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
                 let transmit = self.client.poll_transmit(now).unwrap();
                 self.handle_create_permission(transmit, now);
@@ -964,16 +954,14 @@ pub(crate) mod tests {
             assert_eq!(transmit.transport, self.client.transport());
             assert_eq!(transmit.from, self.client.local_addr());
             assert_eq!(transmit.to, self.server.listen_address());
-            let Ok(Some(transmit)) = self.server.recv(transmit, now) else {
-                unreachable!();
-            };
+            let transmit = self.server.recv(transmit, now).unwrap();
             assert_eq!(transmit.transport, TransportType::Udp);
             assert_eq!(transmit.from, self.turn_alloc_addr);
             assert_eq!(transmit.to, self.peer_addr);
 
             // peer to client
             let sent_data = [5; 12];
-            let Some(transmit) = self
+            let transmit = self
                 .server
                 .recv(
                     Transmit::new(
@@ -984,10 +972,7 @@ pub(crate) mod tests {
                     ),
                     now,
                 )
-                .unwrap()
-            else {
-                unreachable!();
-            };
+                .unwrap();
             assert_eq!(transmit.transport, self.client.transport());
             assert_eq!(transmit.from, self.server.listen_address());
             assert_eq!(transmit.to, self.client.local_addr());
@@ -1029,21 +1014,17 @@ pub(crate) mod tests {
             assert_eq!(transmit.from, self.client.local_addr());
             assert_eq!(transmit.to, self.server.listen_address());
             let transmit = transmit_send_build(transmit);
-            let Some(transmit) = self
+            let transmit = self
                 .server
                 .recv(transmit, now)
-                .ok()
-                .flatten()
                 .or_else(|| self.server.poll_transmit(now))
-            else {
-                unreachable!();
-            };
+                .unwrap();
             assert_eq!(transmit.transport, TransportType::Udp);
             assert_eq!(transmit.from, self.turn_alloc_addr);
             assert_eq!(transmit.to, self.peer_addr);
 
             // peer to client
-            let Some(transmit) = self
+            let transmit = self
                 .server
                 .recv(
                     Transmit::new(
@@ -1054,10 +1035,7 @@ pub(crate) mod tests {
                     ),
                     now,
                 )
-                .unwrap()
-            else {
-                unreachable!();
-            };
+                .unwrap();
             assert_eq!(transmit.transport, self.client.transport());
             assert_eq!(transmit.from, self.server.listen_address());
             assert_eq!(transmit.to, self.client.local_addr());
@@ -1121,9 +1099,7 @@ pub(crate) mod tests {
             .unwrap();
         let transmit = test.client.poll_transmit(now).unwrap();
         let now = now + Duration::from_secs(3000);
-        let Ok(Some(transmit)) = test.server.recv(transmit, now) else {
-            unreachable!();
-        };
+        let transmit = test.server.recv(transmit, now).unwrap();
         let msg = Message::from_bytes(&transmit.data).unwrap();
         assert!(msg.has_method(CREATE_PERMISSION));
         assert!(msg.has_class(stun_proto::types::message::MessageClass::Error));
@@ -1285,10 +1261,7 @@ pub(crate) mod tests {
             let transmit = test.client.poll_transmit(now).unwrap();
             let msg = Message::from_bytes(&transmit.data).unwrap();
             assert_eq!(msg.method(), CREATE_PERMISSION);
-            let Ok(Some(transmit)) = test.server.recv(transmit, now) else {
-                unreachable!();
-            };
-            transmit
+            test.server.recv(transmit, now).unwrap()
         };
 
         let transmit = create_permission(test, now);
@@ -1411,10 +1384,7 @@ pub(crate) mod tests {
                     let transmit = test.client.poll_transmit(now).unwrap();
                     let msg = Message::from_bytes(&transmit.data).unwrap();
                     assert_eq!(msg.method(), CREATE_PERMISSION);
-                    let Ok(Some(transmit)) = test.server.recv(transmit, now) else {
-                        unreachable!();
-                    };
-                    transmit
+                    test.server.recv(transmit, now).unwrap()
                 };
 
             let transmit = create_permission(test, now);
@@ -1444,9 +1414,7 @@ pub(crate) mod tests {
         let msg = Message::from_bytes(&transmit.data).unwrap();
         println!("message {msg}");
         assert_eq!(msg.method(), CHANNEL_BIND);
-        let Ok(Some(transmit)) = test.server.recv(transmit, now) else {
-            unreachable!();
-        };
+        let transmit = test.server.recv(transmit, now).unwrap();
         assert!(matches!(
             test.client.recv(transmit, expiry),
             TurnRecvRet::Handled

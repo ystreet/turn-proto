@@ -497,12 +497,11 @@ mod tests {
             unreachable!();
         };
         let transmit = test.client.poll_transmit(now).unwrap();
-        let msg_reply = test.server.recv(transmit, now).unwrap().unwrap();
+        let msg_reply = test.server.recv(transmit, now).unwrap();
         let peer_data = [8; 9];
         let peer_transmit = test
             .server
             .recv(peer_transmit(&test, peer_data.as_slice()), now)
-            .unwrap()
             .unwrap();
         let TurnRecvRet::PeerData(peer) = test
             .client
@@ -524,12 +523,11 @@ mod tests {
             unreachable!();
         };
         let transmit = test.client.poll_transmit(now).unwrap();
-        let msg_reply = test.server.recv(transmit, now).unwrap().unwrap();
+        let msg_reply = test.server.recv(transmit, now).unwrap();
         let peer_data = [8; 9];
         let peer_transmit = test
             .server
             .recv(peer_transmit(&test, peer_data.as_slice()), now)
-            .unwrap()
             .unwrap();
         let TurnRecvRet::PeerData(peer) = test
             .client

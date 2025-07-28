@@ -565,7 +565,7 @@ mod tests {
             if let Some(transmit) = test.client.poll_transmit(now) {
                 handled = true;
                 trace!("have transmit: {transmit:?}");
-                if let Some(transmit) = test.server.recv(transmit, now).unwrap() {
+                if let Some(transmit) = test.server.recv(transmit, now) {
                     trace!("have transmit: {transmit:?}");
                     test.client.recv(transmit, now);
                 }
@@ -655,16 +655,14 @@ mod tests {
         assert_eq!(transmit.transport, test.client.transport());
         assert_eq!(transmit.from, test.client.local_addr());
         assert_eq!(transmit.to, test.server.listen_address());
-        let Ok(Some(transmit)) = test.server.recv(transmit, now) else {
-            unreachable!();
-        };
+        let transmit = test.server.recv(transmit, now).unwrap();
         assert_eq!(transmit.transport, TransportType::Udp);
         assert_eq!(transmit.from, test.turn_alloc_addr);
         assert_eq!(transmit.to, test.peer_addr);
 
         // peer to client
         let sent_data = [5; 12];
-        let Some(transmit) = test
+        let transmit = test
             .server
             .recv(
                 Transmit::new(
@@ -675,10 +673,7 @@ mod tests {
                 ),
                 now,
             )
-            .unwrap()
-        else {
-            unreachable!();
-        };
+            .unwrap();
         assert_eq!(transmit.transport, test.client.transport());
         assert_eq!(transmit.from, test.server.listen_address());
         assert_eq!(transmit.to, test.client.local_addr());
