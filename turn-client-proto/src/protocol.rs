@@ -21,7 +21,7 @@ use stun_proto::types::message::{
     LongTermCredentials, Message, MessageClass, MessageIntegrityCredentials, TransactionId,
 };
 use stun_proto::types::TransportType;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 use turn_types::attribute::{ChannelNumber, Lifetime, XorPeerAddress, XorRelayedAddress};
 use turn_types::attribute::{Data as AData, DontFragment, RequestedTransport};
 use turn_types::channel::ChannelData;
@@ -502,7 +502,6 @@ impl TurnClientProtocol {
                     }
                 }
                 CHANNEL_BIND => {
-                    error!("allocations: {allocations:?}");
                     if let Some((alloc_idx, channel_idx)) =
                         allocations
                             .iter()
@@ -522,7 +521,7 @@ impl TurnClientProtocol {
                             .swap_remove_back(channel_idx)
                             .unwrap();
                         if msg.has_class(stun_proto::types::message::MessageClass::Error) {
-                            error!("Received error response to channel bind request");
+                            warn!("Received error response to channel bind request");
                             pending_events.push_front(TurnEvent::ChannelCreateFailed(
                                 allocations[alloc_idx].transport,
                                 channel.peer_addr,
@@ -565,7 +564,7 @@ impl TurnClientProtocol {
                         let channel = &mut allocations[alloc_idx].channels[existing_idx];
                         channel.pending_refresh = None;
                         if msg.has_class(stun_proto::types::message::MessageClass::Error) {
-                            error!("Received error response to channel bind request");
+                            warn!("Received error response to channel bind request");
                             pending_events.push_front(TurnEvent::ChannelCreateFailed(
                                 transport,
                                 channel.peer_addr,

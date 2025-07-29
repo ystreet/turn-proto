@@ -740,7 +740,14 @@ impl TurnServer {
         Ok(())*/
     }
 
-    #[tracing::instrument(name = "turn_server_handle_stun", skip(self, msg, from, to, now))]
+    #[tracing::instrument(
+        name = "turn_server_handle_stun",
+        skip(self, msg, ttype, from, to, now),
+        fields(
+            msg.transaction = %msg.transaction_id(),
+            msg.method = %msg.method(),
+        )
+    )]
     fn handle_stun<'a>(
         &mut self,
         msg: &'a Message<'a>,
@@ -792,7 +799,6 @@ impl TurnServer {
         } else {
             Ok(None)
         };
-        debug!("result: {ret:?}");
         ret
     }
 
@@ -890,20 +896,20 @@ impl TurnServerApi for TurnServer {
 
     #[tracing::instrument(
         name = "turn_server_recv",
-        skip(self, transmit),
+        skip(self, transmit, now),
         fields(
             transport = %transmit.transport,
             remote_addr = %transmit.from,
             local_addr = %transmit.to,
             data_len = transmit.data.as_ref().len(),
         )
-        ret,
     )]
     fn recv<T: AsRef<[u8]>>(
         &mut self,
         transmit: Transmit<T>,
         now: Instant,
     ) -> Option<Transmit<Vec<u8>>> {
+        trace!("executing at {now:?}");
         if let Some((client, allocation)) =
             self.allocation_from_public_5tuple(transmit.transport, transmit.to, transmit.from)
         {
@@ -978,15 +984,12 @@ impl TurnServerApi for TurnServer {
                         transmit.to,
                         now,
                     ) {
-                        Err(builder) => {
-                            let data = builder.finish();
-                            return Some(Transmit::new(
-                                data,
-                                transmit.transport,
-                                transmit.to,
-                                transmit.from,
-                            ));
-                        }
+                        Err(builder) => Some(Transmit::new(
+                            builder.finish(),
+                            transmit.transport,
+                            transmit.to,
+                            transmit.from,
+                        )),
                         Ok(transmit) => transmit,
                     }
                 }
@@ -1072,7 +1075,7 @@ impl TurnServerApi for TurnServer {
         }
     }
 
-    #[tracing::instrument(name = "turn_server_poll", skip(self), ret)]
+    #[tracing::instrument(level = "debug", name = "turn_server_poll", skip(self), ret)]
     fn poll(&mut self, now: Instant) -> TurnServerPollRet {
         for pending in self.pending_allocates.iter_mut() {
             if pending.asked {
@@ -1244,7 +1247,7 @@ impl Allocation {
             .find(|channel| transport == channel.peer_transport && remote_addr == channel.peer_addr)
     }
 
-    #[tracing::instrument(ret, level = "trace", skip(self, now), fields(ttype = %self.ttype, relayed = %self.addr))]
+    #[tracing::instrument(level = "trace", skip(self, now), fields(ttype = %self.ttype, relayed = %self.addr))]
     fn have_permission(&self, addr: IpAddr, now: Instant) -> Option<&Permission> {
         let Some(permission) = self
             .permissions
@@ -1259,6 +1262,7 @@ impl Allocation {
             trace!("permission has expired");
             return None;
         }
+        debug!("have permission");
         Some(permission)
     }
 }
