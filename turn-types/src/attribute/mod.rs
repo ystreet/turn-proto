@@ -49,4 +49,6 @@ pub(super) fn attributes_init() {
     Lifetime::TYPE.add_name("Lifetime");
     stun_types::attribute_display!(ReservationToken);
     ReservationToken::TYPE.add_name("ReservationToken");
+    stun_types::attribute_display!(RequestedTransport);
+    RequestedTransport::TYPE.add_name("RequestedTransport");
 }
