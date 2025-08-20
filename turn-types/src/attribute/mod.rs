@@ -14,7 +14,7 @@
 //! [RFC5766]: https://tools.ietf.org/html/rfc5766
 
 mod address;
-pub use address::{XorPeerAddress, XorRelayedAddress};
+pub use address::{AddressFamily, RequestedAddressFamily, XorPeerAddress, XorRelayedAddress};
 mod channel;
 pub use channel::ChannelNumber;
 mod data;
@@ -51,4 +51,6 @@ pub(super) fn attributes_init() {
     ReservationToken::TYPE.add_name("ReservationToken");
     stun_types::attribute_display!(RequestedTransport);
     RequestedTransport::TYPE.add_name("RequestedTransport");
+    stun_types::attribute_display!(RequestedAddressFamily);
+    RequestedAddressFamily::TYPE.add_name("RequestedAddressFamily");
 }
