@@ -13,6 +13,8 @@ use stun_types::{
     message::{StunParseError, TransactionId},
 };
 
+pub use stun_types::attribute::AddressFamily;
+
 /// The [`XorPeerAddress`] [`Attribute`].
 ///
 /// Typically used for signalling the address of the peer that a TURN server should send data
@@ -203,8 +205,114 @@ impl std::fmt::Display for XorRelayedAddress {
     }
 }
 
+/// The [`RequestedAddressFamily`] [`Attribute`].
+///
+/// Used to request an allocation with a specific address family.
+///
+/// Reference: [RFC6156 Section 4.1.1](https://datatracker.ietf.org/doc/html/rfc6156#section-4.1.1).
+#[derive(Debug, Clone)]
+pub struct RequestedAddressFamily {
+    family: AddressFamily,
+}
+
+impl AttributeStaticType for RequestedAddressFamily {
+    const TYPE: AttributeType = AttributeType::new(0x0017);
+}
+
+impl Attribute for RequestedAddressFamily {
+    fn get_type(&self) -> AttributeType {
+        Self::TYPE
+    }
+
+    fn length(&self) -> u16 {
+        4
+    }
+}
+
+impl AttributeWrite for RequestedAddressFamily {
+    fn to_raw(&self) -> RawAttribute<'_> {
+        let mut data = [0; 4];
+        data[0] = match self.family {
+            AddressFamily::IPV4 => 1,
+            AddressFamily::IPV6 => 2,
+        };
+        RawAttribute::new(self.get_type(), &data).into_owned()
+    }
+    fn write_into_unchecked(&self, dest: &mut [u8]) {
+        self.write_header_unchecked(dest);
+        dest[4] = match self.family {
+            AddressFamily::IPV4 => 1,
+            AddressFamily::IPV6 => 2,
+        };
+        dest[5] = 0;
+        dest[6] = 0;
+        dest[7] = 0;
+    }
+}
+
+impl AttributeFromRaw<'_> for RequestedAddressFamily {
+    fn from_raw_ref(raw: &RawAttribute) -> Result<Self, StunParseError>
+    where
+        Self: Sized,
+    {
+        Self::try_from(raw)
+    }
+}
+
+impl TryFrom<&RawAttribute<'_>> for RequestedAddressFamily {
+    type Error = StunParseError;
+    fn try_from(raw: &RawAttribute) -> Result<Self, Self::Error> {
+        if raw.get_type() != Self::TYPE {
+            return Err(StunParseError::WrongAttributeImplementation);
+        }
+        raw.check_type_and_len(Self::TYPE, 4..=4)?;
+        let family = match raw.value[0] {
+            1 => AddressFamily::IPV4,
+            2 => AddressFamily::IPV6,
+            _ => return Err(StunParseError::InvalidAttributeData),
+        };
+        Ok(Self { family })
+    }
+}
+
+impl RequestedAddressFamily {
+    /// Create a new [`RequestedAddressFamily`] [`Attribute`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use turn_types::attribute::*;
+    /// let requested = RequestedAddressFamily::new(AddressFamily::IPV4);
+    /// assert_eq!(requested.family(), AddressFamily::IPV4);
+    /// ```
+    pub fn new(family: AddressFamily) -> Self {
+        Self { family }
+    }
+
+    /// Retrieve the requested address family stored in a [`RequestedAddressFamily`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use turn_types::attribute::*;
+    /// let requested = RequestedAddressFamily::new(AddressFamily::IPV6);
+    /// assert_eq!(requested.family(), AddressFamily::IPV6);
+    /// ```
+    pub fn family(&self) -> AddressFamily {
+        self.family
+    }
+}
+
+impl std::fmt::Display for RequestedAddressFamily {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.get_type(), self.family)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::attribute::RequestedTransport;
+
     use super::*;
     use byteorder::{BigEndian, ByteOrder};
 
@@ -288,5 +396,50 @@ mod tests {
                 Err(StunParseError::WrongAttributeImplementation)
             ));
         }
+    }
+
+    #[test]
+    fn requested_address_family() {
+        let _log = crate::tests::test_init_log();
+        for family in [AddressFamily::IPV4, AddressFamily::IPV6] {
+            let mapped = RequestedAddressFamily::new(family);
+            assert_eq!(mapped.get_type(), RequestedAddressFamily::TYPE);
+            assert_eq!(mapped.family(), family);
+            let raw: RawAttribute = mapped.to_raw();
+            println!("{}", raw);
+            assert_eq!(raw.get_type(), RequestedAddressFamily::TYPE);
+            let mapped2 = RequestedAddressFamily::try_from(&raw).unwrap();
+            assert_eq!(mapped2.get_type(), RequestedAddressFamily::TYPE);
+            assert_eq!(mapped2.family(), family);
+        }
+        let mapped = RequestedAddressFamily::new(AddressFamily::IPV4);
+        let raw: RawAttribute = mapped.to_raw();
+        // truncate by one byte
+        let mut data: Vec<_> = raw.clone().into();
+        let len = data.len();
+        BigEndian::write_u16(&mut data[2..4], len as u16 - 4 - 1);
+        assert!(matches!(
+            RequestedAddressFamily::try_from(
+                &RawAttribute::from_bytes(data[..len - 1].as_ref()).unwrap()
+            ),
+            Err(StunParseError::Truncated {
+                expected: _,
+                actual: _,
+            })
+        ));
+        // provide incorrectly typed data
+        let mut data: Vec<_> = raw.clone().into();
+        BigEndian::write_u16(&mut data[0..2], 0);
+        assert!(matches!(
+            RequestedTransport::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
+            Err(StunParseError::WrongAttributeImplementation)
+        ));
+        // provide invalid address family
+        let mut data: Vec<_> = raw.clone().into();
+        data[4] = 3;
+        assert!(matches!(
+            RequestedAddressFamily::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
+            Err(StunParseError::InvalidAttributeData)
+        ));
     }
 }
