@@ -311,8 +311,6 @@ impl std::fmt::Display for RequestedAddressFamily {
 
 #[cfg(test)]
 mod tests {
-    use crate::attribute::RequestedTransport;
-
     use super::*;
     use byteorder::{BigEndian, ByteOrder};
 
@@ -431,7 +429,7 @@ mod tests {
         let mut data: Vec<_> = raw.clone().into();
         BigEndian::write_u16(&mut data[0..2], 0);
         assert!(matches!(
-            RequestedTransport::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
+            RequestedAddressFamily::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
             Err(StunParseError::WrongAttributeImplementation)
         ));
         // provide invalid address family
