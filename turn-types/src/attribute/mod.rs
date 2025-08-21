@@ -14,7 +14,10 @@
 //! [RFC5766]: https://tools.ietf.org/html/rfc5766
 
 mod address;
-pub use address::{AddressFamily, RequestedAddressFamily, XorPeerAddress, XorRelayedAddress};
+pub use address::{
+    AdditionalAddressFamily, AddressFamily, RequestedAddressFamily, XorPeerAddress,
+    XorRelayedAddress,
+};
 mod channel;
 pub use channel::ChannelNumber;
 mod connection;
@@ -57,4 +60,6 @@ pub(super) fn attributes_init() {
     RequestedAddressFamily::TYPE.add_name("RequestedAddressFamily");
     stun_types::attribute_display!(ConnectionId);
     ConnectionId::TYPE.add_name("ConnectionId");
+    stun_types::attribute_display!(AdditionalAddressFamily);
+    AdditionalAddressFamily::TYPE.add_name("AdditionalAddressFamily");
 }

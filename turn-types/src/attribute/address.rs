@@ -309,6 +309,115 @@ impl std::fmt::Display for RequestedAddressFamily {
     }
 }
 
+/// The [`AdditionalAddressFamily`] [`Attribute`].
+///
+/// Used to request an allocation with an additional address family.
+///
+/// Reference: [RFC8656 Section 18.11](https://datatracker.ietf.org/doc/html/rfc8656#section-18.11).
+#[derive(Debug, Clone)]
+pub struct AdditionalAddressFamily {
+    family: AddressFamily,
+}
+
+impl AttributeStaticType for AdditionalAddressFamily {
+    const TYPE: AttributeType = AttributeType::new(0x8000);
+}
+
+impl Attribute for AdditionalAddressFamily {
+    fn get_type(&self) -> AttributeType {
+        Self::TYPE
+    }
+
+    fn length(&self) -> u16 {
+        4
+    }
+}
+
+impl AttributeWrite for AdditionalAddressFamily {
+    fn to_raw(&self) -> RawAttribute<'_> {
+        let mut data = [0; 4];
+        data[0] = match self.family {
+            AddressFamily::IPV4 => 1,
+            AddressFamily::IPV6 => 2,
+        };
+        RawAttribute::new(self.get_type(), &data).into_owned()
+    }
+    fn write_into_unchecked(&self, dest: &mut [u8]) {
+        self.write_header_unchecked(dest);
+        dest[4] = match self.family {
+            AddressFamily::IPV4 => 1,
+            AddressFamily::IPV6 => 2,
+        };
+        dest[5] = 0;
+        dest[6] = 0;
+        dest[7] = 0;
+    }
+}
+
+impl AttributeFromRaw<'_> for AdditionalAddressFamily {
+    fn from_raw_ref(raw: &RawAttribute) -> Result<Self, StunParseError>
+    where
+        Self: Sized,
+    {
+        Self::try_from(raw)
+    }
+}
+
+impl TryFrom<&RawAttribute<'_>> for AdditionalAddressFamily {
+    type Error = StunParseError;
+    fn try_from(raw: &RawAttribute) -> Result<Self, Self::Error> {
+        if raw.get_type() != Self::TYPE {
+            return Err(StunParseError::WrongAttributeImplementation);
+        }
+        raw.check_type_and_len(Self::TYPE, 4..=4)?;
+        let family = match raw.value[0] {
+            // IPv4 is not supported for AdditionalAddressFamily.
+            2 => AddressFamily::IPV6,
+            _ => return Err(StunParseError::InvalidAttributeData),
+        };
+        Ok(Self { family })
+    }
+}
+
+impl AdditionalAddressFamily {
+    /// Create a new [`AdditionalAddressFamily`] [`Attribute`].
+    ///
+    /// Only IPV6 is supported.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use turn_types::attribute::*;
+    /// let additional = AdditionalAddressFamily::new(AddressFamily::IPV6);
+    /// assert_eq!(additional.family(), AddressFamily::IPV6);
+    /// ```
+    pub fn new(family: AddressFamily) -> Self {
+        if family == AddressFamily::IPV4 {
+            panic!("IPv4 is not supported in AdditionalAddressFamily");
+        }
+        Self { family }
+    }
+
+    /// Retrieve the requested address family stored in a [`RequestedAddressFamily`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use turn_types::attribute::*;
+    /// let additional = AdditionalAddressFamily::new(AddressFamily::IPV6);
+    /// assert_eq!(additional.family(), AddressFamily::IPV6);
+    /// ```
+    pub fn family(&self) -> AddressFamily {
+        self.family
+    }
+}
+
+impl std::fmt::Display for AdditionalAddressFamily {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.get_type(), self.family)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,5 +548,59 @@ mod tests {
             RequestedAddressFamily::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
             Err(StunParseError::InvalidAttributeData)
         ));
+    }
+
+    #[test]
+    fn additional_address_family() {
+        let _log = crate::tests::test_init_log();
+        let mapped = AdditionalAddressFamily::new(AddressFamily::IPV6);
+        assert_eq!(mapped.get_type(), AdditionalAddressFamily::TYPE);
+        assert_eq!(mapped.family(), AddressFamily::IPV6);
+        let raw: RawAttribute = mapped.to_raw();
+        println!("{}", raw);
+        assert_eq!(raw.get_type(), AdditionalAddressFamily::TYPE);
+        let mapped2 = AdditionalAddressFamily::try_from(&raw).unwrap();
+        assert_eq!(mapped2.get_type(), AdditionalAddressFamily::TYPE);
+        assert_eq!(mapped2.family(), AddressFamily::IPV6);
+        // truncate by one byte
+        let mut data: Vec<_> = raw.clone().into();
+        let len = data.len();
+        BigEndian::write_u16(&mut data[2..4], len as u16 - 4 - 1);
+        println!(
+            "{:?}",
+            AdditionalAddressFamily::try_from(
+                &RawAttribute::from_bytes(data[..len - 1].as_ref()).unwrap()
+            )
+        );
+        assert!(matches!(
+            AdditionalAddressFamily::try_from(
+                &RawAttribute::from_bytes(data[..len - 1].as_ref()).unwrap()
+            ),
+            Err(StunParseError::Truncated {
+                expected: _,
+                actual: _,
+            })
+        ));
+        // provide incorrectly typed data
+        let mut data: Vec<_> = raw.clone().into();
+        BigEndian::write_u16(&mut data[0..2], 0);
+        assert!(matches!(
+            AdditionalAddressFamily::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
+            Err(StunParseError::WrongAttributeImplementation)
+        ));
+        // provide invalid address family
+        let mut data: Vec<_> = raw.clone().into();
+        data[4] = 1;
+        assert!(matches!(
+            AdditionalAddressFamily::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
+            Err(StunParseError::InvalidAttributeData)
+        ));
+    }
+
+    #[test]
+    #[should_panic = "IPv4 is not supported"]
+    fn additional_address_family_ipv4_panic() {
+        let _log = crate::tests::test_init_log();
+        AdditionalAddressFamily::new(AddressFamily::IPV4);
     }
 }
