@@ -418,6 +418,135 @@ impl std::fmt::Display for AdditionalAddressFamily {
     }
 }
 
+/// The [`AddressErrorCode`] [`Attribute`].
+///
+/// Used to notofy of errors with a particular address family.
+///
+/// Reference: [RFC8656 Section 18.12](https://datatracker.ietf.org/doc/html/rfc8656#section-18.12).
+#[derive(Debug, Clone)]
+pub struct AddressErrorCode {
+    family: AddressFamily,
+    error: ErrorCode,
+}
+
+impl AttributeStaticType for AddressErrorCode {
+    const TYPE: AttributeType = AttributeType::new(0x8001);
+}
+
+impl Attribute for AddressErrorCode {
+    fn get_type(&self) -> AttributeType {
+        Self::TYPE
+    }
+
+    fn length(&self) -> u16 {
+        self.error.length()
+    }
+}
+
+impl AttributeWrite for AddressErrorCode {
+    fn to_raw(&self) -> RawAttribute<'_> {
+        let raw = self.error.to_raw();
+        let mut data = raw.to_bytes();
+        data[4] = match self.family {
+            AddressFamily::IPV4 => 1,
+            AddressFamily::IPV6 => 2,
+        };
+        RawAttribute::new_owned(
+            self.get_type(),
+            Box::from(&data[4..4 + raw.length() as usize]),
+        )
+    }
+    fn write_into_unchecked(&self, dest: &mut [u8]) {
+        self.error.write_into_unchecked(dest);
+        self.write_header_unchecked(dest);
+        dest[4] = match self.family {
+            AddressFamily::IPV4 => 1,
+            AddressFamily::IPV6 => 2,
+        };
+    }
+}
+
+impl AttributeFromRaw<'_> for AddressErrorCode {
+    fn from_raw_ref(raw: &RawAttribute) -> Result<Self, StunParseError>
+    where
+        Self: Sized,
+    {
+        Self::try_from(raw)
+    }
+}
+
+impl TryFrom<&RawAttribute<'_>> for AddressErrorCode {
+    type Error = StunParseError;
+    fn try_from(raw: &RawAttribute) -> Result<Self, Self::Error> {
+        if raw.get_type() != Self::TYPE {
+            return Err(StunParseError::WrongAttributeImplementation);
+        }
+        let tmp_raw = RawAttribute::new(ErrorCode::TYPE, &raw.value);
+        let error = ErrorCode::from_raw_ref(&tmp_raw)?;
+        println!("parsed error {error}");
+        let family = match raw.value[0] {
+            1 => AddressFamily::IPV4,
+            2 => AddressFamily::IPV6,
+            _ => return Err(StunParseError::InvalidAttributeData),
+        };
+        Ok(Self { family, error })
+    }
+}
+
+impl AddressErrorCode {
+    /// Create a new [`AddressErrorCode`] [`Attribute`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use turn_types::attribute::*;
+    /// use stun_types::attribute::ErrorCode;
+    /// let error = ErrorCode::builder(440).build().unwrap();
+    /// let addr_error = AddressErrorCode::new(AddressFamily::IPV6, error);
+    /// assert_eq!(addr_error.family(), AddressFamily::IPV6);
+    /// ```
+    pub fn new(family: AddressFamily, error: ErrorCode) -> Self {
+        Self { family, error }
+    }
+
+    /// Retrieve the requested address family stored in an [`AddressErrorCode`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use turn_types::attribute::*;
+    /// use stun_types::attribute::ErrorCode;
+    /// let error = ErrorCode::builder(440).build().unwrap();
+    /// let addr_error = AddressErrorCode::new(AddressFamily::IPV6, error);
+    /// assert_eq!(addr_error.family(), AddressFamily::IPV6);
+    /// ```
+    pub fn family(&self) -> AddressFamily {
+        self.family
+    }
+
+    /// Retrieve the error stored in an [`AddressErrorCode`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use turn_types::attribute::*;
+    /// use stun_types::attribute::ErrorCode;
+    /// let error = ErrorCode::builder(440).build().unwrap();
+    /// let addr_error = AddressErrorCode::new(AddressFamily::IPV6, error.clone());
+    /// assert_eq!(addr_error.family(), AddressFamily::IPV6);
+    /// assert_eq!(addr_error.error(), &error);
+    /// ```
+    pub fn error(&self) -> &ErrorCode {
+        &self.error
+    }
+}
+
+impl std::fmt::Display for AddressErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {} {}", self.get_type(), self.family, self.error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,5 +731,42 @@ mod tests {
     fn additional_address_family_ipv4_panic() {
         let _log = crate::tests::test_init_log();
         AdditionalAddressFamily::new(AddressFamily::IPV4);
+    }
+
+    #[test]
+    fn address_error_code() {
+        let _log = crate::tests::test_init_log();
+        let error = ErrorCode::builder(ErrorCode::INSUFFICIENT_CAPACITY)
+            .build()
+            .unwrap();
+        for family in [AddressFamily::IPV4, AddressFamily::IPV6] {
+            let mapped = AddressErrorCode::new(family, error.clone());
+            assert_eq!(mapped.get_type(), AddressErrorCode::TYPE);
+            assert_eq!(mapped.family(), family);
+            assert_eq!(mapped.error(), &error);
+            let raw: RawAttribute = mapped.to_raw();
+            println!("{}", raw);
+            assert_eq!(raw.get_type(), AddressErrorCode::TYPE);
+            let mapped2 = AddressErrorCode::try_from(&raw).unwrap();
+            assert_eq!(mapped2.get_type(), AddressErrorCode::TYPE);
+            assert_eq!(mapped2.family(), family);
+            assert_eq!(mapped2.error(), &error);
+        }
+        let mapped = AddressErrorCode::new(AddressFamily::IPV6, error);
+        let raw: RawAttribute = mapped.to_raw();
+        // provide incorrectly typed data
+        let mut data: Vec<_> = raw.clone().into();
+        BigEndian::write_u16(&mut data[0..2], 0);
+        assert!(matches!(
+            AddressErrorCode::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
+            Err(StunParseError::WrongAttributeImplementation)
+        ));
+        // provide invalid address family
+        let mut data: Vec<_> = raw.clone().into();
+        data[4] = 3;
+        assert!(matches!(
+            AddressErrorCode::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
+            Err(StunParseError::InvalidAttributeData)
+        ));
     }
 }
