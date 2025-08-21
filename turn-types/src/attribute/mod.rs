@@ -15,8 +15,8 @@
 
 mod address;
 pub use address::{
-    AdditionalAddressFamily, AddressFamily, RequestedAddressFamily, XorPeerAddress,
-    XorRelayedAddress,
+    AdditionalAddressFamily, AddressErrorCode, AddressFamily, RequestedAddressFamily,
+    XorPeerAddress, XorRelayedAddress,
 };
 mod channel;
 pub use channel::ChannelNumber;
@@ -62,4 +62,6 @@ pub(super) fn attributes_init() {
     ConnectionId::TYPE.add_name("ConnectionId");
     stun_types::attribute_display!(AdditionalAddressFamily);
     AdditionalAddressFamily::TYPE.add_name("AdditionalAddressFamily");
+    stun_types::attribute_display!(AddressErrorCode);
+    AddressErrorCode::TYPE.add_name("AddressErrorCode");
 }
