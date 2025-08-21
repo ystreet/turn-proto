@@ -28,6 +28,8 @@ mod even_port;
 pub use even_port::EvenPort;
 mod fragment;
 pub use fragment::DontFragment;
+mod icmp;
+pub use icmp::Icmp;
 mod lifetime;
 pub use lifetime::Lifetime;
 mod reservation;
@@ -64,4 +66,6 @@ pub(super) fn attributes_init() {
     AdditionalAddressFamily::TYPE.add_name("AdditionalAddressFamily");
     stun_types::attribute_display!(AddressErrorCode);
     AddressErrorCode::TYPE.add_name("AddressErrorCode");
+    stun_types::attribute_display!(Icmp);
+    Icmp::TYPE.add_name("Icmp");
 }
