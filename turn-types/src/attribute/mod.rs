@@ -17,6 +17,8 @@ mod address;
 pub use address::{AddressFamily, RequestedAddressFamily, XorPeerAddress, XorRelayedAddress};
 mod channel;
 pub use channel::ChannelNumber;
+mod connection;
+pub use connection::ConnectionId;
 mod data;
 pub use data::Data;
 mod even_port;
@@ -53,4 +55,6 @@ pub(super) fn attributes_init() {
     RequestedTransport::TYPE.add_name("RequestedTransport");
     stun_types::attribute_display!(RequestedAddressFamily);
     RequestedAddressFamily::TYPE.add_name("RequestedAddressFamily");
+    stun_types::attribute_display!(ConnectionId);
+    ConnectionId::TYPE.add_name("ConnectionId");
 }
