@@ -66,6 +66,8 @@ impl TryFrom<&RawAttribute<'_>> for RequestedTransport {
 }
 
 impl RequestedTransport {
+    /// The TCP transport type.
+    pub const TCP: u8 = 6;
     /// The UDP transport type.
     pub const UDP: u8 = 17;
 
@@ -88,8 +90,8 @@ impl RequestedTransport {
     ///
     /// ```
     /// # use turn_types::attribute::*;
-    /// let requested_transport = RequestedTransport::new(RequestedTransport::UDP);
-    /// assert_eq!(requested_transport.protocol(), RequestedTransport::UDP);
+    /// let requested_transport = RequestedTransport::new(RequestedTransport::TCP);
+    /// assert_eq!(requested_transport.protocol(), RequestedTransport::TCP);
     /// ```
     pub fn protocol(&self) -> u8 {
         self.protocol

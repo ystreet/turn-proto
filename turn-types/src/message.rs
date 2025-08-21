@@ -32,6 +32,15 @@ pub const CREATE_PERMISSION: Method = Method::new(0x0008);
 /// message.
 pub const CHANNEL_BIND: Method = Method::new(0x0009);
 
+/// The value of the Connect message type.  Can only be used in a request message.
+pub const CONNECT: Method = Method::new(0x000a);
+
+/// The value of the ConnectionBind message type.  Can only be used in a request message.
+pub const CONNECTION_BIND: Method = Method::new(0x000b);
+
+/// The value of the ConnectionAttempt message type.  Can only be used in a request message.
+pub const CONNECTION_ATTEMPT: Method = Method::new(0x000b);
+
 pub(crate) fn debug_init() {
     ALLOCATE.add_name("ALLOCATE");
     REFRESH.add_name("REFRESH");
@@ -39,4 +48,7 @@ pub(crate) fn debug_init() {
     DATA.add_name("DATA");
     CREATE_PERMISSION.add_name("CREATE_PERMISSION");
     CHANNEL_BIND.add_name("CHANNEL_BIND");
+    CONNECT.add_name("CONNECT");
+    CONNECTION_BIND.add_name("CONNECTION_BIND");
+    CONNECTION_ATTEMPT.add_name("CONNECTION_ATTEMPT");
 }
