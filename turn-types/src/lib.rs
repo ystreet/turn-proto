@@ -12,14 +12,22 @@
 //! # turn-types
 //!
 //! `turn-types` provides an implementation for two main things related to TURN clients and servers:
-//! 1. TURN specific STUN attributes using the [`stun-types`] crate.
+//! 1. TURN specific STUN attributes using the [stun-types] crate.
 //! 2. Parsing to and from the actual data sent and received on the wire between a TURN client and
 //!    a TURN server.
 //!
-//! This is based on the following standards:
+//! This crate implements the STUN attributes and methods presented in the following standards:
 //! - [RFC5766]: Traversal Using Relays around NAT (TURN).
+//! - [RFC6062]: Traversal Using Relays around NAT (TURN) Extensions for TCP Allocations
+//! - [RFC6156]: Traversal Using Relays around NAT (TURN) Extension for IPv6
+//! - [RFC8656]: Traversal Using Relays around NAT (TURN): Relay Extensions to Session
+//!   Traversal Utilities for NAT (STUN)
 //!
+//! [stun-types]: https://docs.rs/stun-types/latest/stun_types
 //! [RFC5766]: https://tools.ietf.org/html/rfc5766
+//! [RFC6062]: https://tools.ietf.org/html/rfc6062
+//! [RFC6156]: https://tools.ietf.org/html/rfc6156
+//! [RFC8656]: https://tools.ietf.org/html/rfc8656
 
 pub use stun_types as stun;
 use stun_types::message::LongTermCredentials;

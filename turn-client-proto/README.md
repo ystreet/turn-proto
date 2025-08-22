@@ -11,15 +11,11 @@ the [Rust programming language](https://www.rust-lang.org/).
 
 ## Relevant standards
 
- - [RFC5389](https://tools.ietf.org/html/rfc5389):
-   Session Traversal Utilities for NAT (STUN)
- - [RFC5766](https://tools.ietf.org/html/rfc5766):
+ - [x] [RFC5766](https://tools.ietf.org/html/rfc5766):
    Traversal Using Relays around NAT (TURN): Relay Extensions to Session
    Traversal Utilities for NAT (STUN)
- - [RFC6156](https://tools.ietf.org/html/rfc6156):
+ - [ ] [RFC6156](https://tools.ietf.org/html/rfc6156):
    Traversal Using Relays around NAT (TURN) Extension for IPv6
- - [RFC8489](https://tools.ietf.org/html/rfc8489):
-   Session Traversal Utilities for NAT (STUN)
- - [RFC8656](https://tools.ietf.org/html/rfc8656):
+ - [ ] [RFC8656](https://tools.ietf.org/html/rfc8656):
    Traversal Using Relays around NAT (TURN): Relay Extensions to Session
    Traversal Utilities for NAT (STUN)

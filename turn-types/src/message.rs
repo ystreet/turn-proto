@@ -10,12 +10,10 @@
 
 use stun_types::message::Method;
 
-/// The value of the Allocate message type.  Can be used in either a request or an indication
-/// message.
+/// The value of the Allocate message type.  Can only be used in a request message.
 pub const ALLOCATE: Method = Method::new(0x0003);
 
-/// The value of the Refresh message type.  Can be used in either a request or an indication
-/// message.
+/// The value of the Refresh message type.  Can only be used in a request message.
 pub const REFRESH: Method = Method::new(0x0004);
 
 /// The value of the Send message type.  Can only be used in an indication message.
@@ -24,12 +22,10 @@ pub const SEND: Method = Method::new(0x0006);
 /// The value of the Data message type.  Can only be used in an indication message.
 pub const DATA: Method = Method::new(0x0007);
 
-/// The value of the CreatePermission message type.  Can be used in either a request or an indication
-/// message.
+/// The value of the CreatePermission message type.  Can only be used in request message.
 pub const CREATE_PERMISSION: Method = Method::new(0x0008);
 
-/// The value of the ChannelBind message type.  Can be used in either a request or an indication
-/// message.
+/// The value of the ChannelBind message type.  Can only be used in a request message.
 pub const CHANNEL_BIND: Method = Method::new(0x0009);
 
 /// The value of the Connect message type.  Can only be used in a request message.
