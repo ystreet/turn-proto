@@ -272,26 +272,12 @@ impl TurnServer {
         response
     }
 
-    fn allocation_mismatch_response(msg: &Message<'_>) -> MessageWriteVec {
+    fn allocation_mismatch(msg: &Message<'_>, credentials: LongTermCredentials) -> MessageWriteVec {
         let mut response = Message::builder_error(msg, MessageWriteVec::new());
         let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
             .build()
             .unwrap();
         response.add_attribute(&error).unwrap();
-        response
-    }
-
-    fn allocation_mismatch(msg: &Message<'_>) -> MessageWriteVec {
-        let mut response = Self::allocation_mismatch_response(msg);
-        response.add_fingerprint().unwrap();
-        response
-    }
-
-    fn allocation_mismatch_signed(
-        msg: &Message<'_>,
-        credentials: LongTermCredentials,
-    ) -> MessageWriteVec {
-        let mut response = Self::allocation_mismatch_response(msg);
         response
             .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
             .unwrap();
@@ -339,7 +325,7 @@ impl TurnServer {
         let credentials = self.validate_stun(msg, ttype, from, to, now)?;
 
         if let Some(_client) = self.mut_client_from_5tuple(ttype, to, from) {
-            return Err(Self::allocation_mismatch(msg));
+            return Err(Self::allocation_mismatch(msg, credentials));
         };
 
         let Ok(requested_transport) = msg.attribute::<RequestedTransport>() else {
@@ -402,10 +388,10 @@ impl TurnServer {
         to: SocketAddr,
         now: Instant,
     ) -> Result<Transmit<Vec<u8>>, MessageWriteVec> {
-        let _credentials = self.validate_stun(msg, ttype, from, to, now)?;
+        let credentials = self.validate_stun(msg, ttype, from, to, now)?;
 
         let Some(client) = self.mut_client_from_5tuple(ttype, to, from) else {
-            return Err(Self::allocation_mismatch(msg));
+            return Err(Self::allocation_mismatch(msg, credentials));
         };
 
         // TODO: proper lifetime handling
@@ -456,7 +442,7 @@ impl TurnServer {
         let credentials = self.validate_stun(msg, ttype, from, to, now)?;
 
         let Some(client) = self.mut_client_from_5tuple(ttype, to, from) else {
-            return Err(Self::allocation_mismatch(msg));
+            return Err(Self::allocation_mismatch(msg, credentials));
         };
 
         let mut peer_addresses = vec![];
@@ -503,7 +489,7 @@ impl TurnServer {
             if now > alloc.expires_at {
                 trace!("allocation has expired");
                 // allocation has expired
-                return Err(Self::allocation_mismatch_signed(msg, credentials));
+                return Err(Self::allocation_mismatch(msg, credentials));
             }
 
             // TODO: support TCP allocations
@@ -568,7 +554,7 @@ impl TurnServer {
         let credentials = self.validate_stun(msg, ttype, from, to, now)?;
 
         let Some(client) = self.mut_client_from_5tuple(ttype, to, from) else {
-            return Err(Self::allocation_mismatch(msg));
+            return Err(Self::allocation_mismatch(msg, credentials));
         };
 
         let bad_request = move |msg: &Message<'_>, credentials: LongTermCredentials| {
@@ -616,7 +602,7 @@ impl TurnServer {
         if now > alloc.expires_at {
             trace!("allocation has expired");
             // allocation has expired
-            return Err(Self::allocation_mismatch_signed(msg, credentials));
+            return Err(Self::allocation_mismatch(msg, credentials));
         }
 
         let mut existing = alloc.channels.iter_mut().find(|channel| {
@@ -777,7 +763,7 @@ impl TurnServer {
                 _ => {
                     let credentials = self.validate_stun(msg, ttype, from, to, now)?;
                     let Some(_client) = self.mut_client_from_5tuple(ttype, to, from) else {
-                        return Err(Self::allocation_mismatch(msg));
+                        return Err(Self::allocation_mismatch(msg, credentials));
                     };
 
                     let mut builder = Message::builder_error(msg, MessageWriteVec::new());
@@ -1659,14 +1645,18 @@ mod tests {
         let creds = credentials().into_long_term_credentials(&realm);
         let reply = server
             .recv(
-                client_transmit(create_permission_request(creds, &nonce), server.transport()),
+                client_transmit(
+                    create_permission_request(creds.clone(), &nonce),
+                    server.transport(),
+                ),
                 now,
             )
             .unwrap();
-        validate_unsigned_error_reply(
+        validate_signed_error_reply(
             &reply.data,
             CREATE_PERMISSION,
             ErrorCode::ALLOCATION_MISMATCH,
+            creds,
         );
     }
 
@@ -1861,11 +1851,19 @@ mod tests {
         let creds = credentials().into_long_term_credentials(&realm);
         let reply = server
             .recv(
-                client_transmit(channel_bind_request(creds, &nonce), server.transport()),
+                client_transmit(
+                    channel_bind_request(creds.clone(), &nonce),
+                    server.transport(),
+                ),
                 now,
             )
             .unwrap();
-        validate_unsigned_error_reply(&reply.data, CHANNEL_BIND, ErrorCode::ALLOCATION_MISMATCH);
+        validate_signed_error_reply(
+            &reply.data,
+            CHANNEL_BIND,
+            ErrorCode::ALLOCATION_MISMATCH,
+            creds,
+        );
     }
 
     #[test]
@@ -2161,11 +2159,11 @@ mod tests {
         let creds = credentials().into_long_term_credentials(&realm);
         let reply = server
             .recv(
-                client_transmit(refresh_request(creds, &nonce), server.transport()),
+                client_transmit(refresh_request(creds.clone(), &nonce), server.transport()),
                 now,
             )
             .unwrap();
-        validate_unsigned_error_reply(&reply.data, REFRESH, ErrorCode::ALLOCATION_MISMATCH);
+        validate_signed_error_reply(&reply.data, REFRESH, ErrorCode::ALLOCATION_MISMATCH, creds);
     }
 
     fn send_indication(peer_addr: SocketAddr) -> Vec<u8> {
