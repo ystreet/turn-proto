@@ -39,7 +39,7 @@ pub const CONNECT: Method = Method::new(0x000a);
 pub const CONNECTION_BIND: Method = Method::new(0x000b);
 
 /// The value of the ConnectionAttempt message type.  Can only be used in a request message.
-pub const CONNECTION_ATTEMPT: Method = Method::new(0x000b);
+pub const CONNECTION_ATTEMPT: Method = Method::new(0x000c);
 
 pub(crate) fn debug_init() {
     ALLOCATE.add_name("ALLOCATE");
