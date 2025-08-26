@@ -20,6 +20,7 @@ use stun_proto::types::TransportType;
 
 use turn_types::channel::ChannelData;
 use turn_types::stun::message::MessageHeader;
+use turn_types::AddressFamily;
 use turn_types::TurnCredentials;
 
 use tracing::{trace, warn};
@@ -45,7 +46,7 @@ impl TurnClientUdp {
     ///
     /// # Examples
     /// ```
-    /// # use turn_types::TurnCredentials;
+    /// # use turn_types::{AddressFamily, TurnCredentials};
     /// # use turn_client_proto::prelude::*;
     /// # use turn_client_proto::udp::TurnClientUdp;
     /// # use stun_proto::types::TransportType;
@@ -53,7 +54,12 @@ impl TurnClientUdp {
     /// let transport = TransportType::Udp;
     /// let local_addr = "192.168.0.1:4000".parse().unwrap();
     /// let remote_addr = "10.0.0.1:3478".parse().unwrap();
-    /// let client = TurnClientUdp::allocate(local_addr, remote_addr, credentials);
+    /// let client = TurnClientUdp::allocate(
+    ///     local_addr,
+    ///     remote_addr,
+    ///     credentials,
+    ///     &[AddressFamily::IPV4],
+    /// );
     /// assert_eq!(client.transport(), TransportType::Udp);
     /// assert_eq!(client.local_addr(), local_addr);
     /// assert_eq!(client.remote_addr(), remote_addr);
@@ -66,13 +72,14 @@ impl TurnClientUdp {
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         credentials: TurnCredentials,
+        allocation_families: &[AddressFamily],
     ) -> Self {
         let stun_agent = StunAgent::builder(TransportType::Udp, local_addr)
             .remote_addr(remote_addr)
             .build();
 
         Self {
-            protocol: TurnClientProtocol::new(stun_agent, credentials),
+            protocol: TurnClientProtocol::new(stun_agent, credentials, allocation_families),
         }
     }
 }
@@ -240,7 +247,7 @@ pub(crate) mod tests {
         remote_addr: SocketAddr,
         credentials: TurnCredentials,
     ) -> TurnClient {
-        TurnClientUdp::allocate(local_addr, remote_addr, credentials).into()
+        TurnClientUdp::allocate(local_addr, remote_addr, credentials, &[AddressFamily::IPV4]).into()
     }
 
     fn turn_server_udp_new(listen_address: SocketAddr, realm: String) -> TurnServer {

@@ -19,19 +19,44 @@
 //! # listen for udp data on the specified address and port. Once the first packet is received by
 //! # `nc`, data can be sent back to the TURN server which will be displayed in this example in Shell 3.
 //! $ nc -lu 127.0.0.1 9100
+//! # or
+//! $ nc -lu ::1 9100
 //! ```
 //!
 //! Shell 2 (`coturn`)
 //! ```sh
 //! # only needs to be completed once to add the relevant TURN username and password
-//! turnadmin --userdb userdb.sqlite --add --user coturn --realm realm --password password
+//! turnadmin \
+//!   --userdb userdb.sqlite \
+//!   --add \
+//!   --user coturn \
+//!   --realm realm \
+//!   --password password
 //! # Do not use in production, adapt for your use case
-//! turnserver --user not-important --cli-password not-important --realm realm --lt-cred-mech --userdb userdb.sqlite -v --allow-loopback-peers --listening-ip 127.0.0.1 --relay-ip 127.0.0.1
+//! turnserver \
+//!   --user not-important \
+//!   --cli-password not-important \
+//!   --realm realm \
+//!   --lt-cred-mech \
+//!   --userdb userdb.sqlite \
+//!   -v \
+//!   --allow-loopback-peers \
+//!   --listening-ip 127.0.0.1 \
+//!   --listening-ip '[::1]' \
+//!   --relay-ip 127.0.0.1 \
+//!   --relay-ip '[::1]'
 //! ```
 //!
 //! Shell 3 (this example)
 //! ```sh
-//! ./turn --transport udp --server 127.0.0.1:3478 --user coturn --password password --peer 127.0.0.1:9100 --count 2 --delay 5
+//! ./turn \
+//!   --transport udp \
+//!   --server 127.0.0.1:3478 \
+//!   --user coturn \
+//!   --password password \
+//!   --peer 127.0.0.1:9100 \
+//!   --count 2
+//!   --delay 5
 //! ```
 
 #![cfg(not(tarpaulin))]
@@ -49,6 +74,7 @@ use turn_client_proto::udp::{
 use stun_proto::agent::Transmit;
 use turn_types::stun::data::Data;
 use turn_types::stun::TransportType;
+use turn_types::AddressFamily;
 
 use clap::{Parser, ValueEnum};
 
@@ -109,11 +135,12 @@ impl ClientUdp {
         socket: UdpSocket,
         to: SocketAddr,
         credentials: TurnCredentials,
+        allocation_families: &[AddressFamily],
         events_sender: SyncSender<TurnEvent>,
     ) -> Self {
         let base_instant = std::time::Instant::now();
         let local_addr = socket.local_addr().unwrap();
-        let client = TurnClientUdp::allocate(local_addr, to, credentials);
+        let client = TurnClientUdp::allocate(local_addr, to, credentials, allocation_families);
         let inner = Arc::new((Mutex::new(ClientUdpInner { client }), Condvar::new()));
         let socket = Arc::new(socket);
 
@@ -254,12 +281,14 @@ impl ClientTcp {
         mut socket: TcpStream,
         to: SocketAddr,
         credentials: TurnCredentials,
+        allocation_families: &[AddressFamily],
         events_sender: SyncSender<TurnEvent>,
     ) -> Self {
         let base_instant = std::time::Instant::now();
         let local_addr = socket.local_addr().unwrap();
         let remote_addr = to;
-        let client = TurnClientTcp::allocate(local_addr, remote_addr, credentials);
+        let client =
+            TurnClientTcp::allocate(local_addr, remote_addr, credentials, allocation_families);
         let inner = Arc::new((Mutex::new(ClientTcpInner { client }), Condvar::new()));
 
         let mut socket_clone = socket.try_clone().unwrap();
@@ -473,6 +502,7 @@ impl ClientTls {
         mut socket: TcpStream,
         to: SocketAddr,
         credentials: TurnCredentials,
+        allocation_families: &[AddressFamily],
         events_sender: SyncSender<TurnEvent>,
         insecure_tls: bool,
     ) -> Self {
@@ -493,6 +523,7 @@ impl ClientTls {
             local_addr,
             remote_addr,
             credentials,
+            allocation_families,
             remote_addr.ip().into(),
             Arc::new(config),
         );
@@ -708,6 +739,10 @@ struct Cli {
     delay: u64,
     #[arg(long, default_value = "false", help = "Insecure TLS")]
     insecure_tls: bool,
+    #[arg(long, default_value = "false", help = "Also allocate an IPv4 address")]
+    ipv4: bool,
+    #[arg(long, default_value = "false", help = "Also allocate an IPv6 address")]
+    ipv6: bool,
 }
 
 fn main() -> io::Result<()> {
@@ -719,10 +754,32 @@ fn main() -> io::Result<()> {
     let credentials = TurnCredentials::new(&cli.user, &cli.password);
     let (events_sender, events_recv) = std::sync::mpsc::sync_channel(8);
 
+    let mut address_families = vec![];
+    if cli.ipv4 || cli.peer.is_ipv4() {
+        address_families.push(AddressFamily::IPV4);
+    }
+    if cli.ipv6 || cli.peer.is_ipv6() {
+        address_families.push(AddressFamily::IPV6);
+    }
+
     let client = match transport {
         TransportType::Udp => {
-            let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
-            let client = ClientUdp::new(socket, cli.server, credentials, events_sender);
+            let socket = if cli.server.is_ipv4() {
+                UdpSocket::bind("0.0.0.0:0").unwrap()
+            } else {
+                UdpSocket::bind("[::]:0").unwrap()
+            };
+            println!(
+                "Allocated UDP socket with local address {}",
+                socket.local_addr().unwrap()
+            );
+            let client = ClientUdp::new(
+                socket,
+                cli.server,
+                credentials,
+                &address_families,
+                events_sender,
+            );
             Box::new(client) as Box<dyn Client<_>>
         }
         TransportType::Tcp => {
@@ -732,12 +789,19 @@ fn main() -> io::Result<()> {
                     socket,
                     cli.server,
                     credentials,
+                    &address_families,
                     events_sender,
                     cli.insecure_tls,
                 );
                 Box::new(client) as Box<dyn Client<_>>
             } else {
-                let client = ClientTcp::new(socket, cli.server, credentials, events_sender);
+                let client = ClientTcp::new(
+                    socket,
+                    cli.server,
+                    credentials,
+                    &address_families,
+                    events_sender,
+                );
                 Box::new(client) as Box<dyn Client<_>>
             }
         }
@@ -747,14 +811,18 @@ fn main() -> io::Result<()> {
 
     while let Ok(event) = events_recv.recv() {
         match event {
-            TurnEvent::AllocationCreated(_, _) => {
-                client
-                    .create_permission(TransportType::Udp, peer_addr.ip())
-                    .unwrap();
+            TurnEvent::AllocationCreated(_relayed_transport, relayed) => {
+                if relayed.is_ipv4() == peer_addr.is_ipv4() {
+                    client
+                        .create_permission(TransportType::Udp, peer_addr.ip())
+                        .unwrap();
+                }
             }
-            TurnEvent::AllocationCreateFailed => {
-                error!("Failed to create allocation");
-                client.close();
+            TurnEvent::AllocationCreateFailed(family) => {
+                error!("Failed to create allocation for family {family}");
+                if (family == AddressFamily::IPV4) == peer_addr.is_ipv4() {
+                    client.close();
+                }
             }
             TurnEvent::PermissionCreated(transport, _peer_addr) => {
                 for i in 0..cli.count {

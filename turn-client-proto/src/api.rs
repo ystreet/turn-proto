@@ -26,6 +26,7 @@ use stun_proto::types::TransportType;
 use turn_types::attribute::Data as AData;
 use turn_types::attribute::XorPeerAddress;
 use turn_types::message::SEND;
+use turn_types::AddressFamily;
 
 /// The public API of a TURN client.
 pub trait TurnClientApi: std::fmt::Debug + Send {
@@ -157,8 +158,8 @@ pub enum TurnEvent {
     /// An allocation was created on the server for the client.  The allocation as the associated
     /// transport and address.
     AllocationCreated(TransportType, SocketAddr),
-    /// Allocation failed to be created.
-    AllocationCreateFailed,
+    /// Allocation failed to be created for the specified address family.
+    AllocationCreateFailed(AddressFamily),
     /// A permission was created for the provided transport and IP address.
     PermissionCreated(TransportType, IpAddr),
     /// A permission could not be installed for the provided transport and IP address.

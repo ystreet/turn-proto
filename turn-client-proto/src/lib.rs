@@ -34,7 +34,12 @@
 //! let local_address = "127.0.0.1:1000".parse().unwrap();
 //! let credentials = turn_types::TurnCredentials::new("username", "password");
 //!
-//! let client = TurnClientUdp::allocate(local_address, turn_server_address, credentials);
+//! let client = TurnClientUdp::allocate(
+//!     local_address,
+//!     turn_server_address,
+//!     credentials,
+//!     &[turn_types::AddressFamily::IPV4]
+//! );
 //! ```
 
 #![deny(missing_debug_implementations)]

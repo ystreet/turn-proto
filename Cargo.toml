@@ -21,6 +21,7 @@ criterion = "0.7"
 rustls = "0.23"
 rustls-platform-verifier = "0.5"
 sans-io-time = { version = "0.1", default-features = false }
+smallvec = "1"
 
 [profile.bench]
 codegen-units = 16

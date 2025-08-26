@@ -24,6 +24,7 @@ use stun_proto::types::data::Data;
 use stun_proto::types::TransportType;
 
 use turn_types::channel::ChannelData;
+use turn_types::AddressFamily;
 use turn_types::TurnCredentials;
 
 use tracing::{trace, warn};
@@ -55,6 +56,7 @@ impl TurnClientTls {
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         credentials: TurnCredentials,
+        allocation_families: &[AddressFamily],
         server_name: ServerName<'static>,
         config: Arc<ClientConfig>,
     ) -> Self {
@@ -62,7 +64,7 @@ impl TurnClientTls {
             .remote_addr(remote_addr)
             .build();
         Self {
-            protocol: TurnClientProtocol::new(stun_agent, credentials),
+            protocol: TurnClientProtocol::new(stun_agent, credentials, allocation_families),
             conn: Box::new(ClientConnection::new(config, server_name).unwrap()),
             incoming_tcp_buffer: TurnTcpBuffer::new(),
             closing: false,
@@ -541,6 +543,7 @@ mod tests {
             local_addr,
             remote_addr,
             credentials,
+            &[AddressFamily::IPV4],
             remote_addr.ip().into(),
             client_config(),
         )
