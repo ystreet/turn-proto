@@ -10,10 +10,11 @@
 //!
 //! Contains the protocol state machine for a TURN client.
 
+use sans_io_time::Instant;
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Range;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use stun_proto::agent::{HandleStunReply, StunAgent, StunAgentPollRet, Transmit};
 use stun_proto::types::attribute::{ErrorCode, Nonce, Realm, Username};
 use stun_proto::types::data::Data;
@@ -1714,7 +1715,7 @@ mod tests {
     fn test_turn_client_protocol_new_properties() {
         let _log = crate::tests::test_init_log();
         let mut client = new_protocol();
-        let now = Instant::now();
+        let now = Instant::ZERO;
 
         let TurnPollRet::WaitUntil(new_now) = client.poll(now) else {
             unreachable!();
@@ -1762,7 +1763,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_initial_allocate_bad_request() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         let ret = allocate_response(
             &mut client,
@@ -1775,7 +1776,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_initial_allocate_reply_with_request() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         let ret = allocate_response(
             &mut client,
@@ -1788,7 +1789,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_initial_allocate_reply_missing_attributes() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         let ret = allocate_response(
             &mut client,
@@ -1844,7 +1845,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_initial_allocate_reply_wrong_errorcode() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         let ret = allocate_response(
             &mut client,
@@ -1869,7 +1870,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_initial_allocate_timeout() {
         let _log = crate::tests::test_init_log();
-        let mut now = Instant::now();
+        let mut now = Instant::ZERO;
         let mut client = new_protocol();
         let _transmit = client.poll_transmit(now).unwrap();
         while let TurnPollRet::WaitUntil(new_now) = client.poll(now) {
@@ -1910,7 +1911,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_authenticated_allocate_reply_with_request() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         let credentials = client_credentials(&client);
@@ -1931,7 +1932,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_authenticated_allocate_reply_bad_request() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         let credentials = client_credentials(&client);
@@ -1952,7 +1953,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_authenticated_allocate_reply_error() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         let credentials = client_credentials(&client);
@@ -1979,7 +1980,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_authenticated_allocate_reply_missing_attribute() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         let credentials = client_credentials(&client);
@@ -2070,7 +2071,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_authenticated_allocate_expire() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
@@ -2091,7 +2092,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_authenticated_allocate_reply_stale_nonce() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         let ret = allocate_response(&mut client, |msg| generate_stale_nonce(&msg), now);
@@ -2102,7 +2103,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_authenticated_allocate_reply_stale_nonce_missing_attributes() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         let ret = allocate_response(
@@ -2153,7 +2154,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_refresh_timeout() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
@@ -2169,7 +2170,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_refresh_reply_missing_attributes() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
@@ -2200,7 +2201,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_refresh_error() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
@@ -2254,7 +2255,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_refresh_stale_nonce() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
@@ -2273,7 +2274,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_refresh_stale_nonce_unanswered_refresh() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
@@ -2288,7 +2289,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_delete_stale_nonce() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
@@ -2309,7 +2310,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_delete_allocation_mismatch() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
@@ -2341,7 +2342,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_channel_bind_timeout() {
         let _log = crate::tests::test_init_log();
-        let mut now = Instant::now();
+        let mut now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
@@ -2398,7 +2399,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_channel_bind_error() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
@@ -2465,7 +2466,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_channel_bind_refresh_timeout() {
         let _log = crate::tests::test_init_log();
-        let mut now = Instant::now();
+        let mut now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
@@ -2495,7 +2496,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_channel_bind_stale_nonce() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
@@ -2510,7 +2511,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_channel_bind_refresh_stale_nonce() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
@@ -2534,7 +2535,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_create_permission_timeout() {
         let _log = crate::tests::test_init_log();
-        let mut now = Instant::now();
+        let mut now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
@@ -2568,7 +2569,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_create_permission_error() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
@@ -2627,7 +2628,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_create_permission_refresh_timeout() {
         let _log = crate::tests::test_init_log();
-        let mut now = Instant::now();
+        let mut now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
@@ -2648,7 +2649,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_create_permission_stale_nonce() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
@@ -2663,7 +2664,7 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_create_permission_refresh_stale_nonce() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
@@ -2680,7 +2681,7 @@ mod tests {
     fn test_client_receive_offpath_data() {
         let _log = crate::tests::test_init_log();
 
-        let now = Instant::now();
+        let now = Instant::ZERO;
 
         let mut test = crate::udp::tests::create_test();
         let data = [0x40, 0, 0, 14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -2702,7 +2703,7 @@ mod tests {
     fn test_server_receive_offpath_data() {
         let _log = crate::tests::test_init_log();
 
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = crate::udp::tests::create_test();
 
         let data = [3; 9];

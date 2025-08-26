@@ -10,9 +10,9 @@
 //!
 //! An implementation of a TURN client suitable for TCP connections.
 
+use sans_io_time::Instant;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Range;
-use std::time::Instant;
 
 use stun_proto::agent::{StunAgent, Transmit};
 use stun_proto::types::data::Data;
@@ -357,7 +357,7 @@ mod tests {
     #[test]
     fn test_turn_tcp_allocate_udp_permission() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         for split in TRANSMIT_SPLITS {
             let mut test = create_test(split);
             turn_allocate_permission(&mut test, now);
@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn test_tcp_turn_allocate_expire_server() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         for split in TRANSMIT_SPLITS {
             let mut test = create_test(split);
             turn_allocate_expire_server(&mut test, now);
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn test_tcp_turn_allocate_expire_client() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         for split in TRANSMIT_SPLITS {
             let mut test = create_test(split);
             turn_allocate_expire_client(&mut test, now);
@@ -387,7 +387,7 @@ mod tests {
     #[test]
     fn test_tcp_turn_allocate_refresh() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         for split in TRANSMIT_SPLITS {
             let mut test = create_test(split);
             turn_allocate_refresh(&mut test, now);
@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn test_tcp_turn_allocate_delete() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         for split in TRANSMIT_SPLITS {
             let mut test = create_test(split);
             turn_allocate_delete(&mut test, now);
@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn test_tcp_turn_channel_bind() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         for split in TRANSMIT_SPLITS {
             let mut test = create_test(split);
             turn_channel_bind(&mut test, now);
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn test_tcp_turn_peer_incoming_stun() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         for split in TRANSMIT_SPLITS {
             let mut test = create_test(split);
             turn_peer_incoming_stun(&mut test, now);
@@ -427,7 +427,7 @@ mod tests {
     #[test]
     fn test_tcp_turn_create_permission_refresh() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         for split in TRANSMIT_SPLITS {
             let mut test = create_test(split);
             turn_create_permission_refresh(&mut test, now);
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn test_tcp_turn_create_permission_timeout() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         for split in TRANSMIT_SPLITS {
             let mut test = create_test(split);
             turn_create_permission_timeout(&mut test, now);
@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn test_tcp_turn_channel_bind_refresh() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         for split in TRANSMIT_SPLITS {
             let mut test = create_test(split);
             turn_channel_bind_refresh(&mut test, now);
@@ -457,7 +457,7 @@ mod tests {
     #[test]
     fn test_tcp_offpath_data() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test(0);
         turn_offpath_data(&mut test, now);
     }
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn test_tcp_combined_message_channel() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test(0);
         turn_allocate_permission(&mut test, now);
         let TurnPollRet::WaitUntil(now) = test.client.poll(now) else {
@@ -514,7 +514,7 @@ mod tests {
     #[test]
     fn test_tcp_combined_channel_message() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test(0);
         turn_allocate_permission(&mut test, now);
         tracing::error!("{:?}", test.client);

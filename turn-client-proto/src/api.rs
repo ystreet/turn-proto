@@ -11,9 +11,9 @@
 //! Provides a consistent interface between multiple implementations of TURN clients for different
 //! transports (TCP, and UDP) and wrappers (TLS).
 
+use sans_io_time::Instant;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Range;
-use std::time::Instant;
 
 use byteorder::{BigEndian, ByteOrder};
 use stun_proto::agent::Transmit;

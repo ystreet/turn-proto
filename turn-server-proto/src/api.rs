@@ -8,10 +8,8 @@
 
 //! API for TURN servers.
 
-use std::{
-    net::SocketAddr,
-    time::{Duration, Instant},
-};
+use sans_io_time::Instant;
+use std::{net::SocketAddr, time::Duration};
 
 use stun_proto::agent::Transmit;
 use turn_types::stun::TransportType;

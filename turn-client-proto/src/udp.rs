@@ -10,8 +10,8 @@
 //!
 //! An implementation of a TURN client suitable for UDP connections.
 
+use sans_io_time::Instant;
 use std::net::{IpAddr, SocketAddr};
-use std::time::Instant;
 
 use stun_proto::agent::{StunAgent, Transmit};
 use stun_proto::types::data::Data;
@@ -254,7 +254,7 @@ pub(crate) mod tests {
     #[test]
     fn test_turn_udp_allocate_udp_permission() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test();
         turn_allocate_permission(&mut test, now);
     }
@@ -262,7 +262,7 @@ pub(crate) mod tests {
     #[test]
     fn test_udp_turn_allocate_expire_server() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test();
         turn_allocate_expire_server(&mut test, now);
     }
@@ -270,7 +270,7 @@ pub(crate) mod tests {
     #[test]
     fn test_udp_turn_allocate_expire_client() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test();
         turn_allocate_expire_client(&mut test, now);
     }
@@ -278,7 +278,7 @@ pub(crate) mod tests {
     #[test]
     fn test_udp_turn_allocate_refresh() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test();
         turn_allocate_refresh(&mut test, now);
     }
@@ -286,7 +286,7 @@ pub(crate) mod tests {
     #[test]
     fn test_udp_turn_allocate_delete() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test();
         turn_allocate_delete(&mut test, now);
     }
@@ -294,7 +294,7 @@ pub(crate) mod tests {
     #[test]
     fn test_udp_turn_channel_bind() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test();
         turn_channel_bind(&mut test, now);
     }
@@ -302,7 +302,7 @@ pub(crate) mod tests {
     #[test]
     fn test_udp_turn_peer_incoming_stun() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test();
         turn_peer_incoming_stun(&mut test, now);
     }
@@ -310,7 +310,7 @@ pub(crate) mod tests {
     #[test]
     fn test_udp_turn_create_permission_refresh() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test();
         turn_create_permission_refresh(&mut test, now);
     }
@@ -318,7 +318,7 @@ pub(crate) mod tests {
     #[test]
     fn test_udp_turn_create_permission_timeout() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test();
         turn_create_permission_timeout(&mut test, now);
     }
@@ -326,7 +326,7 @@ pub(crate) mod tests {
     #[test]
     fn test_udp_turn_channel_bind_refresh() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test();
         turn_channel_bind_refresh(&mut test, now);
     }
@@ -334,7 +334,7 @@ pub(crate) mod tests {
     #[test]
     fn test_udp_offpath_data() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test();
         turn_offpath_data(&mut test, now);
     }
@@ -342,7 +342,7 @@ pub(crate) mod tests {
     #[test]
     fn test_udp_unparseable_data() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test();
         turn_unparseable_data(&mut test, now);
     }

@@ -52,11 +52,11 @@ use turn_types::stun::TransportType;
 
 use clap::{Parser, ValueEnum};
 
+use sans_io_time::Instant;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
 
 use std::net::UdpSocket;
 
@@ -99,6 +99,7 @@ trait Client<T: AsRef<[u8]> + std::fmt::Debug> {
 
 #[derive(Clone, Debug)]
 struct ClientUdp {
+    base_instant: std::time::Instant,
     socket: Arc<UdpSocket>,
     inner: Arc<(Mutex<ClientUdpInner>, Condvar)>,
 }
@@ -110,6 +111,7 @@ impl ClientUdp {
         credentials: TurnCredentials,
         events_sender: SyncSender<TurnEvent>,
     ) -> Self {
+        let base_instant = std::time::Instant::now();
         let local_addr = socket.local_addr().unwrap();
         let client = TurnClientUdp::allocate(local_addr, to, credentials);
         let inner = Arc::new((Mutex::new(ClientUdpInner { client }), Condvar::new()));
@@ -124,7 +126,7 @@ impl ClientUdp {
             };
             {
                 let mut inner = inner_s.0.lock().unwrap();
-                let now = Instant::now();
+                let now = Instant::from_std(base_instant);
                 let ret = inner.client.recv(
                     Transmit::new(&data[..size], TransportType::Udp, from, local_addr),
                     now,
@@ -156,7 +158,7 @@ impl ClientUdp {
         let inner_s = inner.clone();
         let socket_clone = socket.clone();
         std::thread::spawn(move || loop {
-            let now = Instant::now();
+            let now = Instant::from_std(base_instant);
             let mut inner = inner_s.0.lock().unwrap();
             let lowest_wait = match inner.client.poll(now) {
                 TurnPollRet::WaitUntil(wait) => wait,
@@ -178,14 +180,18 @@ impl ClientUdp {
             }
             let _ = inner_s.1.wait_timeout(inner, lowest_wait - now);
         });
-        Self { socket, inner }
+        Self {
+            base_instant,
+            socket,
+            inner,
+        }
     }
 }
 
 impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for ClientUdp {
     fn close(&self) {
         let mut inner = self.inner.0.lock().unwrap();
-        let now = Instant::now();
+        let now = Instant::from_std(self.base_instant);
         let _ = inner.client.delete(now);
         self.inner.1.notify_one();
     }
@@ -196,7 +202,7 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for ClientUdp {
         peer_addr: IpAddr,
     ) -> Result<(), CreatePermissionError> {
         let mut inner = self.inner.0.lock().unwrap();
-        let now = Instant::now();
+        let now = Instant::from_std(self.base_instant);
         inner.client.create_permission(transport, peer_addr, now)?;
         self.inner.1.notify_one();
         Ok(())
@@ -212,7 +218,12 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for ClientUdp {
             let mut inner = self.inner.0.lock().unwrap();
             let transmit = inner
                 .client
-                .send_to(transport, peer_addr, data, Instant::now())?
+                .send_to(
+                    transport,
+                    peer_addr,
+                    data,
+                    Instant::from_std(self.base_instant),
+                )?
                 .unwrap();
             Transmit::new(
                 transmit.data.build(),
@@ -233,6 +244,7 @@ struct ClientUdpInner {
 
 #[derive(Clone, Debug)]
 struct ClientTcp {
+    base_instant: std::time::Instant,
     send_sender: SyncSender<Data<'static>>,
     inner: Arc<(Mutex<ClientTcpInner>, Condvar)>,
 }
@@ -244,6 +256,7 @@ impl ClientTcp {
         credentials: TurnCredentials,
         events_sender: SyncSender<TurnEvent>,
     ) -> Self {
+        let base_instant = std::time::Instant::now();
         let local_addr = socket.local_addr().unwrap();
         let remote_addr = to;
         let client = TurnClientTcp::allocate(local_addr, remote_addr, credentials);
@@ -258,7 +271,7 @@ impl ClientTcp {
             };
             {
                 let mut inner = inner_s.0.lock().unwrap();
-                let now = Instant::now();
+                let now = Instant::from_std(base_instant);
                 let ret = inner.client.recv(
                     Transmit::new(&data[..size], TransportType::Tcp, remote_addr, local_addr),
                     now,
@@ -298,7 +311,7 @@ impl ClientTcp {
         let inner_s = inner.clone();
         let sender = send_sender.clone();
         std::thread::spawn(move || loop {
-            let now = Instant::now();
+            let now = Instant::from_std(base_instant);
             let mut inner = inner_s.0.lock().unwrap();
             let lowest_wait = match inner.client.poll(now) {
                 TurnPollRet::WaitUntil(wait) => wait,
@@ -320,14 +333,18 @@ impl ClientTcp {
             }
             let _ = inner_s.1.wait_timeout(inner, lowest_wait - now);
         });
-        Self { send_sender, inner }
+        Self {
+            base_instant,
+            send_sender,
+            inner,
+        }
     }
 }
 
 impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for ClientTcp {
     fn close(&self) {
         let mut inner = self.inner.0.lock().unwrap();
-        let _ = inner.client.delete(Instant::now());
+        let _ = inner.client.delete(Instant::from_std(self.base_instant));
 
         self.inner.1.notify_one();
         // TODO: actually close the TCP connection.
@@ -339,9 +356,11 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for ClientTcp {
         peer_addr: IpAddr,
     ) -> Result<(), CreatePermissionError> {
         let mut inner = self.inner.0.lock().unwrap();
-        inner
-            .client
-            .create_permission(transport, peer_addr, Instant::now())?;
+        inner.client.create_permission(
+            transport,
+            peer_addr,
+            Instant::from_std(self.base_instant),
+        )?;
         self.inner.1.notify_one();
         Ok(())
     }
@@ -356,7 +375,12 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for ClientTcp {
             let mut inner = self.inner.0.lock().unwrap();
             let transmit = inner
                 .client
-                .send_to(transport, peer_addr, data, Instant::now())?
+                .send_to(
+                    transport,
+                    peer_addr,
+                    data,
+                    Instant::from_std(self.base_instant),
+                )?
                 .unwrap();
             Transmit::new(
                 Data::from(transmit.data.build().into_boxed_slice()).into_owned(),
@@ -377,6 +401,7 @@ struct ClientTcpInner {
 
 #[derive(Clone, Debug)]
 struct ClientTls {
+    base_instant: std::time::Instant,
     send_sender: SyncSender<Data<'static>>,
     inner: Arc<(Mutex<ClientTlsInner>, Condvar)>,
 }
@@ -451,6 +476,7 @@ impl ClientTls {
         events_sender: SyncSender<TurnEvent>,
         insecure_tls: bool,
     ) -> Self {
+        let base_instant = std::time::Instant::now();
         let local_addr = socket.local_addr().unwrap();
         let remote_addr = to;
         let config = if insecure_tls {
@@ -481,7 +507,7 @@ impl ClientTls {
             };
             {
                 let mut inner = inner_s.0.lock().unwrap();
-                let now = Instant::now();
+                let now = Instant::from_std(base_instant);
                 let ret = inner.client.recv(
                     Transmit::new(&data[..size], TransportType::Tcp, remote_addr, local_addr),
                     now,
@@ -521,7 +547,7 @@ impl ClientTls {
         let inner_s = inner.clone();
         let sender = send_sender.clone();
         std::thread::spawn(move || loop {
-            let now = Instant::now();
+            let now = Instant::from_std(base_instant);
             let mut inner = inner_s.0.lock().unwrap();
             let lowest_wait = match inner.client.poll(now) {
                 TurnPollRet::WaitUntil(wait) => wait,
@@ -543,14 +569,18 @@ impl ClientTls {
             }
             let _ = inner_s.1.wait_timeout(inner, lowest_wait - now);
         });
-        Self { send_sender, inner }
+        Self {
+            base_instant,
+            send_sender,
+            inner,
+        }
     }
 }
 
 impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for ClientTls {
     fn close(&self) {
         let mut inner = self.inner.0.lock().unwrap();
-        let _ = inner.client.delete(Instant::now());
+        let _ = inner.client.delete(Instant::from_std(self.base_instant));
 
         self.inner.1.notify_one();
         // TODO: actually close the TCP connection.
@@ -562,9 +592,11 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for ClientTls {
         peer_addr: IpAddr,
     ) -> Result<(), CreatePermissionError> {
         let mut inner = self.inner.0.lock().unwrap();
-        inner
-            .client
-            .create_permission(transport, peer_addr, Instant::now())?;
+        inner.client.create_permission(
+            transport,
+            peer_addr,
+            Instant::from_std(self.base_instant),
+        )?;
         self.inner.1.notify_one();
         Ok(())
     }
@@ -579,7 +611,12 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for ClientTls {
             let mut inner = self.inner.0.lock().unwrap();
             let transmit = inner
                 .client
-                .send_to(transport, peer_addr, data, Instant::now())?
+                .send_to(
+                    transport,
+                    peer_addr,
+                    data,
+                    Instant::from_std(self.base_instant),
+                )?
                 .unwrap();
             Transmit::new(
                 Data::from(transmit.data.build().into_boxed_slice()).into_owned(),

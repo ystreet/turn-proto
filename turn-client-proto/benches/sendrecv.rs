@@ -8,8 +8,8 @@
 
 #![cfg(not(tarpaulin))]
 
+use sans_io_time::Instant;
 use std::net::SocketAddr;
-use std::time::Instant;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use stun_proto::agent::Transmit;
@@ -131,7 +131,7 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
         },
     );
 
-    let now = Instant::now();
+    let now = Instant::ZERO;
     test.allocate(now);
 
     let mut group = c.benchmark_group("Turn/Send");
@@ -239,7 +239,7 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
             TurnClientUdp::allocate(local_addr, remote_addr, credentials)
         },
     );
-    let now = Instant::now();
+    let now = Instant::ZERO;
     test.allocate(now);
 
     for size in SIZES.iter() {
