@@ -23,13 +23,16 @@ use stun_proto::types::message::{
 };
 use stun_proto::types::TransportType;
 use tracing::{debug, info, trace, warn};
-use turn_types::attribute::{ChannelNumber, Lifetime, XorPeerAddress, XorRelayedAddress};
+use turn_types::attribute::{
+    AdditionalAddressFamily, ChannelNumber, Lifetime, RequestedAddressFamily, XorPeerAddress,
+    XorRelayedAddress,
+};
 use turn_types::attribute::{Data as AData, DontFragment, RequestedTransport};
 use turn_types::channel::ChannelData;
 use turn_types::message::*;
 use turn_types::stun::message::MessageWriteVec;
 use turn_types::stun::prelude::{MessageWrite, MessageWriteExt};
-use turn_types::TurnCredentials;
+use turn_types::{AddressFamily, TurnCredentials};
 
 use crate::api::{
     BindChannelError, CreatePermissionError, DelayedMessageOrChannelSend, DeleteError, SendError,
@@ -47,6 +50,7 @@ pub(crate) static CHANNEL_REMOVE_DURATION: Duration = Duration::from_secs(300);
 
 #[derive(Debug)]
 pub(crate) struct TurnClientProtocol {
+    families: smallvec::SmallVec<[AddressFamily; 2]>,
     stun_agent: StunAgent,
     credentials: TurnCredentials,
     state: AuthState,
@@ -58,9 +62,26 @@ pub(crate) struct TurnClientProtocol {
 }
 
 impl TurnClientProtocol {
-    pub(crate) fn new(stun_agent: StunAgent, credentials: TurnCredentials) -> Self {
+    pub(crate) fn new(
+        stun_agent: StunAgent,
+        credentials: TurnCredentials,
+        address_families: &[AddressFamily],
+    ) -> Self {
         turn_types::debug_init();
+        let families = address_families.iter().cloned().fold(
+            smallvec::SmallVec::with_capacity(address_families.len()),
+            |mut ret, fam| {
+                if !ret.contains(&fam) {
+                    ret.push(fam);
+                }
+                ret
+            },
+        );
+        if families.is_empty() {
+            panic!("Incorrect number of address families");
+        }
         Self {
+            families,
             stun_agent,
             credentials,
             state: AuthState::Initial,
@@ -79,6 +100,23 @@ impl TurnClientProtocol {
         msg.add_attribute(&requested).unwrap();
         let dont_fragment = DontFragment::new();
         msg.add_attribute(&dont_fragment).unwrap();
+        if self.families.len() > 1 {
+            // This is the RFC 8656 path where a single client transport produces multiple
+            // allocations on the server
+            for fam in self.families.iter().cloned() {
+                if fam != AddressFamily::IPV4 {
+                    msg.add_attribute(&AdditionalAddressFamily::new(fam))
+                        .unwrap();
+                }
+            }
+        } else if self.families.is_empty() {
+            // Checked in new()
+            unreachable!();
+        } else if self.families[0] == AddressFamily::IPV6 {
+            // This is the RFC 6156 path (or RFC 8656 if only a single IPV6 allocation is required)
+            msg.add_attribute(&RequestedAddressFamily::new(AddressFamily::IPV6))
+                .unwrap();
+        }
         let transaction_id = msg.transaction_id();
         let msg = msg.finish();
 
@@ -94,6 +132,7 @@ impl TurnClientProtocol {
         stun_agent: &mut StunAgent,
         credentials: LongTermCredentials,
         nonce: &str,
+        address_families: &[AddressFamily],
         now: Instant,
     ) -> (Transmit<Data<'static>>, TransactionId) {
         info!("sending authenticated ALLOCATE");
@@ -106,6 +145,25 @@ impl TurnClientProtocol {
         builder.add_attribute(&realm).unwrap();
         let nonce = Nonce::new(nonce).unwrap();
         builder.add_attribute(&nonce).unwrap();
+        if address_families.len() > 1 {
+            // This is the RFC 8656 path where a single client transport produces multiple
+            // allocations on the server
+            for fam in address_families.iter().cloned() {
+                if fam != AddressFamily::IPV4 {
+                    builder
+                        .add_attribute(&AdditionalAddressFamily::new(fam))
+                        .unwrap();
+                }
+            }
+        } else if address_families.is_empty() {
+            // Checked in new()
+            unreachable!();
+        } else if address_families[0] == AddressFamily::IPV6 {
+            // This is the RFC 6156 path (or RFC 8656 if only a single IPV6 allocation is required)
+            builder
+                .add_attribute(&RequestedAddressFamily::new(AddressFamily::IPV6))
+                .unwrap();
+        }
         builder
             .add_message_integrity(
                 &stun_proto::types::message::MessageIntegrityCredentials::LongTerm(credentials),
@@ -802,8 +860,10 @@ impl TurnClientProtocol {
                 if !msg.has_class(stun_proto::types::message::MessageClass::Error) {
                     info!("Initial ALLOCATE response is not an error");
                     self.state = AuthState::Error;
-                    self.pending_events
-                        .push_front(TurnEvent::AllocationCreateFailed);
+                    for fam in self.families.iter().cloned() {
+                        self.pending_events
+                            .push_front(TurnEvent::AllocationCreateFailed(fam));
+                    }
                     return TurnProtocolRecv::Handled;
                 }
                 let error_code = msg.attribute::<ErrorCode>();
@@ -812,8 +872,10 @@ impl TurnClientProtocol {
                 let (Ok(error_code), Ok(realm), Ok(nonce)) = (error_code, realm, nonce) else {
                     info!("Initial ALLOCATE error response missing ErrorCode, Realm, or Nonce attribute");
                     self.state = AuthState::Error;
-                    self.pending_events
-                        .push_front(TurnEvent::AllocationCreateFailed);
+                    for fam in self.families.iter().cloned() {
+                        self.pending_events
+                            .push_front(TurnEvent::AllocationCreateFailed(fam));
+                    }
                     return TurnProtocolRecv::Handled;
                 };
                 match error_code.code() {
@@ -827,6 +889,7 @@ impl TurnClientProtocol {
                             &mut self.stun_agent,
                             credentials.clone(),
                             nonce.nonce(),
+                            &self.families,
                             now,
                         );
                         self.stun_agent.set_remote_credentials(
@@ -844,8 +907,10 @@ impl TurnClientProtocol {
                     code => {
                         trace!("Unknown error code returned {code:?}");
                         self.state = AuthState::Error;
-                        self.pending_events
-                            .push_front(TurnEvent::AllocationCreateFailed);
+                        for fam in self.families.iter().cloned() {
+                            self.pending_events
+                                .push_front(TurnEvent::AllocationCreateFailed(fam));
+                        }
                     }
                 }
                 return TurnProtocolRecv::Handled;
@@ -870,6 +935,7 @@ impl TurnClientProtocol {
                             stun_agent,
                             credentials.clone(),
                             nonce,
+                            &self.families,
                             now,
                         );
                         *nonce = new_nonce;
@@ -886,58 +952,127 @@ impl TurnClientProtocol {
                         let Ok(error_code) = msg.attribute::<ErrorCode>() else {
                             info!("Authenticating ALLOCATE error response missing ErrorCode attribute");
                             self.state = AuthState::Error;
-                            self.pending_events
-                                .push_front(TurnEvent::AllocationCreateFailed);
+                            for fam in self.families.iter().cloned() {
+                                self.pending_events
+                                    .push_front(TurnEvent::AllocationCreateFailed(fam));
+                            }
                             return TurnProtocolRecv::Handled;
                         };
+                        if error_code.code() == ErrorCode::ADDRESS_FAMILY_NOT_SUPPORTED
+                            && self.families.len() > 1
+                        {
+                            let mut removed_ipv4_family = false;
+                            self.families.retain(|fam| {
+                                if *fam != AddressFamily::IPV4 {
+                                    true
+                                } else {
+                                    removed_ipv4_family = true;
+                                    false
+                                }
+                            });
+                            if removed_ipv4_family {
+                                info!("Attempt to create dual IPv4/6 allocation failed with IPv4 failure. Attempting to create IPv6-only allocation");
+                                self.pending_events
+                                    .push_front(TurnEvent::AllocationCreateFailed(
+                                        AddressFamily::IPV4,
+                                    ));
+                                /* retry the request with a slightly different construction */
+                                let (transmit, transaction_id) = Self::send_authenticating_request(
+                                    &mut self.stun_agent,
+                                    credentials.clone(),
+                                    nonce,
+                                    &self.families,
+                                    now,
+                                );
+                                self.pending_transmits.push_back(transmit.into_owned());
+                                self.state = AuthState::Authenticating {
+                                    credentials: credentials.clone(),
+                                    nonce: nonce.clone(),
+                                    transaction_id,
+                                };
+                                return TurnProtocolRecv::Handled;
+                            }
+                        }
                         warn!(
                             "Unknown error code {} returned while authenticating: {}",
                             error_code.code(),
                             error_code.reason()
                         );
                         self.state = AuthState::Error;
-                        self.pending_events
-                            .push_front(TurnEvent::AllocationCreateFailed);
+                        for fam in self.families.iter().cloned() {
+                            self.pending_events
+                                .push_front(TurnEvent::AllocationCreateFailed(fam));
+                        }
                         return TurnProtocolRecv::Handled;
                     }
                     stun_proto::types::message::MessageClass::Success => {
-                        let xor_relayed_address = msg.attribute::<XorRelayedAddress>();
                         let lifetime = msg.attribute::<Lifetime>();
-                        let (Ok(xor_relayed_address), Ok(lifetime)) =
-                            (xor_relayed_address, lifetime)
-                        else {
-                            info!("Authenticating ALLOCATE response missing XorRelayedAddress or Lifetime attributes");
+                        let Ok(lifetime) = lifetime else {
+                            info!("Authenticating ALLOCATE response missing Lifetime attributes");
                             self.state = AuthState::Error;
-                            self.pending_events
-                                .push_front(TurnEvent::AllocationCreateFailed);
+                            for fam in self.families.iter().cloned() {
+                                self.pending_events
+                                    .push_front(TurnEvent::AllocationCreateFailed(fam));
+                            }
                             return TurnProtocolRecv::Handled;
                         };
-                        let relayed_address = xor_relayed_address.addr(msg.transaction_id());
                         let lifetime = Duration::from_secs(lifetime.seconds() as u64);
                         let expires_at = now + lifetime;
+
+                        let mut any_relayed = false;
+                        let mut relayed_i = 0;
+                        let mut unseen_families = self.families.clone();
+                        while let Ok(xor_relayed_address) =
+                            msg.nth_attribute::<XorRelayedAddress>(relayed_i)
+                        {
+                            let relayed_address = xor_relayed_address.addr(msg.transaction_id());
+                            let relayed_family = if relayed_address.is_ipv4() {
+                                AddressFamily::IPV4
+                            } else if relayed_address.is_ipv6() {
+                                AddressFamily::IPV6
+                            } else {
+                                // only IPv4/6 supported so far
+                                unreachable!();
+                            };
+
+                            if unseen_families.contains(&relayed_family) {
+                                info!(relayed = ?relayed_address, transport = ?TransportType::Udp, "New allocation expiring in {}s", lifetime.as_secs());
+                                self.allocations.push(Allocation {
+                                    relayed_address,
+                                    // TODO support TCP
+                                    transport: TransportType::Udp,
+                                    expired: false,
+                                    lifetime,
+                                    expires_at,
+                                    permissions: vec![],
+                                    channels: vec![],
+                                    pending_permissions: VecDeque::default(),
+                                    pending_channels: VecDeque::default(),
+                                    pending_refresh: None,
+                                    expired_channels: vec![],
+                                });
+                                self.pending_events.push_front(TurnEvent::AllocationCreated(
+                                    TransportType::Udp,
+                                    relayed_address,
+                                ));
+                                any_relayed = true;
+                                unseen_families.retain(|family| relayed_family != *family);
+                            }
+                            relayed_i += 1;
+                        }
+                        for fam in unseen_families {
+                            self.pending_events
+                                .push_front(TurnEvent::AllocationCreateFailed(fam));
+                        }
+                        if !any_relayed {
+                            warn!("Authenticated ALLOCATE response missing XorRelayedAddress attributes");
+                            self.state = AuthState::Error;
+                            return TurnProtocolRecv::Handled;
+                        };
                         self.state = AuthState::Authenticated {
                             credentials: credentials.clone(),
                             nonce: nonce.clone(),
                         };
-                        info!(relayed = ?relayed_address, transport = ?TransportType::Udp, "New allocation expiring in {}s", lifetime.as_secs());
-                        self.allocations.push(Allocation {
-                            relayed_address,
-                            // TODO support TCP
-                            transport: TransportType::Udp,
-                            expired: false,
-                            lifetime,
-                            expires_at,
-                            permissions: vec![],
-                            channels: vec![],
-                            pending_permissions: VecDeque::default(),
-                            pending_channels: VecDeque::default(),
-                            pending_refresh: None,
-                            expired_channels: vec![],
-                        });
-                        self.pending_events.push_front(TurnEvent::AllocationCreated(
-                            TransportType::Udp,
-                            relayed_address,
-                        ));
                         return TurnProtocolRecv::Handled;
                     }
                     _ => (),
@@ -1080,8 +1215,10 @@ impl TurnClientProtocol {
             AuthState::InitialSent(transaction_id) => {
                 if cancelled_transaction.is_some_and(|cancelled| &cancelled == transaction_id) {
                     info!("Initial transaction timed out or was cancelled");
-                    self.pending_events
-                        .push_back(TurnEvent::AllocationCreateFailed);
+                    for fam in self.families.iter().cloned() {
+                        self.pending_events
+                            .push_back(TurnEvent::AllocationCreateFailed(fam));
+                    }
                     self.state = AuthState::Error;
                     return TurnPollRet::Closed;
                 }
@@ -1688,7 +1825,9 @@ pub(crate) enum TurnProtocolChannelRecv {
 #[cfg(test)]
 mod tests {
     use turn_server_proto::api::TurnServerApi;
+    use turn_types::stun::attribute::UnknownAttributes;
     use turn_types::stun::message::{IntegrityAlgorithm, MessageHeader, Method};
+    use turn_types::stun::prelude::AttributeStaticType;
 
     use crate::api::tests::generate_addresses;
     use crate::api::TurnClientApi;
@@ -1697,13 +1836,17 @@ mod tests {
     use super::*;
 
     fn new_protocol() -> TurnClientProtocol {
+        new_protocol_with_families(&[AddressFamily::IPV4])
+    }
+
+    fn new_protocol_with_families(families: &[AddressFamily]) -> TurnClientProtocol {
         let (local_addr, remote_addr) = generate_addresses();
         let credentials = TurnCredentials::new("tuser", "tpass");
 
         let stun_agent = StunAgent::builder(TransportType::Udp, local_addr)
             .remote_addr(remote_addr)
             .build();
-        let client = TurnClientProtocol::new(stun_agent, credentials);
+        let client = TurnClientProtocol::new(stun_agent, credentials, families);
         assert_eq!(client.transport(), TransportType::Udp);
         assert_eq!(client.local_addr(), local_addr);
         assert_eq!(client.remote_addr(), remote_addr);
@@ -1755,7 +1898,7 @@ mod tests {
         assert!(matches!(ret, TurnProtocolRecv::Handled));
         assert!(matches!(
             client.poll_event(),
-            Some(TurnEvent::AllocationCreateFailed)
+            Some(TurnEvent::AllocationCreateFailed(_))
         ));
         assert!(matches!(client.poll(now), TurnPollRet::Closed));
     }
@@ -1971,8 +2114,20 @@ mod tests {
         check_allocate_reply_failed(&mut client, ret, now);
     }
 
+    fn generate_xor_relayed_address() -> SocketAddr {
+        "10.0.0.4:40000".parse().unwrap()
+    }
+
+    fn generate_ipv6_xor_relayed_address() -> SocketAddr {
+        "[::1]:40000".parse().unwrap()
+    }
+
     fn generate_xor_peer_address() -> SocketAddr {
         "10.0.0.3:9000".parse().unwrap()
+    }
+
+    fn generate_ipv6_xor_peer_address() -> SocketAddr {
+        "[::1]:9000".parse().unwrap()
     }
 
     static TEST_ALLOCATION_LIFETIME: u32 = 1000;
@@ -2010,7 +2165,7 @@ mod tests {
                 let transaction_id = reply.transaction_id();
                 reply
                     .add_attribute(&XorRelayedAddress::new(
-                        generate_xor_peer_address(),
+                        generate_xor_relayed_address(),
                         transaction_id,
                     ))
                     .unwrap();
@@ -2025,18 +2180,25 @@ mod tests {
     }
 
     fn authenticated_allocate(client: &mut TurnClientProtocol, now: Instant) {
+        authenticated_allocate_with_address(client, &[generate_xor_relayed_address()], now);
+    }
+
+    fn authenticated_allocate_with_address(
+        client: &mut TurnClientProtocol,
+        relayed: &[SocketAddr],
+        now: Instant,
+    ) {
         let credentials = client_credentials(client);
         let ret = allocate_response(
             client,
             |msg| {
                 let mut reply = Message::builder_success(&msg, MessageWriteVec::new());
                 let transaction_id = reply.transaction_id();
-                reply
-                    .add_attribute(&XorRelayedAddress::new(
-                        generate_xor_peer_address(),
-                        transaction_id,
-                    ))
-                    .unwrap();
+                for addr in relayed {
+                    reply
+                        .add_attribute(&XorRelayedAddress::new(*addr, transaction_id))
+                        .unwrap();
+                }
                 reply
                     .add_attribute(&Lifetime::new(TEST_ALLOCATION_LIFETIME))
                     .unwrap();
@@ -2048,11 +2210,15 @@ mod tests {
             now,
         );
         assert!(matches!(ret, TurnProtocolRecv::Handled));
-        assert!(matches!(
-            client.poll_event(),
-            Some(TurnEvent::AllocationCreated(_, _))
-        ));
-        assert_eq!(client.relayed_addresses().count(), 1);
+        for _addr in relayed {
+            let Some(TurnEvent::AllocationCreated(transport, allocation)) = client.poll_event()
+            else {
+                unreachable!();
+            };
+            assert_eq!(transport, TransportType::Udp);
+            assert!(relayed.contains(&allocation));
+        }
+        assert_eq!(client.relayed_addresses().count(), relayed.len());
     }
 
     fn wait_advance(client: &mut TurnClientProtocol, now: Instant) -> Instant {
@@ -2149,6 +2315,99 @@ mod tests {
             now,
         );
         assert!(matches!(ret, TurnProtocolRecv::Ignored(_)));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_ipv6_allocation_unknown_requested_address_family() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(&[AddressFamily::IPV6]);
+        initial_allocate(&mut client, now);
+        let credentials = client_credentials(&client);
+        let ret = allocate_response(
+            &mut client,
+            |msg| {
+                assert!(msg.has_attribute(RequestedAddressFamily::TYPE));
+                let mut reply = Message::builder_error(&msg, MessageWriteVec::new());
+                reply
+                    .add_attribute(
+                        &ErrorCode::builder(ErrorCode::UNKNOWN_ATTRIBUTE)
+                            .build()
+                            .unwrap(),
+                    )
+                    .unwrap();
+                reply
+                    .add_attribute(&UnknownAttributes::new(&[RequestedAddressFamily::TYPE]))
+                    .unwrap();
+                reply
+                    .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                    .unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        assert!(matches!(ret, TurnProtocolRecv::Handled));
+        let Some(TurnEvent::AllocationCreateFailed(AddressFamily::IPV6)) = client.poll_event()
+        else {
+            unreachable!();
+        };
+        assert_eq!(client.relayed_addresses().count(), 0);
+    }
+
+    // this is the auth flow for a server that does not support RFC8656 and only supports IPv6
+    // allocations.
+    #[test]
+    fn test_turn_client_protocol_unsupported_address_family() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(&[AddressFamily::IPV4, AddressFamily::IPV6]);
+        initial_allocate(&mut client, now);
+        let credentials = client_credentials(&client);
+        let ret = allocate_response(
+            &mut client,
+            |msg| {
+                let mut reply = Message::builder_error(&msg, MessageWriteVec::new());
+                reply
+                    .add_attribute(
+                        &ErrorCode::builder(ErrorCode::ADDRESS_FAMILY_NOT_SUPPORTED)
+                            .build()
+                            .unwrap(),
+                    )
+                    .unwrap();
+                reply
+                    .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                    .unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        assert!(matches!(ret, TurnProtocolRecv::Handled));
+        let Some(TurnEvent::AllocationCreateFailed(AddressFamily::IPV4)) = client.poll_event()
+        else {
+            unreachable!();
+        };
+        assert_eq!(client.relayed_addresses().count(), 0);
+        authenticated_allocate_with_address(
+            &mut client,
+            &[generate_ipv6_xor_relayed_address()],
+            now,
+        );
+    }
+
+    #[test]
+    fn test_turn_client_protocol_dual_allocation() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(&[AddressFamily::IPV4, AddressFamily::IPV6]);
+        initial_allocate(&mut client, now);
+        authenticated_allocate_with_address(
+            &mut client,
+            &[
+                generate_ipv6_xor_relayed_address(),
+                generate_xor_relayed_address(),
+            ],
+            now,
+        );
     }
 
     #[test]
@@ -2457,9 +2716,11 @@ mod tests {
     }
 
     fn channel_bind(client: &mut TurnClientProtocol, now: Instant) {
-        client
-            .bind_channel(TransportType::Udp, generate_xor_peer_address(), now)
-            .unwrap();
+        channel_bind_with_address(client, generate_xor_peer_address(), now);
+    }
+
+    fn channel_bind_with_address(client: &mut TurnClientProtocol, peer: SocketAddr, now: Instant) {
+        client.bind_channel(TransportType::Udp, peer, now).unwrap();
         channel_bind_success_response(client, now);
     }
 
@@ -2530,6 +2791,37 @@ mod tests {
         let ret = channel_bind_response(&mut client, |msg| generate_stale_nonce(&msg), now);
         assert!(matches!(ret, TurnProtocolRecv::Handled));
         channel_bind_refresh_success_response(&mut client, now);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_dual_allocation_channel_bind() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(&[AddressFamily::IPV4, AddressFamily::IPV6]);
+        initial_allocate(&mut client, now);
+        authenticated_allocate_with_address(
+            &mut client,
+            &[
+                generate_ipv6_xor_relayed_address(),
+                generate_xor_relayed_address(),
+            ],
+            now,
+        );
+        channel_bind_with_address(&mut client, generate_xor_peer_address(), now);
+        channel_bind_with_address(&mut client, generate_ipv6_xor_peer_address(), now);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_channel_bind_wrong_address_family() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(&[AddressFamily::IPV4, AddressFamily::IPV6]);
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        assert!(matches!(
+            client.bind_channel(TransportType::Udp, generate_ipv6_xor_peer_address(), now),
+            Err(BindChannelError::NoAllocation)
+        ));
     }
 
     #[test]
@@ -2613,8 +2905,16 @@ mod tests {
     }
 
     fn create_permission(client: &mut TurnClientProtocol, now: Instant) {
+        create_permission_with_address(client, generate_xor_peer_address(), now);
+    }
+
+    fn create_permission_with_address(
+        client: &mut TurnClientProtocol,
+        peer: SocketAddr,
+        now: Instant,
+    ) {
         client
-            .create_permission(TransportType::Udp, generate_xor_peer_address().ip(), now)
+            .create_permission(TransportType::Udp, peer.ip(), now)
             .unwrap();
         create_permission_success_response(client, now);
         let (transport, _relayed) = client.relayed_addresses().next().unwrap();
@@ -2622,7 +2922,7 @@ mod tests {
             client.poll_event(),
             Some(TurnEvent::PermissionCreated(_, _))
         ));
-        assert!(client.have_permission(transport, generate_xor_peer_address().ip()));
+        assert!(client.have_permission(transport, peer.ip()));
     }
 
     #[test]
@@ -2675,6 +2975,41 @@ mod tests {
         let ret = create_permission_response(&mut client, |msg| generate_stale_nonce(&msg), now);
         assert!(matches!(ret, TurnProtocolRecv::Handled));
         create_permission_success_response(&mut client, now);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_dual_allocation_create_permission() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(&[AddressFamily::IPV4, AddressFamily::IPV6]);
+        initial_allocate(&mut client, now);
+        authenticated_allocate_with_address(
+            &mut client,
+            &[
+                generate_ipv6_xor_relayed_address(),
+                generate_xor_relayed_address(),
+            ],
+            now,
+        );
+        create_permission_with_address(&mut client, generate_xor_peer_address(), now);
+        create_permission_with_address(&mut client, generate_ipv6_xor_peer_address(), now);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_create_permission_wrong_address_family() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(&[AddressFamily::IPV4, AddressFamily::IPV6]);
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        assert!(matches!(
+            client.create_permission(
+                TransportType::Udp,
+                generate_ipv6_xor_peer_address().ip(),
+                now
+            ),
+            Err(CreatePermissionError::NoAllocation)
+        ));
     }
 
     #[test]

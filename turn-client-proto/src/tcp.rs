@@ -21,6 +21,7 @@ use stun_proto::types::TransportType;
 
 use turn_types::channel::ChannelData;
 use turn_types::tcp::{IncomingTcp, StoredTcp, TurnTcpBuffer};
+use turn_types::AddressFamily;
 use turn_types::TurnCredentials;
 
 use tracing::{trace, warn};
@@ -47,14 +48,19 @@ impl TurnClientTcp {
     ///
     /// # Examples
     /// ```
-    /// # use turn_types::TurnCredentials;
+    /// # use turn_types::{AddressFamily, TurnCredentials};
     /// # use turn_client_proto::prelude::*;
     /// # use turn_client_proto::tcp::TurnClientTcp;
     /// # use stun_proto::types::TransportType;
     /// let credentials = TurnCredentials::new("tuser", "tpass");
     /// let local_addr = "192.168.0.1:4000".parse().unwrap();
     /// let remote_addr = "10.0.0.1:3478".parse().unwrap();
-    /// let client = TurnClientTcp::allocate(local_addr, remote_addr, credentials);
+    /// let client = TurnClientTcp::allocate(
+    ///     local_addr,
+    ///     remote_addr,
+    ///     credentials,
+    ///     &[AddressFamily::IPV4]
+    /// );
     /// assert_eq!(client.transport(), TransportType::Tcp);
     /// assert_eq!(client.local_addr(), local_addr);
     /// assert_eq!(client.remote_addr(), remote_addr);
@@ -67,13 +73,14 @@ impl TurnClientTcp {
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         credentials: TurnCredentials,
+        allocation_families: &[AddressFamily],
     ) -> Self {
         let stun_agent = StunAgent::builder(TransportType::Tcp, local_addr)
             .remote_addr(remote_addr)
             .build();
 
         Self {
-            protocol: TurnClientProtocol::new(stun_agent, credentials),
+            protocol: TurnClientProtocol::new(stun_agent, credentials, allocation_families),
             incoming_tcp_buffer: TurnTcpBuffer::new(),
         }
     }
@@ -339,7 +346,7 @@ mod tests {
         remote_addr: SocketAddr,
         credentials: TurnCredentials,
     ) -> TurnClient {
-        TurnClientTcp::allocate(local_addr, remote_addr, credentials).into()
+        TurnClientTcp::allocate(local_addr, remote_addr, credentials, &[AddressFamily::IPV4]).into()
     }
 
     fn turn_server_tcp_new(listen_addr: SocketAddr, realm: String) -> TurnServer {

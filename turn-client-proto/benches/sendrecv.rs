@@ -20,6 +20,7 @@ use turn_client_proto::prelude::*;
 use turn_client_proto::udp::TurnClientUdp;
 use turn_server_proto::api::{TurnServerApi, TurnServerPollRet};
 use turn_server_proto::server::TurnServer;
+use turn_types::AddressFamily;
 use turn_types::{stun::TransportType, TurnCredentials};
 
 struct TurnTest<T: TurnClientApi> {
@@ -127,7 +128,7 @@ static SIZES: [usize; 3] = [32, 1024, 16000];
 fn bench_turn_client_sendrecv(c: &mut Criterion) {
     let mut test = TurnTest::new(
         |local_addr: SocketAddr, remote_addr: SocketAddr, credentials: TurnCredentials| {
-            TurnClientUdp::allocate(local_addr, remote_addr, credentials)
+            TurnClientUdp::allocate(local_addr, remote_addr, credentials, &[AddressFamily::IPV4])
         },
     );
 
@@ -236,7 +237,7 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
     let mut group = c.benchmark_group("Turn/Recv");
     let mut test = TurnTest::new(
         |local_addr: SocketAddr, remote_addr: SocketAddr, credentials: TurnCredentials| {
-            TurnClientUdp::allocate(local_addr, remote_addr, credentials)
+            TurnClientUdp::allocate(local_addr, remote_addr, credentials, &[AddressFamily::IPV4])
         },
     );
     let now = Instant::ZERO;
