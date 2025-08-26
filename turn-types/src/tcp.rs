@@ -16,6 +16,16 @@
 //! stream-based protocol and the size of a message must be infered from the contained data. This
 //! module performs the relevant buffering of incoming data over a TCP connection and produces
 //! [`Message`]s or [`ChannelData`] as they are completely received.
+//!
+//! The buffering performed by [`TurnTcpBuffer`] is only applicable for the TCP connection between
+//! the TURN client and the TURN server when using a UDP allocation. Use of TURN-TCP ([RFC6062])
+//! requires the TURN client to connect to the TURN server using a TCP connection (optionally with
+//! TLS) and data on the separate data TCP connection is forwarded as-is. The control connection for
+//! TURN-TCP requires buffering of only STUN Messages without any framing and can also be performed
+//! by [`TurnTcpBuffer`] if any [`ChannelData`] messages received are considered fatal TURN protocol
+//! errors.
+//!
+//! [RFC6062]: https://tools.ietf.org/html/rfc6062
 
 use std::ops::Range;
 
@@ -25,7 +35,10 @@ use tracing::{debug, trace};
 
 use crate::channel::ChannelData;
 
-/// Reply to [`TurnTcpBuffer::incoming_tcp()`]
+/// Reply to [`TurnTcpBuffer::incoming_tcp()`].
+///
+/// The `Transmit<T>` in each value  is always the original value passed to
+/// [`TurnTcpBuffer::incoming_tcp()`].
 #[derive(Debug)]
 pub enum IncomingTcp<T: AsRef<[u8]> + std::fmt::Debug> {
     /// Input data (with the provided range) contains a complete STUN Message.
@@ -43,7 +56,7 @@ pub enum IncomingTcp<T: AsRef<[u8]> + std::fmt::Debug> {
 }
 
 impl<T: AsRef<[u8]> + std::fmt::Debug> IncomingTcp<T> {
-    /// The byte slice for this incoming or stored data.
+    /// The byte slice for this incoming, or stored message, or channel.
     pub fn data(&self) -> &[u8] {
         match self {
             Self::CompleteMessage(transmit, range) => {
