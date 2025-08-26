@@ -13,8 +13,6 @@ use stun_types::{
     message::{StunParseError, TransactionId},
 };
 
-pub use stun_types::attribute::AddressFamily;
-
 /// The [`XorPeerAddress`] [`Attribute`].
 ///
 /// Typically used for signalling the address of the peer that a TURN server should send data
@@ -281,6 +279,7 @@ impl RequestedAddressFamily {
     /// # Examples
     ///
     /// ```
+    /// # use turn_types::AddressFamily;
     /// # use turn_types::attribute::*;
     /// let requested = RequestedAddressFamily::new(AddressFamily::IPV4);
     /// assert_eq!(requested.family(), AddressFamily::IPV4);
@@ -294,6 +293,7 @@ impl RequestedAddressFamily {
     /// # Examples
     ///
     /// ```
+    /// # use turn_types::AddressFamily;
     /// # use turn_types::attribute::*;
     /// let requested = RequestedAddressFamily::new(AddressFamily::IPV6);
     /// assert_eq!(requested.family(), AddressFamily::IPV6);
@@ -387,6 +387,7 @@ impl AdditionalAddressFamily {
     /// # Examples
     ///
     /// ```
+    /// # use turn_types::AddressFamily;
     /// # use turn_types::attribute::*;
     /// let additional = AdditionalAddressFamily::new(AddressFamily::IPV6);
     /// assert_eq!(additional.family(), AddressFamily::IPV6);
@@ -403,6 +404,7 @@ impl AdditionalAddressFamily {
     /// # Examples
     ///
     /// ```
+    /// # use turn_types::AddressFamily;
     /// # use turn_types::attribute::*;
     /// let additional = AdditionalAddressFamily::new(AddressFamily::IPV6);
     /// assert_eq!(additional.family(), AddressFamily::IPV6);
@@ -499,6 +501,7 @@ impl AddressErrorCode {
     /// # Examples
     ///
     /// ```
+    /// # use turn_types::AddressFamily;
     /// # use turn_types::attribute::*;
     /// use stun_types::attribute::ErrorCode;
     /// let error = ErrorCode::builder(440).build().unwrap();
@@ -514,6 +517,7 @@ impl AddressErrorCode {
     /// # Examples
     ///
     /// ```
+    /// # use turn_types::AddressFamily;
     /// # use turn_types::attribute::*;
     /// use stun_types::attribute::ErrorCode;
     /// let error = ErrorCode::builder(440).build().unwrap();
@@ -529,6 +533,7 @@ impl AddressErrorCode {
     /// # Examples
     ///
     /// ```
+    /// # use turn_types::AddressFamily;
     /// # use turn_types::attribute::*;
     /// use stun_types::attribute::ErrorCode;
     /// let error = ErrorCode::builder(440).build().unwrap();

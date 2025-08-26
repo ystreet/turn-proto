@@ -15,8 +15,8 @@
 
 mod address;
 pub use address::{
-    AdditionalAddressFamily, AddressErrorCode, AddressFamily, RequestedAddressFamily,
-    XorPeerAddress, XorRelayedAddress,
+    AdditionalAddressFamily, AddressErrorCode, RequestedAddressFamily, XorPeerAddress,
+    XorRelayedAddress,
 };
 mod channel;
 pub use channel::ChannelNumber;
