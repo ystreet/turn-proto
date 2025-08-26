@@ -10,8 +10,8 @@
 //!
 //! A cohesive TURN client that can be one of the transport specific (UDP, TCP, TLS) implementations.
 
+use sans_io_time::Instant;
 use std::net::{IpAddr, SocketAddr};
-use std::time::Instant;
 
 use stun_proto::agent::Transmit;
 use turn_types::stun::{data::Data, TransportType};

@@ -8,10 +8,11 @@
 
 //! A TURN server that can handle TLS client connections.
 
+use sans_io_time::Instant;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rustls::{ServerConfig, ServerConnection};
 use stun_proto::agent::Transmit;

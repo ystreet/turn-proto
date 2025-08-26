@@ -8,9 +8,10 @@
 
 //! A TURN server that can handle UDP and TCP connections.
 
+use sans_io_time::Instant;
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rand::Rng;
 use stun_proto::agent::{StunAgent, Transmit};
@@ -1320,7 +1321,7 @@ mod tests {
     #[test]
     fn test_server_stun_binding() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (_realm, _nonce) = initial_allocate(&mut server, now);
         let reply = server
@@ -1385,7 +1386,7 @@ mod tests {
     #[test]
     fn test_server_initial_allocate_unauthorized_reply() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let reply = server
             .recv(
@@ -1399,7 +1400,7 @@ mod tests {
     #[test]
     fn test_server_duplicate_initial_allocate_unauthorized_reply() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let reply = server
             .recv(
@@ -1432,7 +1433,7 @@ mod tests {
     #[test]
     fn test_server_authenticated_allocate_missing_attributes() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let attributes = [
             Nonce::TYPE,
             Realm::TYPE,
@@ -1557,7 +1558,7 @@ mod tests {
     #[test]
     fn test_server_authenticated_allocate_wrong_credentials() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials();
@@ -1589,7 +1590,7 @@ mod tests {
     #[test]
     fn test_server_authenticated_allocate_without_initial() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let nonce = String::from("random");
         let creds = credentials();
@@ -1602,7 +1603,7 @@ mod tests {
     #[test]
     fn test_server_authenticated_allocate_wrong_transport_type() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -1639,7 +1640,7 @@ mod tests {
     #[test]
     fn test_server_create_permission_without_allocation() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -1681,7 +1682,7 @@ mod tests {
     #[test]
     fn test_server_create_permission_without_peer_address() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -1720,7 +1721,7 @@ mod tests {
     #[test]
     fn test_server_create_permission_wrong_family() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -1765,7 +1766,7 @@ mod tests {
     #[test]
     fn test_server_create_permission_wrong_username() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -1787,7 +1788,7 @@ mod tests {
     #[test]
     fn test_server_create_permission_malformed_peer_address() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -1845,7 +1846,7 @@ mod tests {
     #[test]
     fn test_server_channel_bind_without_allocation() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -1869,7 +1870,7 @@ mod tests {
     #[test]
     fn test_server_channel_bind_missing_attributes() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -1949,7 +1950,7 @@ mod tests {
     #[test]
     fn test_server_channel_bind_invalid_id() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -1995,7 +1996,7 @@ mod tests {
     #[test]
     fn test_server_channel_bind_wrong_family() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -2041,7 +2042,7 @@ mod tests {
     #[test]
     fn test_server_allocation_expire_channel_bind() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -2069,7 +2070,7 @@ mod tests {
     #[test]
     fn test_server_duplicate_channel_bind() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -2101,7 +2102,7 @@ mod tests {
     #[test]
     fn test_server_channel_bind_refresh_wrong_address() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -2153,7 +2154,7 @@ mod tests {
     #[test]
     fn test_server_refresh_without_allocation() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -2181,7 +2182,7 @@ mod tests {
     #[test]
     fn test_server_send_without_allocation() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         assert!(server
             .recv(
@@ -2194,7 +2195,7 @@ mod tests {
     #[test]
     fn test_server_send_allocation_expired() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -2213,7 +2214,7 @@ mod tests {
     #[test]
     fn test_server_send_no_allocation() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -2232,7 +2233,7 @@ mod tests {
     #[test]
     fn test_server_send_without_permission() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -2268,7 +2269,7 @@ mod tests {
     #[test]
     fn test_server_send_indication_with_permission() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -2290,7 +2291,7 @@ mod tests {
     #[test]
     fn test_server_unknown_request() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -2329,7 +2330,7 @@ mod tests {
     #[test]
     fn test_server_unknown_indication() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -2360,7 +2361,7 @@ mod tests {
     #[test]
     fn test_server_unknown_source_address() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         assert!(server
             .recv(client_transmit([4; 12], server.transport()), now)
@@ -2370,7 +2371,7 @@ mod tests {
     #[test]
     fn test_server_invalid_client_data() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -2385,7 +2386,7 @@ mod tests {
     #[test]
     fn test_server_recv_no_channel() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -2411,7 +2412,7 @@ mod tests {
     #[test]
     fn test_server_recv_channel_permission_expire() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);
@@ -2439,7 +2440,7 @@ mod tests {
     #[test]
     fn test_server_peer_recv_permission_expire() {
         let _init = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
         let (realm, nonce) = initial_allocate(&mut server, now);
         let creds = credentials().into_long_term_credentials(&realm);

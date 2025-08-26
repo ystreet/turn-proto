@@ -16,6 +16,7 @@ byteorder.workspace = true
 stun-proto.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+sans-io-time.workspace = true
 turn-types = { path = "../turn-types", version = "0.3.0" }
 
 rustls = { workspace = true, optional = true }
@@ -28,6 +29,7 @@ criterion.workspace = true
 rustls.workspace = true
 rustls-platform-verifier.workspace = true
 rcgen = "0.14"
+sans-io-time = { workspace = true, features = ["std"] }
 
 [features]
 default = ["rustls"]

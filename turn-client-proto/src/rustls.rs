@@ -10,10 +10,10 @@
 //!
 //! An implementation of a TURN client suitable for TLS over TCP connections.
 
+use sans_io_time::Instant;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Instant;
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection};
@@ -686,7 +686,7 @@ mod tests {
     #[test]
     fn test_turn_rustls_allocate_udp_permission() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test();
         allocate_udp(&mut test, now);
         udp_permission(&mut test, now);
@@ -696,7 +696,7 @@ mod tests {
     #[test]
     fn test_turn_rustls_allocate_refresh() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test();
         allocate_udp(&mut test, now);
         let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
@@ -713,7 +713,7 @@ mod tests {
     #[test]
     fn test_turn_rustls_allocate_delete() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test();
         allocate_udp(&mut test, now);
         delete_udp(&mut test, now);
@@ -722,7 +722,7 @@ mod tests {
     #[test]
     fn test_turn_rustls_allocate_bind_channel() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test();
         allocate_udp(&mut test, now);
         channel_bind(&mut test, now);
@@ -732,7 +732,7 @@ mod tests {
     #[test]
     fn test_turn_rustls_offpath_data() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::now();
+        let now = Instant::ZERO;
         let mut test = create_test();
         allocate_udp(&mut test, now);
         udp_permission(&mut test, now);
