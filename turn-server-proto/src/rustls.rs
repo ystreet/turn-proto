@@ -13,13 +13,14 @@ use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use turn_types::AddressFamily;
 
 use rustls::{ServerConfig, ServerConnection};
 use stun_proto::agent::Transmit;
 use tracing::{info, trace, warn};
 use turn_types::stun::TransportType;
 
-use crate::api::{TurnServerApi, TurnServerPollRet};
+use crate::api::{SocketAllocateError, TurnServerApi, TurnServerPollRet};
 use crate::server::TurnServer;
 
 /// A TURN server that can handle TLS connections.
@@ -244,10 +245,17 @@ impl TurnServerApi for RustlsTurnServer {
         transport: TransportType,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
-        socket_addr: Result<SocketAddr, ()>,
+        family: AddressFamily,
+        socket_addr: Result<SocketAddr, SocketAllocateError>,
         now: Instant,
     ) {
-        self.server
-            .allocated_udp_socket(transport, local_addr, remote_addr, socket_addr, now)
+        self.server.allocated_udp_socket(
+            transport,
+            local_addr,
+            remote_addr,
+            family,
+            socket_addr,
+            now,
+        )
     }
 }
