@@ -749,6 +749,7 @@ pub(crate) mod tests {
                 transport,
                 local_addr: alloc_local_addr,
                 remote_addr: alloc_remote_addr,
+                family,
             } = self.server.poll(now)
             else {
                 unreachable!();
@@ -760,6 +761,7 @@ pub(crate) mod tests {
                 transport,
                 alloc_local_addr,
                 alloc_remote_addr,
+                family,
                 Ok(self.turn_alloc_addr),
                 now,
             );

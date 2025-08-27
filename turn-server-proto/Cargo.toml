@@ -24,6 +24,7 @@ turn-types = { path = "../turn-types", version = "0.3.0" }
 rand.workspace = true
 rustls = { workspace = true, optional = true }
 sans-io-time.workspace = true
+smallvec = "1"
 
 [dev-dependencies]
 rustls.workspace = true

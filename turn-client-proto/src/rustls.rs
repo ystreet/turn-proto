@@ -590,6 +590,7 @@ mod tests {
             TransportType::Tcp,
             test.client.remote_addr(),
             test.client.local_addr(),
+            AddressFamily::IPV4,
             Ok(test.turn_alloc_addr),
             now,
         );

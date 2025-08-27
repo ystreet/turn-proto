@@ -28,17 +28,20 @@ use turn_types::channel::ChannelData;
 
 use turn_types::message::CREATE_PERMISSION;
 
-use turn_types::attribute::Data as AData;
+use turn_types::attribute::{
+    AdditionalAddressFamily, AddressErrorCode, Data as AData, EvenPort, RequestedAddressFamily,
+    ReservationToken,
+};
 use turn_types::attribute::{
     ChannelNumber, Lifetime, RequestedTransport, XorPeerAddress, XorRelayedAddress,
 };
 use turn_types::message::{ALLOCATE, CHANNEL_BIND, DATA, REFRESH, SEND};
 use turn_types::stun::message::IntegrityAlgorithm;
-use turn_types::TurnCredentials;
+use turn_types::{AddressFamily, TurnCredentials};
 
 use tracing::{debug, error, info, trace, warn};
 
-use crate::api::{TurnServerApi, TurnServerPollRet};
+use crate::api::{SocketAllocateError, TurnServerApi, TurnServerPollRet};
 
 static MINIMUM_NONCE_EXPIRY_DURATION: Duration = Duration::from_secs(30);
 static DEFAULT_NONCE_EXPIRY_DURATION: Duration = Duration::from_secs(3600);
@@ -65,8 +68,11 @@ pub struct TurnServer {
 #[derive(Debug)]
 struct PendingClient {
     client: Client,
-    asked: bool,
     transaction_id: TransactionId,
+    to_ask_families: smallvec::SmallVec<[AddressFamily; 2]>,
+    pending_families: smallvec::SmallVec<[AddressFamily; 2]>,
+    pending_sockets:
+        smallvec::SmallVec<[(AddressFamily, Result<SocketAddr, SocketAllocateError>); 2]>,
 }
 
 #[derive(Debug)]
@@ -190,10 +196,7 @@ impl TurnServer {
         let nonce = msg.attribute::<Nonce>().ok();
         let Some(((username, _realm), nonce)) = username.zip(realm).zip(nonce) else {
             trace!("bad request due to missing username, realm, nonce");
-            let error = ErrorCode::builder(ErrorCode::BAD_REQUEST).build().unwrap();
-            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
-            builder.add_attribute(&error).unwrap();
-            return Err(builder);
+            return Err(Self::bad_request(msg));
         };
 
         let nonce_value = self.validate_nonce(ttype, from, to, now);
@@ -273,6 +276,21 @@ impl TurnServer {
         response
     }
 
+    fn bad_request(msg: &Message<'_>) -> MessageWriteVec {
+        let mut builder = Message::builder_error(msg, MessageWriteVec::new());
+        let error = ErrorCode::builder(ErrorCode::BAD_REQUEST).build().unwrap();
+        builder.add_attribute(&error).unwrap();
+        builder
+    }
+
+    fn bad_request_signed(msg: &Message<'_>, credentials: LongTermCredentials) -> MessageWriteVec {
+        let mut builder = Self::bad_request(msg);
+        builder
+            .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+            .unwrap();
+        builder
+    }
+
     fn allocation_mismatch(msg: &Message<'_>, credentials: LongTermCredentials) -> MessageWriteVec {
         let mut response = Message::builder_error(msg, MessageWriteVec::new());
         let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
@@ -324,25 +342,22 @@ impl TurnServer {
         now: Instant,
     ) -> Result<(), MessageWriteVec> {
         let credentials = self.validate_stun(msg, ttype, from, to, now)?;
+        let mut address_families = smallvec::SmallVec::<[AddressFamily; 2]>::new();
 
         if let Some(_client) = self.mut_client_from_5tuple(ttype, to, from) {
             return Err(Self::allocation_mismatch(msg, credentials));
         };
 
         let Ok(requested_transport) = msg.attribute::<RequestedTransport>() else {
-            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
-            let error = ErrorCode::builder(ErrorCode::BAD_REQUEST).build().unwrap();
-            builder.add_attribute(&error).unwrap();
-            builder
-                .add_message_integrity(
-                    &MessageIntegrityCredentials::LongTerm(credentials),
-                    stun_proto::types::message::IntegrityAlgorithm::Sha1,
-                )
-                .unwrap();
-            return Err(builder);
+            debug!("no RequestedTransport -> Bad Request");
+            return Err(Self::bad_request_signed(msg, credentials));
         };
 
         if requested_transport.protocol() != RequestedTransport::UDP {
+            debug!(
+                "unsupported RequestedTransport {}",
+                requested_transport.protocol()
+            );
             let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::UNSUPPORTED_TRANSPORT_PROTOCOL)
                 .build()
@@ -357,9 +372,69 @@ impl TurnServer {
             return Err(builder);
         }
 
+        let reservation_token = msg.attribute::<ReservationToken>();
+        let even_port = msg.attribute::<EvenPort>();
+        let requested_address_family = msg.attribute::<RequestedAddressFamily>();
+        let additional_address_family = msg.attribute::<AdditionalAddressFamily>();
+
+        if let Ok(additional) = additional_address_family {
+            /* The server checks if the request contains both
+             * REQUESTED-ADDRESS-FAMILY and ADDITIONAL-ADDRESS-FAMILY attributes. If yes,
+             * then the server rejects the request with a 400 (Bad Request) error.
+             */
+            /* The server checks if the request contains an ADDITIONAL-ADDRESS-FAMILY
+             * attribute. If yes, and the attribute value is 0x01 (IPv4 address family),
+             * then the server rejects the request with a 400 (Bad Request) error.
+             */
+            if requested_address_family.is_ok()
+                || additional.family() == AddressFamily::IPV4
+                || reservation_token.is_ok()
+                || even_port.is_ok()
+            {
+                debug!(
+                    "AdditionalAddressFamily with either {} == IPV4, ReservationToken {}, RequestedAddressFamily {}, or EvenPort {}. Bad Request",
+                    additional.family(),
+                    reservation_token.is_ok(),
+                    requested_address_family.is_ok(),
+                    even_port.is_ok(),
+                );
+                return Err(Self::bad_request_signed(msg, credentials));
+            }
+            address_families.push(AddressFamily::IPV4);
+            address_families.push(additional.family());
+        }
+
+        if let Ok(requested) = requested_address_family {
+            if reservation_token.is_ok() {
+                debug!("RequestedAddressFamily with ReservationToken -> Bad Request");
+                return Err(Self::bad_request_signed(msg, credentials));
+            }
+            address_families.push(requested.family());
+        } else if address_families.is_empty() {
+            address_families.push(AddressFamily::IPV4);
+        }
+
+        if let Ok(_reservation_token) = msg.attribute::<ReservationToken>() {
+            /* The server checks if the request contains a RESERVATION-TOKEN
+             * attribute. If yes, and the request also contains an EVEN-PORT or
+             * REQUESTED-ADDRESS-FAMILY or ADDITIONAL-ADDRESS-FAMILY attribute,
+             * the server rejects the request with a 400 (Bad Request) error.
+             * Otherwise, it checks to see if the token is valid (i.e., the
+             * token is in range and has not expired, and the corresponding
+             * relayed transport address is still available). If the token is
+             * not valid for some reason, the server rejects the request with a
+             * 508 (Insufficient Capacity) error.
+             */
+            if even_port.is_ok() {
+                debug!("ReservationToken with EvenPort -> Bad Request");
+                return Err(Self::bad_request_signed(msg, credentials));
+            }
+
+            // TODO: further RESERVATION-TOKEN handling
+        }
+
         // TODO: DONT-FRAGMENT
         // TODO: EVEN-PORT
-        // TODO: RESERVATION-TOKEN
         // TODO: allocation quota
         // XXX: TRY-ALTERNATE
 
@@ -374,8 +449,10 @@ impl TurnServer {
 
         self.pending_allocates.push_front(PendingClient {
             client,
-            asked: false,
             transaction_id: msg.transaction_id(),
+            to_ask_families: address_families.clone(),
+            pending_families: address_families,
+            pending_sockets: Default::default(),
         });
 
         Ok(())
@@ -395,26 +472,67 @@ impl TurnServer {
             return Err(Self::allocation_mismatch(msg, credentials));
         };
 
+        let requested_family = msg
+            .attribute::<RequestedAddressFamily>()
+            .ok()
+            .map(|requested| requested.family());
+
         // TODO: proper lifetime handling
         let request_lifetime = msg
             .attribute::<Lifetime>()
             .map(|lt| lt.seconds())
             .unwrap_or(600);
+        let mut modified = false;
         let credentials = if request_lifetime == 0 {
-            // TODO: handle dual IPv4/6 allocations.
             let credentials = client.credentials.clone();
-            self.remove_client_by_5tuple(ttype, to, from);
+            if let Some(family) = requested_family {
+                client.allocations.retain(|allocation| {
+                    if (family == AddressFamily::IPV4 && allocation.addr.is_ipv4())
+                        || (family == AddressFamily::IPV6 && allocation.addr.is_ipv6())
+                    {
+                        modified = true;
+                        false
+                    } else {
+                        true
+                    }
+                });
+                if client.allocations.is_empty() {
+                    self.remove_client_by_5tuple(ttype, to, from);
+                }
+            } else {
+                self.remove_client_by_5tuple(ttype, to, from);
+                modified = true;
+            }
             credentials
         } else {
             for allocation in client.allocations.iter_mut() {
-                allocation.expires_at = now + Duration::from_secs(request_lifetime as u64)
+                if requested_family.map_or(true, |family| {
+                    (family == AddressFamily::IPV4 && allocation.addr.is_ipv4())
+                        || (family == AddressFamily::IPV6 && allocation.addr.is_ipv6())
+                }) {
+                    modified = true;
+                    allocation.expires_at = now + Duration::from_secs(request_lifetime as u64)
+                }
             }
             client.credentials.clone()
         };
 
-        let mut builder = Message::builder_success(msg, MessageWriteVec::new());
-        let lifetime = Lifetime::new(request_lifetime);
-        builder.add_attribute(&lifetime).unwrap();
+        let mut builder = if modified {
+            let mut builder = Message::builder_success(msg, MessageWriteVec::new());
+            let lifetime = Lifetime::new(request_lifetime);
+            builder.add_attribute(&lifetime).unwrap();
+            builder
+        } else {
+            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
+            builder
+                .add_attribute(
+                    &ErrorCode::builder(ErrorCode::PEER_ADDRESS_FAMILY_MISMATCH)
+                        .build()
+                        .unwrap(),
+                )
+                .unwrap();
+            builder
+        };
         builder
             .add_message_integrity(
                 &MessageIntegrityCredentials::LongTerm(credentials),
@@ -453,16 +571,7 @@ impl TurnServer {
             .filter(|(_offset, a)| a.get_type() == XorPeerAddress::TYPE)
         {
             let Ok(peer_addr) = XorPeerAddress::from_raw(peer_addr) else {
-                let mut builder = Message::builder_error(msg, MessageWriteVec::new());
-                let error = ErrorCode::builder(ErrorCode::BAD_REQUEST).build().unwrap();
-                builder.add_attribute(&error).unwrap();
-                builder
-                    .add_message_integrity(
-                        &MessageIntegrityCredentials::LongTerm(client.credentials.clone()),
-                        stun_proto::types::message::IntegrityAlgorithm::Sha1,
-                    )
-                    .unwrap();
-                return Err(builder);
+                return Err(Self::bad_request_signed(msg, client.credentials.clone()));
             };
             at_least_one_peer_addr = true;
             let peer_addr = peer_addr.addr(msg.transaction_id());
@@ -511,16 +620,7 @@ impl TurnServer {
         }
 
         if !at_least_one_peer_addr {
-            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
-            let error = ErrorCode::builder(ErrorCode::BAD_REQUEST).build().unwrap();
-            builder.add_attribute(&error).unwrap();
-            builder
-                .add_message_integrity(
-                    &MessageIntegrityCredentials::LongTerm(client.credentials.clone()),
-                    stun_proto::types::message::IntegrityAlgorithm::Sha1,
-                )
-                .unwrap();
-            return Err(builder);
+            return Err(Self::bad_request_signed(msg, client.credentials.clone()));
         }
 
         let mut builder = Message::builder_success(msg, MessageWriteVec::new());
@@ -558,26 +658,13 @@ impl TurnServer {
             return Err(Self::allocation_mismatch(msg, credentials));
         };
 
-        let bad_request = move |msg: &Message<'_>, credentials: LongTermCredentials| {
-            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
-            let error = ErrorCode::builder(ErrorCode::BAD_REQUEST).build().unwrap();
-            builder.add_attribute(&error).unwrap();
-            builder
-                .add_message_integrity(
-                    &MessageIntegrityCredentials::LongTerm(credentials),
-                    stun_proto::types::message::IntegrityAlgorithm::Sha1,
-                )
-                .unwrap();
-            builder
-        };
-
         let peer_addr = msg
             .attribute::<XorPeerAddress>()
             .ok()
             .map(|peer_addr| peer_addr.addr(msg.transaction_id()));
         let Some(peer_addr) = peer_addr else {
             trace!("No peer address");
-            return Err(bad_request(msg, credentials));
+            return Err(Self::bad_request_signed(msg, credentials));
         };
 
         let Some(alloc) = client
@@ -616,19 +703,19 @@ impl TurnServer {
             .map(|channel| channel.channel());
         let Some(channel_no) = channel_no else {
             debug!("Bad request: no requested channel id");
-            return Err(bad_request(msg, credentials));
+            return Err(Self::bad_request_signed(msg, credentials));
         };
 
         if !(0x4000..=0x7fff).contains(&channel_no) {
             trace!("Channel id out of range");
-            return Err(bad_request(msg, credentials));
+            return Err(Self::bad_request_signed(msg, credentials));
         }
         if existing
             .as_ref()
             .is_some_and(|existing| existing.id != channel_no)
         {
             trace!("channel peer address does not match channel ID");
-            return Err(bad_request(msg, credentials));
+            return Err(Self::bad_request_signed(msg, credentials));
         }
 
         if let Some(existing) = existing.as_mut() {
@@ -767,13 +854,7 @@ impl TurnServer {
                         return Err(Self::allocation_mismatch(msg, credentials));
                     };
 
-                    let mut builder = Message::builder_error(msg, MessageWriteVec::new());
-                    let error = ErrorCode::builder(ErrorCode::BAD_REQUEST).build().unwrap();
-                    builder.add_attribute(&error).unwrap();
-                    builder
-                        .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
-                        .unwrap();
-                    Err(builder)
+                    Err(Self::bad_request_signed(msg, credentials))
                 }
             }
         } else if msg.has_class(stun_proto::types::message::MessageClass::Indication) {
@@ -1065,16 +1146,15 @@ impl TurnServerApi for TurnServer {
     #[tracing::instrument(level = "debug", name = "turn_server_poll", skip(self), ret)]
     fn poll(&mut self, now: Instant) -> TurnServerPollRet {
         for pending in self.pending_allocates.iter_mut() {
-            if pending.asked {
-                continue;
+            if let Some(family) = pending.to_ask_families.pop() {
+                // TODO: TCP
+                return TurnServerPollRet::AllocateSocketUdp {
+                    transport: pending.client.transport,
+                    local_addr: pending.client.local_addr,
+                    remote_addr: pending.client.remote_addr,
+                    family,
+                };
             }
-
-            // TODO: TCP
-            return TurnServerPollRet::AllocateSocketUdp {
-                transport: pending.client.transport,
-                local_addr: pending.client.local_addr,
-                remote_addr: pending.client.remote_addr,
-            };
         }
 
         for client in self.clients.iter_mut() {
@@ -1110,57 +1190,93 @@ impl TurnServerApi for TurnServer {
         transport: TransportType,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
-        socket_addr: Result<SocketAddr, ()>,
+        family: AddressFamily,
+        socket_addr: Result<SocketAddr, SocketAllocateError>,
         now: Instant,
     ) {
         let Some(position) = self.pending_allocates.iter().position(|pending| {
             pending.client.transport == transport
                 && pending.client.local_addr == local_addr
                 && pending.client.remote_addr == remote_addr
+                && pending.pending_families.contains(&family)
         }) else {
             warn!("No pending allocation for transport: Udp, local: {local_addr:?}, remote {remote_addr:?}");
             return;
         };
-        info!("pending allocation for transport: Udp, local: {local_addr:?}, remote {remote_addr:?} resulted in {socket_addr:?}");
+        info!("pending allocation for transport: Udp, local: {local_addr:?}, remote {remote_addr:?} family {family} resulted in {socket_addr:?}");
+        let pending = &mut self.pending_allocates[position];
+        pending.pending_sockets.push((family, socket_addr));
+        pending.pending_families.retain(|fam| *fam != family);
+        if !pending.pending_families.is_empty() || !pending.to_ask_families.is_empty() {
+            trace!(
+                "Still waiting for more allocation results before sending a reply to the client"
+            );
+            return;
+        }
+
         let mut pending = self.pending_allocates.remove(position).unwrap();
         let transaction_id = pending.transaction_id;
         let to = pending.client.remote_addr;
 
-        let mut builder = if let Ok(socket_addr) = socket_addr {
-            pending.client.allocations.push(Allocation {
-                addr: socket_addr,
-                ttype: TransportType::Udp,
-                expires_at: now + DEFAULT_ALLOCATION_DURATION,
-                permissions: vec![],
-                channels: vec![],
-            });
+        let is_all_error = pending.pending_sockets.iter().all(|addr| addr.1.is_err());
+        let n_pending_sockets = pending.pending_sockets.len();
 
-            let mut builder = Message::builder(
-                MessageType::from_class_method(MessageClass::Success, ALLOCATE),
-                transaction_id,
-                MessageWriteVec::new(),
-            );
-            let relayed_address = XorRelayedAddress::new(socket_addr, transaction_id);
-            builder.add_attribute(&relayed_address).unwrap();
-            let lifetime = Lifetime::new(1800);
-            builder.add_attribute(&lifetime).unwrap();
-            // TODO RESERVATION-TOKEN
-            let mapped_address = XorMappedAddress::new(pending.client.remote_addr, transaction_id);
-            builder.add_attribute(&mapped_address).unwrap();
+        let mut builder = Message::builder(
+            MessageType::from_class_method(
+                if is_all_error {
+                    MessageClass::Error
+                } else {
+                    MessageClass::Success
+                },
+                ALLOCATE,
+            ),
+            transaction_id,
+            MessageWriteVec::new(),
+        );
 
-            builder
-        } else {
-            let mut builder = Message::builder(
-                MessageType::from_class_method(MessageClass::Error, ALLOCATE),
-                transaction_id,
-                MessageWriteVec::new(),
-            );
+        if is_all_error && pending.pending_sockets.len() > 1 {
+            // RFC8656 ADDITIONAL-ADDRESS-FAMILY path
             let error = ErrorCode::builder(ErrorCode::INSUFFICIENT_CAPACITY)
                 .build()
                 .unwrap();
             builder.add_attribute(&error).unwrap();
-            builder
-        };
+        } else {
+            for (family, socket_addr) in pending.pending_sockets {
+                match socket_addr {
+                    Ok(addr) => {
+                        pending.client.allocations.push(Allocation {
+                            addr,
+                            ttype: TransportType::Udp,
+                            expires_at: now + DEFAULT_ALLOCATION_DURATION,
+                            permissions: vec![],
+                            channels: vec![],
+                        });
+                        let relayed_address = XorRelayedAddress::new(addr, transaction_id);
+                        builder.add_attribute(&relayed_address).unwrap();
+                        let lifetime = Lifetime::new(1800);
+                        builder.add_attribute(&lifetime).unwrap();
+                        // TODO RESERVATION-TOKEN
+                        let mapped_address =
+                            XorMappedAddress::new(pending.client.remote_addr, transaction_id);
+                        builder.add_attribute(&mapped_address).unwrap();
+                    }
+                    Err(e) => {
+                        if n_pending_sockets > 1 {
+                            // RFC8656 ADDITIONAL-ADDRESS-FAMILY path when at least one socket
+                            // allocate succeeds
+                            let error = AddressErrorCode::new(
+                                family,
+                                ErrorCode::builder(e.into_error_code()).build().unwrap(),
+                            );
+                            builder.add_attribute(&error).unwrap();
+                        } else {
+                            let error = ErrorCode::builder(e.into_error_code()).build().unwrap();
+                            builder.add_attribute(&error).unwrap();
+                        }
+                    }
+                }
+            }
+        }
         builder
             .add_message_integrity(
                 &MessageIntegrityCredentials::LongTerm(pending.client.credentials.clone()),
@@ -1287,6 +1403,10 @@ mod tests {
 
     fn relayed_address() -> SocketAddr {
         "10.0.0.1:2222".parse().unwrap()
+    }
+
+    fn ipv6_relayed_address() -> SocketAddr {
+        "[fda9:8765:4321:1::1]:2222".parse().unwrap()
     }
 
     fn peer_address() -> SocketAddr {
@@ -1491,11 +1611,12 @@ mod tests {
             .unwrap();
     }
 
-    fn authenticated_allocate_with_credentials_transport(
+    fn authenticated_allocate_with_credentials_transport_families(
         server: &mut TurnServer,
         credentials: LongTermCredentials,
         nonce: &str,
         transport: u8,
+        families: &[(AddressFamily, Result<SocketAddr, SocketAllocateError>)],
         now: Instant,
     ) -> Transmit<Vec<u8>> {
         let ret = server.recv(
@@ -1510,6 +1631,19 @@ mod tests {
                     allocate
                         .add_attribute(&RequestedTransport::new(transport))
                         .unwrap();
+                    if families.len() > 1 {
+                        for (family, _) in families {
+                            if *family != AddressFamily::IPV4 {
+                                allocate
+                                    .add_attribute(&AdditionalAddressFamily::new(*family))
+                                    .unwrap();
+                            }
+                        }
+                    } else if families[0].0 != AddressFamily::IPV4 {
+                        allocate
+                            .add_attribute(&RequestedAddressFamily::new(families[0].0))
+                            .unwrap();
+                    }
                     allocate
                         .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
                         .unwrap();
@@ -1522,22 +1656,53 @@ mod tests {
         if let Some(transmit) = ret {
             return transmit;
         }
-        let TurnServerPollRet::AllocateSocketUdp {
-            transport,
-            local_addr,
-            remote_addr,
-        } = server.poll(now)
-        else {
-            unreachable!();
-        };
-        server.allocated_udp_socket(
-            transport,
-            local_addr,
-            remote_addr,
-            Ok(relayed_address()),
-            now,
-        );
+        for _ in 0..families.len() {
+            let TurnServerPollRet::AllocateSocketUdp {
+                transport,
+                local_addr,
+                remote_addr,
+                family,
+            } = server.poll(now)
+            else {
+                unreachable!();
+            };
+            let socket_addr = families
+                .iter()
+                .find_map(|(fam, socket_addr)| {
+                    if *fam == family {
+                        Some(*socket_addr)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            server.allocated_udp_socket(
+                transport,
+                local_addr,
+                remote_addr,
+                family,
+                socket_addr,
+                now,
+            );
+        }
         server.poll_transmit(now).unwrap()
+    }
+
+    fn authenticated_allocate_with_credentials_transport(
+        server: &mut TurnServer,
+        credentials: LongTermCredentials,
+        nonce: &str,
+        transport: u8,
+        now: Instant,
+    ) -> Transmit<Vec<u8>> {
+        authenticated_allocate_with_credentials_transport_families(
+            server,
+            credentials,
+            nonce,
+            transport,
+            &[(AddressFamily::IPV4, Ok(relayed_address()))],
+            now,
+        )
     }
 
     fn authenticated_allocate_with_credentials(
@@ -1622,13 +1787,141 @@ mod tests {
         );
     }
 
-    fn create_permission_request(credentials: LongTermCredentials, nonce: &str) -> Vec<u8> {
+    fn validate_signed_success(
+        msg: &[u8],
+        method: Method,
+        credentials: LongTermCredentials,
+    ) -> Message<'_> {
+        let msg = Message::from_bytes(msg).unwrap();
+        assert!(msg.has_method(method));
+        assert!(msg.has_class(MessageClass::Success));
+        msg.validate_integrity(&credentials.into()).unwrap();
+        msg
+    }
+
+    fn validate_authenticated_allocate_reply(
+        msg: &[u8],
+        credentials: LongTermCredentials,
+    ) -> (Message<'_>, u32) {
+        let msg = validate_signed_success(msg, ALLOCATE, credentials);
+        let lifetime = msg.attribute::<Lifetime>().unwrap();
+        let _xor_relayed_address = msg.attribute::<XorRelayedAddress>().unwrap();
+        let _xor_mapped_address = msg.attribute::<XorMappedAddress>().unwrap();
+        (msg, lifetime.seconds())
+    }
+
+    #[test]
+    fn test_server_authenticated_allocate_ipv6() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply = authenticated_allocate_with_credentials_transport_families(
+            &mut server,
+            creds.clone(),
+            &nonce,
+            RequestedTransport::UDP,
+            &[(AddressFamily::IPV6, Ok(ipv6_relayed_address()))],
+            now,
+        );
+        validate_authenticated_allocate_reply(&reply.data, creds);
+    }
+
+    #[test]
+    fn test_server_authenticated_allocate_ipv6_error() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply = authenticated_allocate_with_credentials_transport_families(
+            &mut server,
+            creds.clone(),
+            &nonce,
+            RequestedTransport::UDP,
+            &[(
+                AddressFamily::IPV6,
+                Err(SocketAllocateError::AddressFamilyNotSupported),
+            )],
+            now,
+        );
+        validate_signed_error_reply(
+            &reply.data,
+            ALLOCATE,
+            ErrorCode::ADDRESS_FAMILY_NOT_SUPPORTED,
+            creds,
+        );
+    }
+
+    #[test]
+    fn test_server_authenticated_allocate_dual_ipv6_error() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply = authenticated_allocate_with_credentials_transport_families(
+            &mut server,
+            creds.clone(),
+            &nonce,
+            RequestedTransport::UDP,
+            &[
+                (
+                    AddressFamily::IPV6,
+                    Err(SocketAllocateError::AddressFamilyNotSupported),
+                ),
+                (AddressFamily::IPV4, Ok(relayed_address())),
+            ],
+            now,
+        );
+        let (msg, _lifetime) = validate_authenticated_allocate_reply(&reply.data, creds);
+        let address_error_code = msg.attribute::<AddressErrorCode>().unwrap();
+        assert_eq!(address_error_code.family(), AddressFamily::IPV6);
+        assert_eq!(
+            address_error_code.error().code(),
+            ErrorCode::ADDRESS_FAMILY_NOT_SUPPORTED
+        );
+    }
+
+    #[test]
+    fn test_server_authenticated_allocate_dual_ipv4_error() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply = authenticated_allocate_with_credentials_transport_families(
+            &mut server,
+            creds.clone(),
+            &nonce,
+            RequestedTransport::UDP,
+            &[
+                (AddressFamily::IPV6, Ok(ipv6_relayed_address())),
+                (
+                    AddressFamily::IPV4,
+                    Err(SocketAllocateError::AddressFamilyNotSupported),
+                ),
+            ],
+            now,
+        );
+        let (msg, _lifetime) = validate_authenticated_allocate_reply(&reply.data, creds);
+        let address_error_code = msg.attribute::<AddressErrorCode>().unwrap();
+        assert_eq!(address_error_code.family(), AddressFamily::IPV4);
+        assert_eq!(
+            address_error_code.error().code(),
+            ErrorCode::ADDRESS_FAMILY_NOT_SUPPORTED
+        );
+    }
+
+    fn create_permission_request(
+        credentials: LongTermCredentials,
+        nonce: &str,
+        peer: SocketAddr,
+    ) -> Vec<u8> {
         let mut request = Message::builder_request(CREATE_PERMISSION, MessageWriteVec::new());
         request
-            .add_attribute(&XorPeerAddress::new(
-                peer_address(),
-                request.transaction_id(),
-            ))
+            .add_attribute(&XorPeerAddress::new(peer, request.transaction_id()))
             .unwrap();
         add_authenticated_request_required_attributes(&mut request, credentials.clone(), nonce);
         request
@@ -1647,7 +1940,7 @@ mod tests {
         let reply = server
             .recv(
                 client_transmit(
-                    create_permission_request(creds.clone(), &nonce),
+                    create_permission_request(creds.clone(), &nonce, peer_address()),
                     server.transport(),
                 ),
                 now,
@@ -1659,24 +1952,6 @@ mod tests {
             ErrorCode::ALLOCATION_MISMATCH,
             creds,
         );
-    }
-
-    fn validate_signed_success(
-        msg: &[u8],
-        method: Method,
-        credentials: LongTermCredentials,
-    ) -> Message<'_> {
-        let msg = Message::from_bytes(msg).unwrap();
-        assert!(msg.has_method(method));
-        assert!(msg.has_class(MessageClass::Success));
-        msg.validate_integrity(&credentials.into()).unwrap();
-        msg
-    }
-
-    fn validate_authenticated_allocate_reply(msg: &[u8], credentials: LongTermCredentials) -> u32 {
-        let msg = validate_signed_success(msg, ALLOCATE, credentials);
-        let lifetime = msg.attribute::<Lifetime>().unwrap();
-        lifetime.seconds()
     }
 
     #[test]
@@ -1731,25 +2006,40 @@ mod tests {
         let reply = server
             .recv(
                 client_transmit(
-                    {
-                        let mut request =
-                            Message::builder_request(CREATE_PERMISSION, MessageWriteVec::new());
-                        request
-                            .add_attribute(&XorPeerAddress::new(
-                                ipv6_peer_address(),
-                                request.transaction_id(),
-                            ))
-                            .unwrap();
-                        add_authenticated_request_required_attributes(
-                            &mut request,
-                            creds.clone(),
-                            &nonce,
-                        );
-                        request
-                            .add_message_integrity(&creds.clone().into(), IntegrityAlgorithm::Sha1)
-                            .unwrap();
-                        request.finish()
-                    },
+                    create_permission_request(creds.clone(), &nonce, ipv6_peer_address()),
+                    server.transport(),
+                ),
+                now,
+            )
+            .unwrap();
+        validate_signed_error_reply(
+            &reply.data,
+            CREATE_PERMISSION,
+            ErrorCode::PEER_ADDRESS_FAMILY_MISMATCH,
+            creds,
+        );
+    }
+
+    #[test]
+    fn test_server_create_permission_ipv4_wrong_family() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply = authenticated_allocate_with_credentials_transport_families(
+            &mut server,
+            creds.clone(),
+            &nonce,
+            RequestedTransport::UDP,
+            &[(AddressFamily::IPV6, Ok(ipv6_relayed_address()))],
+            now,
+        );
+        validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        let reply = server
+            .recv(
+                client_transmit(
+                    create_permission_request(creds.clone(), &nonce, peer_address()),
                     server.transport(),
                 ),
                 now,
@@ -1778,7 +2068,10 @@ mod tests {
             .into_long_term_credentials(&realm);
         let reply = server
             .recv(
-                client_transmit(create_permission_request(creds, &nonce), server.transport()),
+                client_transmit(
+                    create_permission_request(creds, &nonce, peer_address()),
+                    server.transport(),
+                ),
                 now,
             )
             .unwrap();
@@ -1815,7 +2108,7 @@ mod tests {
                             &nonce,
                         );
                         request
-                            .add_message_integrity(&creds.into(), IntegrityAlgorithm::Sha1)
+                            .add_message_integrity(&creds.clone().into(), IntegrityAlgorithm::Sha1)
                             .unwrap();
                         request.finish()
                     },
@@ -1824,7 +2117,12 @@ mod tests {
                 now,
             )
             .unwrap();
-        validate_unsigned_error_reply(&reply.data, CREATE_PERMISSION, ErrorCode::BAD_REQUEST);
+        validate_signed_error_reply(
+            &reply.data,
+            CREATE_PERMISSION,
+            ErrorCode::BAD_REQUEST,
+            creds,
+        );
     }
 
     fn channel_bind_request(credentials: LongTermCredentials, nonce: &str) -> Vec<u8> {
@@ -2048,7 +2346,7 @@ mod tests {
         let creds = credentials().into_long_term_credentials(&realm);
         let reply =
             authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
-        let lifetime = validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        let (_msg, lifetime) = validate_authenticated_allocate_reply(&reply.data, creds.clone());
         let now = now + Duration::from_secs(lifetime as u64 + 1);
         let reply = server
             .recv(
@@ -2141,14 +2439,32 @@ mod tests {
         validate_signed_error_reply(&reply.data, CHANNEL_BIND, ErrorCode::BAD_REQUEST, creds);
     }
 
-    fn refresh_request(credentials: LongTermCredentials, nonce: &str) -> Vec<u8> {
+    fn refresh_request_with_lifetime(
+        credentials: LongTermCredentials,
+        nonce: &str,
+        lifetime: u32,
+        requested_address: Option<AddressFamily>,
+    ) -> Vec<u8> {
         let mut request = Message::builder_request(REFRESH, MessageWriteVec::new());
-        request.add_attribute(&Lifetime::new(1800)).unwrap();
+        request.add_attribute(&Lifetime::new(lifetime)).unwrap();
         add_authenticated_request_required_attributes(&mut request, credentials.clone(), nonce);
+        if let Some(family) = requested_address {
+            request
+                .add_attribute(&RequestedAddressFamily::new(family))
+                .unwrap();
+        }
         request
             .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
             .unwrap();
         request.finish()
+    }
+
+    fn refresh_request(
+        credentials: LongTermCredentials,
+        nonce: &str,
+        requested_address: Option<AddressFamily>,
+    ) -> Vec<u8> {
+        refresh_request_with_lifetime(credentials, nonce, 1800, requested_address)
     }
 
     #[test]
@@ -2160,7 +2476,135 @@ mod tests {
         let creds = credentials().into_long_term_credentials(&realm);
         let reply = server
             .recv(
-                client_transmit(refresh_request(creds.clone(), &nonce), server.transport()),
+                client_transmit(
+                    refresh_request(creds.clone(), &nonce, None),
+                    server.transport(),
+                ),
+                now,
+            )
+            .unwrap();
+        validate_signed_error_reply(&reply.data, REFRESH, ErrorCode::ALLOCATION_MISMATCH, creds);
+    }
+
+    #[test]
+    fn test_server_refresh_dual_allocation() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        authenticated_allocate_with_credentials_transport_families(
+            &mut server,
+            creds.clone(),
+            &nonce,
+            RequestedTransport::UDP,
+            &[
+                (AddressFamily::IPV4, Ok(relayed_address())),
+                (AddressFamily::IPV6, Ok(ipv6_relayed_address())),
+            ],
+            now,
+        );
+        let TurnServerPollRet::WaitUntil(now) = server.poll(now) else {
+            unreachable!();
+        };
+        let reply = server
+            .recv(
+                client_transmit(
+                    refresh_request(creds.clone(), &nonce, None),
+                    server.transport(),
+                ),
+                now,
+            )
+            .unwrap();
+        validate_signed_success(&reply.data, REFRESH, creds);
+    }
+
+    fn delete_request(
+        credentials: LongTermCredentials,
+        nonce: &str,
+        requested_address: Option<AddressFamily>,
+    ) -> Vec<u8> {
+        refresh_request_with_lifetime(credentials, nonce, 0, requested_address)
+    }
+
+    #[test]
+    fn test_server_dual_allocation_delete_single() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        authenticated_allocate_with_credentials_transport_families(
+            &mut server,
+            creds.clone(),
+            &nonce,
+            RequestedTransport::UDP,
+            &[
+                (AddressFamily::IPV4, Ok(relayed_address())),
+                (AddressFamily::IPV6, Ok(ipv6_relayed_address())),
+            ],
+            now,
+        );
+        let reply = server
+            .recv(
+                client_transmit(
+                    delete_request(creds.clone(), &nonce, Some(AddressFamily::IPV4)),
+                    server.transport(),
+                ),
+                now,
+            )
+            .unwrap();
+        validate_signed_success(&reply.data, REFRESH, creds.clone());
+        // duplicate delete results in error
+        let reply = server
+            .recv(
+                client_transmit(
+                    refresh_request(creds.clone(), &nonce, Some(AddressFamily::IPV4)),
+                    server.transport(),
+                ),
+                now,
+            )
+            .unwrap();
+        validate_signed_error_reply(
+            &reply.data,
+            REFRESH,
+            ErrorCode::PEER_ADDRESS_FAMILY_MISMATCH,
+            creds.clone(),
+        );
+
+        // delete the other relayed address
+        let reply = server
+            .recv(
+                client_transmit(
+                    delete_request(creds.clone(), &nonce, Some(AddressFamily::IPV6)),
+                    server.transport(),
+                ),
+                now,
+            )
+            .unwrap();
+        validate_signed_success(&reply.data, REFRESH, creds.clone());
+        // duplicate delete when there are no allocation results in error
+        let reply = server
+            .recv(
+                client_transmit(
+                    refresh_request(creds.clone(), &nonce, Some(AddressFamily::IPV6)),
+                    server.transport(),
+                ),
+                now,
+            )
+            .unwrap();
+        validate_signed_error_reply(
+            &reply.data,
+            REFRESH,
+            ErrorCode::ALLOCATION_MISMATCH,
+            creds.clone(),
+        );
+        let reply = server
+            .recv(
+                client_transmit(
+                    refresh_request(creds.clone(), &nonce, None),
+                    server.transport(),
+                ),
                 now,
             )
             .unwrap();
@@ -2201,7 +2645,7 @@ mod tests {
         let creds = credentials().into_long_term_credentials(&realm);
         let reply =
             authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
-        let lifetime = validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        let (_msg, lifetime) = validate_authenticated_allocate_reply(&reply.data, creds.clone());
         let now = now + Duration::from_secs(lifetime as u64 + 1);
         assert!(server
             .recv(
@@ -2220,7 +2664,7 @@ mod tests {
         let creds = credentials().into_long_term_credentials(&realm);
         let reply =
             authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
-        let lifetime = validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        let (_msg, lifetime) = validate_authenticated_allocate_reply(&reply.data, creds.clone());
         let now = now + Duration::from_secs(lifetime as u64 + 1);
         assert!(server
             .recv(
@@ -2257,7 +2701,7 @@ mod tests {
         let reply = server
             .recv(
                 client_transmit(
-                    create_permission_request(creds.clone(), nonce),
+                    create_permission_request(creds.clone(), nonce, peer_address()),
                     server.transport(),
                 ),
                 now,

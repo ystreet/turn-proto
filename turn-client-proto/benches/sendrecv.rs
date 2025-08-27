@@ -69,6 +69,7 @@ impl<T: TurnClientApi> TurnTest<T> {
             transport: _,
             local_addr,
             remote_addr,
+            family,
         } = self.server.poll(now)
         else {
             unreachable!();
@@ -77,6 +78,7 @@ impl<T: TurnClientApi> TurnTest<T> {
             TransportType::Udp,
             local_addr,
             remote_addr,
+            family,
             Ok(self.relayed_addr),
             now,
         );

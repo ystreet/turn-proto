@@ -12,7 +12,10 @@ use sans_io_time::Instant;
 use std::{net::SocketAddr, time::Duration};
 
 use stun_proto::agent::Transmit;
-use turn_types::stun::TransportType;
+use turn_types::{
+    stun::{attribute::ErrorCode, TransportType},
+    AddressFamily,
+};
 
 /// API for TURN servers.
 pub trait TurnServerApi: Send + std::fmt::Debug {
@@ -44,7 +47,8 @@ pub trait TurnServerApi: Send + std::fmt::Debug {
         transport: TransportType,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
-        socket_addr: Result<SocketAddr, ()>,
+        family: AddressFamily,
+        socket_addr: Result<SocketAddr, SocketAllocateError>,
         now: Instant,
     );
 }
@@ -62,5 +66,28 @@ pub enum TurnServerPollRet {
         local_addr: SocketAddr,
         /// The client local address of the client asking for an allocation.
         remote_addr: SocketAddr,
+        /// The address family of the request for an allocation.
+        family: AddressFamily,
     },
+}
+
+/// Errors that can be conveyed when allocating a socket for a client.
+#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
+pub enum SocketAllocateError {
+    /// The requested Address family is not supported.
+    #[error("The address family is not supported.")]
+    AddressFamilyNotSupported,
+    /// The server does not have the capacity to handle this request.
+    #[error("The server does not have the capacity to handle this request.")]
+    InsufficientCapacity,
+}
+
+impl SocketAllocateError {
+    /// Convert this error into an error code for the `ErrorCode` or `AddressErrorCode` attributes.
+    pub fn into_error_code(self) -> u16 {
+        match self {
+            Self::AddressFamilyNotSupported => ErrorCode::ADDRESS_FAMILY_NOT_SUPPORTED,
+            Self::InsufficientCapacity => ErrorCode::INSUFFICIENT_CAPACITY,
+        }
+    }
 }

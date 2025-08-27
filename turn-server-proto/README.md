@@ -16,7 +16,7 @@ written in the [Rust programming language](https://www.rust-lang.org/).
    Traversal Utilities for NAT (STUN)
  - [ ] [RFC6062](https://tools.ietf.org/html/rfc6062):
    Traversal Using Relays around NAT (TURN) Extensions for TCP Allocations
- - [ ] [RFC6156](https://tools.ietf.org/html/rfc6156):
+ - [x] [RFC6156](https://tools.ietf.org/html/rfc6156):
    Traversal Using Relays around NAT (TURN) Extension for IPv6
  - [ ] [RFC8656](https://tools.ietf.org/html/rfc8656):
    Traversal Using Relays around NAT (TURN): Relay Extensions to Session
