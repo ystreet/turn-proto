@@ -34,6 +34,15 @@ pub trait TurnServerApi: Send + std::fmt::Debug {
         transmit: Transmit<T>,
         now: Instant,
     ) -> Option<Transmit<Vec<u8>>>;
+    /// Provide a received ICMP packet to the [`TurnServerApi`].
+    ///
+    /// Any returned Transmit should be forwarded to the appropriate socket.
+    fn recv_icmp<T: AsRef<[u8]>>(
+        &mut self,
+        family: AddressFamily,
+        bytes: T,
+        now: Instant,
+    ) -> Option<Transmit<Vec<u8>>>;
     /// Poll the [`TurnServerApi`] in order to make further progress.
     ///
     /// The returned value indicates what the caller should do.

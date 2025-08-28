@@ -174,6 +174,37 @@ impl TurnServerApi for RustlsTurnServer {
         }
     }
 
+    fn recv_icmp<T: AsRef<[u8]>>(
+        &mut self,
+        family: AddressFamily,
+        bytes: T,
+        now: Instant,
+    ) -> Option<Transmit<Vec<u8>>> {
+        let transmit = self.server.recv_icmp(family, bytes, now)?;
+        // incoming allocated address
+        let listen_address = self.listen_address();
+        if transmit.transport == TransportType::Tcp && transmit.from == listen_address {
+            let Some((client_addr, conn)) = self
+                .connections
+                .iter_mut()
+                .find(|(client_addr, _conn)| transmit.to == *client_addr)
+            else {
+                return Some(transmit);
+            };
+            conn.writer().write_all(&transmit.data).unwrap();
+            let mut out = vec![];
+            conn.write_tls(&mut out).unwrap();
+            Some(Transmit::new(
+                out,
+                TransportType::Tcp,
+                listen_address,
+                *client_addr,
+            ))
+        } else {
+            Some(transmit)
+        }
+    }
+
     /// Poll the [`TurnServer`] in order to make further progress.
     ///
     /// The returned value indicates what the caller should do.

@@ -8,6 +8,8 @@
 
 //! A TURN server that can handle UDP and TCP connections.
 
+use byteorder::{BigEndian, ByteOrder};
+use pnet_packet::Packet;
 use sans_io_time::Instant;
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
@@ -29,8 +31,8 @@ use turn_types::channel::ChannelData;
 use turn_types::message::CREATE_PERMISSION;
 
 use turn_types::attribute::{
-    AdditionalAddressFamily, AddressErrorCode, Data as AData, EvenPort, RequestedAddressFamily,
-    ReservationToken,
+    AdditionalAddressFamily, AddressErrorCode, Data as AData, EvenPort, Icmp,
+    RequestedAddressFamily, ReservationToken,
 };
 use turn_types::attribute::{
     ChannelNumber, Lifetime, RequestedTransport, XorPeerAddress, XorRelayedAddress,
@@ -348,10 +350,33 @@ impl TurnServer {
             return Err(Self::allocation_mismatch(msg, credentials));
         };
 
-        let Ok(requested_transport) = msg.attribute::<RequestedTransport>() else {
-            debug!("no RequestedTransport -> Bad Request");
-            return Err(Self::bad_request_signed(msg, credentials));
-        };
+        if let Some(mut err) = Message::check_attribute_types(
+            msg,
+            &[
+                Username::TYPE,
+                MessageIntegrity::TYPE,
+                Lifetime::TYPE,
+                Realm::TYPE,
+                Nonce::TYPE,
+                RequestedAddressFamily::TYPE,
+                RequestedTransport::TYPE,
+                // TODO: EVEN-PORT, RESERVATION-TOKEN, DONT-FRAGMENT
+            ],
+            &[
+                Realm::TYPE,
+                Nonce::TYPE,
+                Username::TYPE,
+                RequestedTransport::TYPE,
+            ],
+            MessageWriteVec::new(),
+        ) {
+            err.add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                .unwrap();
+            return Err(err);
+        }
+
+        // checked by Message::check_attribute_types()
+        let requested_transport = msg.attribute::<RequestedTransport>().unwrap();
 
         if requested_transport.protocol() != RequestedTransport::UDP {
             debug!(
@@ -472,6 +497,25 @@ impl TurnServer {
             return Err(Self::allocation_mismatch(msg, credentials));
         };
 
+        if let Some(mut err) = Message::check_attribute_types(
+            msg,
+            &[
+                Username::TYPE,
+                MessageIntegrity::TYPE,
+                Lifetime::TYPE,
+                Realm::TYPE,
+                Nonce::TYPE,
+                RequestedAddressFamily::TYPE,
+                // TODO: EVEN-PORT, RESERVATION-TOKEN, DONT-FRAGMENT
+            ],
+            &[Realm::TYPE, Nonce::TYPE, Username::TYPE],
+            MessageWriteVec::new(),
+        ) {
+            err.add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                .unwrap();
+            return Err(err);
+        }
+
         let requested_family = msg
             .attribute::<RequestedAddressFamily>()
             .ok()
@@ -563,6 +607,29 @@ impl TurnServer {
         let Some(client) = self.mut_client_from_5tuple(ttype, to, from) else {
             return Err(Self::allocation_mismatch(msg, credentials));
         };
+
+        if let Some(mut err) = Message::check_attribute_types(
+            msg,
+            &[
+                Username::TYPE,
+                MessageIntegrity::TYPE,
+                Realm::TYPE,
+                Nonce::TYPE,
+                XorPeerAddress::TYPE,
+                // TODO: EVEN-PORT, RESERVATION-TOKEN, DONT-FRAGMENT
+            ],
+            &[
+                Realm::TYPE,
+                Nonce::TYPE,
+                Username::TYPE,
+                XorPeerAddress::TYPE,
+            ],
+            MessageWriteVec::new(),
+        ) {
+            err.add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                .unwrap();
+            return Err(err);
+        }
 
         let mut peer_addresses = vec![];
         let mut at_least_one_peer_addr = false;
@@ -658,6 +725,31 @@ impl TurnServer {
             return Err(Self::allocation_mismatch(msg, credentials));
         };
 
+        if let Some(mut err) = Message::check_attribute_types(
+            msg,
+            &[
+                Username::TYPE,
+                MessageIntegrity::TYPE,
+                Realm::TYPE,
+                Nonce::TYPE,
+                XorPeerAddress::TYPE,
+                ChannelNumber::TYPE,
+                // TODO: EVEN-PORT, RESERVATION-TOKEN, DONT-FRAGMENT
+            ],
+            &[
+                Realm::TYPE,
+                Nonce::TYPE,
+                Username::TYPE,
+                XorPeerAddress::TYPE,
+                ChannelNumber::TYPE,
+            ],
+            MessageWriteVec::new(),
+        ) {
+            err.add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                .unwrap();
+            return Err(err);
+        }
+
         let peer_addr = msg
             .attribute::<XorPeerAddress>()
             .ok()
@@ -706,6 +798,8 @@ impl TurnServer {
             return Err(Self::bad_request_signed(msg, credentials));
         };
 
+        // RFC8656 reduces this range to 0x4000..=0x4fff but we keep the RFC5766 range for
+        // backwards compatibility
         if !(0x4000..=0x7fff).contains(&channel_no) {
             trace!("Channel id out of range");
             return Err(Self::bad_request_signed(msg, credentials));
@@ -960,6 +1054,120 @@ impl TurnServerApi for TurnServer {
             panic!("Attempted to set a nonce expiry duration ({expiry_duration:?}) of less than the allowed minimum ({MINIMUM_NONCE_EXPIRY_DURATION:?})");
         }
         self.nonce_expiry_duration = expiry_duration;
+    }
+
+    #[tracing::instrument(
+        name = "turn_server_recv",
+        skip(self, bytes, now),
+        fields(
+            data_len = bytes.as_ref().len(),
+        )
+    )]
+    fn recv_icmp<T: AsRef<[u8]>>(
+        &mut self,
+        family: AddressFamily,
+        bytes: T,
+        now: Instant,
+    ) -> Option<Transmit<Vec<u8>>> {
+        use pnet_packet::udp;
+        let bytes = bytes.as_ref();
+        trace!("have incoming icmp data");
+        if bytes.len() < 8 {
+            return None;
+        }
+
+        let icmpv4;
+        let ipv4;
+        let icmpv6;
+        let ipv6;
+        let source;
+        let destination;
+        let icmp_code;
+        let icmp_type;
+        let icmp_data;
+        let payload = match family {
+            AddressFamily::IPV4 => {
+                use pnet_packet::{icmp, ipv4};
+                icmpv4 = icmp::IcmpPacket::new(bytes)?;
+                trace!("parsed icmp: {icmpv4:?}");
+                icmp_code = icmpv4.get_icmp_code().0;
+                icmp_type = icmpv4.get_icmp_type().0;
+                // the server verifies that the type is either 3 or 11 for an ICMPv4
+                if ![
+                    icmp::IcmpTypes::DestinationUnreachable,
+                    icmp::IcmpTypes::TimeExceeded,
+                ]
+                .contains(&icmpv4.get_icmp_type())
+                {
+                    debug!("ICMPv4 is not an actionable type");
+                    return None;
+                }
+                if icmpv4.get_icmp_type() == icmp::IcmpTypes::DestinationUnreachable &&
+                    icmpv4.get_icmp_code() == icmp::destination_unreachable::IcmpCodes::FragmentationRequiredAndDFFlagSet
+                {
+                    icmp_data = BigEndian::read_u32(icmpv4.payload());
+                } else {
+                    icmp_data = 0;
+                };
+                ipv4 = ipv4::Ipv4Packet::new(&icmpv4.payload()[4..])?;
+                trace!("parsed ipv4: {ipv4:?}");
+                source = IpAddr::V4(ipv4.get_source());
+                destination = IpAddr::V4(ipv4.get_destination());
+                ipv4.payload()
+            }
+            AddressFamily::IPV6 => {
+                use pnet_packet::{icmpv6, ipv6};
+                icmpv6 = icmpv6::Icmpv6Packet::new(bytes)?;
+                icmp_type = icmpv6.get_icmpv6_type().0;
+                icmp_code = icmpv6.get_icmpv6_code().0;
+                // the server verifies that the type is either 1, 2, or 3 for an ICMPv6
+                if ![
+                    icmpv6::Icmpv6Types::DestinationUnreachable,
+                    icmpv6::Icmpv6Types::PacketTooBig,
+                    icmpv6::Icmpv6Types::TimeExceeded,
+                ]
+                .contains(&icmpv6.get_icmpv6_type())
+                {
+                    debug!("ICMPv6 is not an actionable type");
+                    return None;
+                }
+                if icmpv6.get_icmpv6_type() == icmpv6::Icmpv6Types::PacketTooBig {
+                    icmp_data = BigEndian::read_u32(icmpv6.payload());
+                } else {
+                    icmp_data = 0;
+                };
+                ipv6 = ipv6::Ipv6Packet::new(&icmpv6.payload()[4..])?;
+                trace!("parsed ipv6: {ipv6:?}");
+                source = IpAddr::V6(ipv6.get_source());
+                destination = IpAddr::V6(ipv6.get_destination());
+                ipv6.payload()
+            }
+        };
+        let udp = udp::UdpPacket::new(payload)?;
+        trace!("parsed udp: {udp:?}");
+        let source = SocketAddr::new(source, udp.get_source());
+        let destination = SocketAddr::new(destination, udp.get_destination());
+        trace!("clients: {:?}", self.clients);
+        let (client, allocation) =
+            self.allocation_from_public_5tuple(TransportType::Udp, source, destination)?;
+        if allocation.expires_at < now {
+            return None;
+        }
+
+        info!(
+            "sending ICMP (type:{icmp_type}, code:{icmp_code}, data{icmp_data}) DATA indication to client {}",
+            client.remote_addr
+        );
+        let mut msg = Message::builder(
+            MessageType::from_class_method(MessageClass::Indication, DATA),
+            TransactionId::generate(),
+            MessageWriteVec::new(),
+        );
+        msg.add_attribute(&XorPeerAddress::new(destination, msg.transaction_id()))
+            .unwrap();
+        msg.add_attribute(&Icmp::new(icmp_type, icmp_code, icmp_data))
+            .unwrap();
+        self.stun.send(msg.finish(), client.remote_addr, now).ok()
     }
 
     #[tracing::instrument(
@@ -2692,22 +2900,32 @@ mod tests {
             .is_none());
     }
 
-    fn create_permission(
+    fn create_permission_with_address(
         server: &mut TurnServer,
         creds: LongTermCredentials,
         nonce: &str,
+        peer_addr: SocketAddr,
         now: Instant,
     ) {
         let reply = server
             .recv(
                 client_transmit(
-                    create_permission_request(creds.clone(), nonce, peer_address()),
+                    create_permission_request(creds.clone(), nonce, peer_addr),
                     server.transport(),
                 ),
                 now,
             )
             .unwrap();
         validate_signed_success(&reply.data, CREATE_PERMISSION, creds);
+    }
+
+    fn create_permission(
+        server: &mut TurnServer,
+        creds: LongTermCredentials,
+        nonce: &str,
+        now: Instant,
+    ) {
+        create_permission_with_address(server, creds, nonce, peer_address(), now);
     }
 
     #[test]
@@ -2904,5 +3122,208 @@ mod tests {
                 now
             )
             .is_none());
+    }
+
+    fn create_udp(source: SocketAddr, destination: SocketAddr) -> Vec<u8> {
+        assert_eq!(source.is_ipv4(), destination.is_ipv4());
+        assert_eq!(source.is_ipv6(), destination.is_ipv6());
+        let mut udp = [0; pnet_packet::udp::UdpPacket::minimum_packet_size()];
+        let mut udp_packet = pnet_packet::udp::MutableUdpPacket::new(&mut udp).unwrap();
+        udp_packet.populate(&pnet_packet::udp::Udp {
+            source: source.port(),
+            destination: destination.port(),
+            length: 0x10,
+            checksum: 0x0000,
+            payload: vec![],
+        });
+        match (source, destination) {
+            (SocketAddr::V4(source), SocketAddr::V4(destination)) => {
+                let mut ip = [0; pnet_packet::ipv4::Ipv4Packet::minimum_packet_size()
+                    + pnet_packet::udp::UdpPacket::minimum_packet_size()];
+                let mut ip_packet = pnet_packet::ipv4::MutableIpv4Packet::new(&mut ip).unwrap();
+                ip_packet.set_version(0x4);
+                ip_packet.set_header_length(5);
+                ip_packet.set_total_length(48);
+                ip_packet.set_flags(pnet_packet::ipv4::Ipv4Flags::DontFragment);
+                ip_packet.set_ttl(16);
+                ip_packet.set_next_level_protocol(pnet_packet::ip::IpNextHeaderProtocols::Udp);
+                ip_packet.set_source(*source.ip());
+                ip_packet.set_destination(*destination.ip());
+                ip_packet.set_payload(&udp);
+                ip.to_vec()
+            }
+            (SocketAddr::V6(source), SocketAddr::V6(destination)) => {
+                let mut ip = [0; pnet_packet::ipv6::Ipv6Packet::minimum_packet_size()
+                    + pnet_packet::udp::UdpPacket::minimum_packet_size()];
+                let mut ip_packet = pnet_packet::ipv6::MutableIpv6Packet::new(&mut ip).unwrap();
+                ip_packet.set_version(0x6);
+                ip_packet.set_payload_length(48);
+                ip_packet.set_hop_limit(16);
+                ip_packet.set_next_header(pnet_packet::ip::IpNextHeaderProtocols::Udp);
+                ip_packet.set_source(*source.ip());
+                ip_packet.set_destination(*destination.ip());
+                ip_packet.set_payload(&udp);
+                ip.to_vec()
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn create_icmpv4<'p, T: AsRef<[u8]>>(
+        typ: pnet_packet::icmp::IcmpType,
+        code: pnet_packet::icmp::IcmpCode,
+        icmp_data: u32,
+        other_packet: T,
+    ) -> pnet_packet::icmp::IcmpPacket<'p> {
+        let data = other_packet.as_ref();
+        let ret = vec![0; data.len() + 8];
+        let mut icmp = pnet_packet::icmp::MutableIcmpPacket::owned(ret).unwrap();
+        icmp.set_icmp_type(typ);
+        icmp.set_icmp_code(code);
+        let mut payload = vec![0; 4];
+        BigEndian::write_u32(&mut payload, icmp_data);
+        payload.extend_from_slice(data);
+        icmp.set_payload(&payload);
+        icmp.consume_to_immutable()
+    }
+
+    fn create_icmpv6<'p, T: AsRef<[u8]>>(
+        typ: pnet_packet::icmpv6::Icmpv6Type,
+        code: pnet_packet::icmpv6::Icmpv6Code,
+        icmp_data: u32,
+        other_packet: T,
+    ) -> pnet_packet::icmpv6::Icmpv6Packet<'p> {
+        let data = other_packet.as_ref();
+        let ret = vec![0; data.len() + 8];
+        let mut icmp = pnet_packet::icmpv6::MutableIcmpv6Packet::owned(ret).unwrap();
+        icmp.set_icmpv6_type(typ);
+        icmp.set_icmpv6_code(code);
+        let mut payload = vec![0; 4];
+        BigEndian::write_u32(&mut payload, icmp_data);
+        payload.extend_from_slice(data);
+        icmp.set_payload(&payload);
+        icmp.consume_to_immutable()
+    }
+
+    fn validate_icmp(msg: &[u8], peer_addr: SocketAddr, typ: u8, code: u8, data: u32) {
+        let msg = Message::from_bytes(msg).unwrap();
+        assert!(msg.has_method(DATA));
+        let xor_peer_address = msg.attribute::<XorPeerAddress>().unwrap();
+        assert_eq!(xor_peer_address.addr(msg.transaction_id()), peer_addr);
+        let icmp = msg.attribute::<Icmp>().unwrap();
+        assert_eq!(icmp.icmp_type(), typ);
+        assert_eq!(icmp.code(), code);
+        assert_eq!(icmp.data(), data);
+    }
+
+    #[test]
+    fn test_server_recv_icmpv4() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply =
+            authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        create_permission(&mut server, creds.clone(), &nonce, now);
+        // icmpv6 for ipv4 allocation is ignored
+        assert!(server
+            .recv_icmp(
+                AddressFamily::IPV6,
+                create_icmpv6(
+                    pnet_packet::icmpv6::Icmpv6Types::DestinationUnreachable,
+                    pnet_packet::icmpv6::Icmpv6Code::new(0),
+                    0,
+                    create_udp(ipv6_peer_address(), ipv6_relayed_address())
+                )
+                .packet(),
+                now
+            )
+            .is_none());
+        let icmp_type = pnet_packet::icmp::IcmpTypes::DestinationUnreachable;
+        let icmp_code =
+            pnet_packet::icmp::destination_unreachable::IcmpCodes::DestinationHostUnreachable;
+        let transmit = server
+            .recv_icmp(
+                AddressFamily::IPV4,
+                create_icmpv4(
+                    icmp_type,
+                    icmp_code,
+                    0,
+                    create_udp(relayed_address(), peer_address()),
+                )
+                .packet(),
+                now,
+            )
+            .unwrap();
+        assert_eq!(transmit.transport, TransportType::Udp);
+        assert_eq!(transmit.from, server.listen_address());
+        assert_eq!(transmit.to, client_address());
+        validate_icmp(&transmit.data, peer_address(), icmp_type.0, icmp_code.0, 0);
+    }
+
+    #[test]
+    fn test_server_recv_icmpv6() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply = authenticated_allocate_with_credentials_transport_families(
+            &mut server,
+            creds.clone(),
+            &nonce,
+            RequestedTransport::UDP,
+            &[(AddressFamily::IPV6, Ok(ipv6_relayed_address()))],
+            now,
+        );
+        validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        create_permission_with_address(
+            &mut server,
+            creds.clone(),
+            &nonce,
+            ipv6_peer_address(),
+            now,
+        );
+        // icmpv4 for ipv6 allocation is ignored
+        assert!(server
+            .recv_icmp(
+                AddressFamily::IPV4,
+                create_icmpv4(
+                    pnet_packet::icmp::IcmpTypes::DestinationUnreachable,
+                    pnet_packet::icmp::IcmpCode::new(0),
+                    0,
+                    create_udp(peer_address(), relayed_address())
+                )
+                .packet(),
+                now
+            )
+            .is_none());
+        let icmp_type = pnet_packet::icmpv6::Icmpv6Types::DestinationUnreachable;
+        let icmp_code = pnet_packet::icmpv6::Icmpv6Code::new(3);
+        let transmit = server
+            .recv_icmp(
+                AddressFamily::IPV6,
+                create_icmpv6(
+                    icmp_type,
+                    icmp_code,
+                    0,
+                    create_udp(ipv6_relayed_address(), ipv6_peer_address()),
+                )
+                .packet(),
+                now,
+            )
+            .unwrap();
+        assert_eq!(transmit.transport, TransportType::Udp);
+        assert_eq!(transmit.from, server.listen_address());
+        assert_eq!(transmit.to, client_address());
+        validate_icmp(
+            &transmit.data,
+            ipv6_peer_address(),
+            icmp_type.0,
+            icmp_code.0,
+            0,
+        );
     }
 }
