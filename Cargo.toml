@@ -1,5 +1,5 @@
 [workspace]
-members = ["turn-types", "turn-client-proto", "turn-server-proto"]
+members = ["turn-types", "turn-client-proto", "turn-server-proto", "fuzz"]
 default-members = ["turn-types", "turn-client-proto", "turn-server-proto"]
 resolver = "2"
 
