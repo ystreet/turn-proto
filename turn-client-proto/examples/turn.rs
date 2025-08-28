@@ -61,6 +61,7 @@
 
 #![cfg(not(tarpaulin))]
 
+use rustls::pki_types::ServerName;
 use rustls::ClientConfig;
 use rustls_platform_verifier::ConfigVerifierExt;
 use turn_client_proto::prelude::*;
@@ -80,7 +81,7 @@ use clap::{Parser, ValueEnum};
 
 use sans_io_time::Instant;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -503,6 +504,7 @@ impl ClientTls {
         to: SocketAddr,
         credentials: TurnCredentials,
         allocation_families: &[AddressFamily],
+        server_name: ServerName<'static>,
         events_sender: SyncSender<TurnEvent>,
         insecure_tls: bool,
     ) -> Self {
@@ -524,7 +526,7 @@ impl ClientTls {
             remote_addr,
             credentials,
             allocation_families,
-            remote_addr.ip().into(),
+            server_name,
             Arc::new(config),
         );
         let inner = Arc::new((Mutex::new(ClientTlsInner { client }), Condvar::new()));
@@ -706,7 +708,7 @@ struct Cli {
         required = true,
         help = "The network address of the turn server to connect to"
     )]
-    server: SocketAddr,
+    server: String,
     #[arg(
         short,
         long,
@@ -761,10 +763,15 @@ fn main() -> io::Result<()> {
     if cli.ipv6 || cli.peer.is_ipv6() {
         address_families.push(AddressFamily::IPV6);
     }
+    let mut was_dns = false;
+    let server = cli.server.parse::<SocketAddr>().unwrap_or_else(|_| {
+        was_dns = true;
+        cli.server.to_socket_addrs().unwrap().next().unwrap()
+    });
 
     let client = match transport {
         TransportType::Udp => {
-            let socket = if cli.server.is_ipv4() {
+            let socket = if server.is_ipv4() {
                 UdpSocket::bind("0.0.0.0:0").unwrap()
             } else {
                 UdpSocket::bind("[::]:0").unwrap()
@@ -775,7 +782,7 @@ fn main() -> io::Result<()> {
             );
             let client = ClientUdp::new(
                 socket,
-                cli.server,
+                server,
                 credentials,
                 &address_families,
                 events_sender,
@@ -783,13 +790,20 @@ fn main() -> io::Result<()> {
             Box::new(client) as Box<dyn Client<_>>
         }
         TransportType::Tcp => {
-            let socket = TcpStream::connect(cli.server).unwrap();
+            let socket = TcpStream::connect(server).unwrap();
             if is_tls {
+                let server_name = if was_dns {
+                    let dns_name = cli.server.split(":").next().unwrap().to_string();
+                    dns_name.try_into().unwrap()
+                } else {
+                    server.ip().into()
+                };
                 let client = ClientTls::new(
                     socket,
-                    cli.server,
+                    server,
                     credentials,
                     &address_families,
+                    server_name,
                     events_sender,
                     cli.insecure_tls,
                 );
@@ -797,7 +811,7 @@ fn main() -> io::Result<()> {
             } else {
                 let client = ClientTcp::new(
                     socket,
-                    cli.server,
+                    server,
                     credentials,
                     &address_families,
                     events_sender,
