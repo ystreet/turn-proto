@@ -21,6 +21,7 @@ stun-proto.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 turn-types = { path = "../turn-types", version = "0.3.0" }
+pnet_packet = "0.35"
 rand.workspace = true
 rustls = { workspace = true, optional = true }
 sans-io-time.workspace = true
