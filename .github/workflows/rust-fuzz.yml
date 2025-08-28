@@ -1,0 +1,49 @@
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+name: Quick Fuzzing
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fuzz:
+    name: 
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Install nightly toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          tool: 'cargo-fuzz'
+
+      - name: Run cargo-fuzz
+        uses: actions-rs/cargo@v1
+        with:
+          command: 'fuzz'
+          args: 'run stun_msg_from_bytes -- -max_total_time=20'
+
+      - name: Run cargo-fuzz
+        uses: actions-rs/cargo@v1
+        with:
+          command: 'fuzz'
+          args: 'run turn_recv_authed -- -max_total_time=20'
+
+      - name: Run cargo-fuzz
+        uses: actions-rs/cargo@v1
+        with:
+          command: 'fuzz'
+          args: 'run turn_recv_unauthed -- -max_total_time=20'
+
