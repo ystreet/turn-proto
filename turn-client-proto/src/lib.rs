@@ -44,6 +44,12 @@
 
 #![deny(missing_debug_implementations)]
 #![deny(missing_docs)]
+#![no_std]
+
+extern crate alloc;
+
+#[cfg(any(feature = "std", test))]
+extern crate std;
 
 pub use stun_proto as stun;
 pub use turn_types as types;

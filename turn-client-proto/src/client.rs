@@ -10,7 +10,8 @@
 //!
 //! A cohesive TURN client that can be one of the transport specific (UDP, TCP, TLS) implementations.
 
-use std::net::{IpAddr, SocketAddr};
+use alloc::vec::Vec;
+use core::net::{IpAddr, SocketAddr};
 
 use stun_proto::agent::Transmit;
 use stun_proto::Instant;
@@ -149,7 +150,7 @@ impl TurnClientApi for TurnClient {
     /// The provided transport, address and data are the data to send to the peer.
     ///
     /// The returned value will instruct the caller to send a message to the turn server.
-    fn send_to<T: AsRef<[u8]> + std::fmt::Debug>(
+    fn send_to<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         transport: TransportType,
         to: SocketAddr,
@@ -167,7 +168,7 @@ impl TurnClientApi for TurnClient {
     /// Provide received data to the TURN client for handling.
     ///
     /// The returned data outlines what to do with this data.
-    fn recv<T: AsRef<[u8]> + std::fmt::Debug>(
+    fn recv<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         transmit: Transmit<T>,
         now: Instant,

@@ -11,8 +11,9 @@
 //! Provides a consistent interface between multiple implementations of TURN clients for different
 //! transports (TCP, and UDP) and wrappers (TLS).
 
-use std::net::{IpAddr, SocketAddr};
-use std::ops::Range;
+use alloc::vec::Vec;
+use core::net::{IpAddr, SocketAddr};
+use core::ops::Range;
 
 use byteorder::{BigEndian, ByteOrder};
 use stun_proto::agent::Transmit;
@@ -29,7 +30,7 @@ use turn_types::message::SEND;
 use turn_types::AddressFamily;
 
 /// The public API of a TURN client.
-pub trait TurnClientApi: std::fmt::Debug + Send {
+pub trait TurnClientApi: core::fmt::Debug + Send {
     /// The transport of the connection to the TURN server.
     fn transport(&self) -> TransportType;
 
@@ -77,7 +78,7 @@ pub trait TurnClientApi: std::fmt::Debug + Send {
     /// The provided transport, address and data are the data to send to the peer.
     ///
     /// The returned value may instruct the caller to send a message to the turn server.
-    fn send_to<T: AsRef<[u8]> + std::fmt::Debug>(
+    fn send_to<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         transport: TransportType,
         to: SocketAddr,
@@ -88,7 +89,7 @@ pub trait TurnClientApi: std::fmt::Debug + Send {
     /// Provide received data to the TURN client for handling.
     ///
     /// The return value outlines what to do with this data.
-    fn recv<T: AsRef<[u8]> + std::fmt::Debug>(
+    fn recv<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         transmit: Transmit<T>,
         now: Instant,
@@ -119,7 +120,7 @@ pub enum TurnPollRet {
 
 /// Return value from call [recv](TurnClientApi::recv).
 #[derive(Debug)]
-pub enum TurnRecvRet<T: AsRef<[u8]> + std::fmt::Debug> {
+pub enum TurnRecvRet<T: AsRef<[u8]> + core::fmt::Debug> {
     /// The data has been handled internally and should not be forwarded any further.
     Handled,
     /// The data is not directed at this [`TurnClientApi`].
@@ -130,7 +131,7 @@ pub enum TurnRecvRet<T: AsRef<[u8]> + std::fmt::Debug> {
 
 /// Data that has been received from the TURN server.
 #[derive(Debug)]
-pub struct TurnPeerData<T: AsRef<[u8]> + std::fmt::Debug> {
+pub struct TurnPeerData<T: AsRef<[u8]> + core::fmt::Debug> {
     /// The data received.
     pub(crate) data: DataRangeOrOwned<T>,
     /// The transport the data was received over.
@@ -139,14 +140,14 @@ pub struct TurnPeerData<T: AsRef<[u8]> + std::fmt::Debug> {
     pub peer: SocketAddr,
 }
 
-impl<T: AsRef<[u8]> + std::fmt::Debug> TurnPeerData<T> {
+impl<T: AsRef<[u8]> + core::fmt::Debug> TurnPeerData<T> {
     /// The data slice of this [`TurnPeerData`]
     pub fn data(&self) -> &[u8] {
         self.data.as_ref()
     }
 }
 
-impl<T: AsRef<[u8]> + std::fmt::Debug> AsRef<[u8]> for TurnPeerData<T> {
+impl<T: AsRef<[u8]> + core::fmt::Debug> AsRef<[u8]> for TurnPeerData<T> {
     fn as_ref(&self) -> &[u8] {
         self.data.as_ref()
     }
@@ -217,7 +218,7 @@ pub enum SendError {
 
 /// A slice range or an owned piece of data.
 #[derive(Debug)]
-pub enum DataRangeOrOwned<T: AsRef<[u8]> + std::fmt::Debug> {
+pub enum DataRangeOrOwned<T: AsRef<[u8]> + core::fmt::Debug> {
     /// A range of a provided data slice.
     Range {
         /// The data received.
@@ -229,7 +230,7 @@ pub enum DataRangeOrOwned<T: AsRef<[u8]> + std::fmt::Debug> {
     Owned(Vec<u8>),
 }
 
-impl<T: AsRef<[u8]> + std::fmt::Debug> AsRef<[u8]> for DataRangeOrOwned<T> {
+impl<T: AsRef<[u8]> + core::fmt::Debug> AsRef<[u8]> for DataRangeOrOwned<T> {
     fn as_ref(&self) -> &[u8] {
         match self {
             Self::Range { data, range } => &data.as_ref()[range.start..range.end],
@@ -238,8 +239,8 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> AsRef<[u8]> for DataRangeOrOwned<T> {
     }
 }
 
-impl<T: AsRef<[u8]> + std::fmt::Debug> DataRangeOrOwned<T> {
-    pub(crate) fn into_owned<R: AsRef<[u8]> + std::fmt::Debug>(self) -> DataRangeOrOwned<R> {
+impl<T: AsRef<[u8]> + core::fmt::Debug> DataRangeOrOwned<T> {
+    pub(crate) fn into_owned<R: AsRef<[u8]> + core::fmt::Debug>(self) -> DataRangeOrOwned<R> {
         DataRangeOrOwned::Owned(match self {
             Self::Range { data: _, range: _ } => self.as_ref().to_vec(),
             Self::Owned(owned) => owned,
@@ -249,7 +250,7 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> DataRangeOrOwned<T> {
 
 /// A piece of data that needs to be built before it can be transmitted.
 #[derive(Debug)]
-pub struct TransmitBuild<T: DelayedTransmitBuild + std::fmt::Debug> {
+pub struct TransmitBuild<T: DelayedTransmitBuild + core::fmt::Debug> {
     /// The data blob
     pub data: T,
     /// The transport for the transmission
@@ -260,7 +261,7 @@ pub struct TransmitBuild<T: DelayedTransmitBuild + std::fmt::Debug> {
     pub to: SocketAddr,
 }
 
-impl<T: DelayedTransmitBuild + std::fmt::Debug> TransmitBuild<T> {
+impl<T: DelayedTransmitBuild + core::fmt::Debug> TransmitBuild<T> {
     /// Construct a new [`Transmit`] with the specifid data and 5-tuple.
     pub fn new(data: T, transport: TransportType, from: SocketAddr, to: SocketAddr) -> Self {
         Self {
@@ -311,18 +312,18 @@ pub trait DelayedTransmitBuild {
 
 /// A `Transmit` where the data is some subset of the provided data.
 #[derive(Debug)]
-pub struct DelayedTransmit<T: AsRef<[u8]> + std::fmt::Debug> {
+pub struct DelayedTransmit<T: AsRef<[u8]> + core::fmt::Debug> {
     data: T,
     range: Range<usize>,
 }
 
-impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmit<T> {
+impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedTransmit<T> {
     fn data(&self) -> &[u8] {
         &self.data.as_ref()[self.range.clone()]
     }
 }
 
-impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedTransmit<T> {
+impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedTransmitBuild for DelayedTransmit<T> {
     fn len(&self) -> usize {
         self.range.len()
     }
@@ -339,12 +340,12 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedTransmit<
 
 /// A `Transmit` that will construct a STUN message towards a client with the relevant data.
 #[derive(Debug)]
-pub struct DelayedMessageSend<T: AsRef<[u8]> + std::fmt::Debug> {
+pub struct DelayedMessageSend<T: AsRef<[u8]> + core::fmt::Debug> {
     data: T,
     peer_addr: SocketAddr,
 }
 
-impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedMessageSend<T> {
+impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedTransmitBuild for DelayedMessageSend<T> {
     fn len(&self) -> usize {
         let xor_peer_addr = XorPeerAddress::new(self.peer_addr, 0.into());
         let data = AData::new(self.data.as_ref());
@@ -388,19 +389,19 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedMessageSe
 
 /// A `Transmit` that will construct a channel message towards a TURN server.
 #[derive(Debug)]
-pub struct DelayedChannelSend<T: AsRef<[u8]> + std::fmt::Debug> {
+pub struct DelayedChannelSend<T: AsRef<[u8]> + core::fmt::Debug> {
     data: T,
     channel_id: u16,
 }
 
-impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedChannelSend<T> {
+impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedChannelSend<T> {
     fn write_header_into(&self, len: u16, dest: &mut [u8]) {
         BigEndian::write_u16(&mut dest[..2], self.channel_id);
         BigEndian::write_u16(&mut dest[2..4], len);
     }
 }
 
-impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedChannelSend<T> {
+impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedTransmitBuild for DelayedChannelSend<T> {
     fn len(&self) -> usize {
         self.data.as_ref().len() + 4
     }
@@ -427,7 +428,7 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedChannelSe
 
 /// A delayed `Transmit` that will produce data for a TURN server.
 #[derive(Debug)]
-pub enum DelayedMessageOrChannelSend<T: AsRef<[u8]> + std::fmt::Debug> {
+pub enum DelayedMessageOrChannelSend<T: AsRef<[u8]> + core::fmt::Debug> {
     /// A [`DelayedChannelSend`].
     Channel(DelayedChannelSend<T>),
     /// A [`DelayedMessageSend`].
@@ -436,7 +437,7 @@ pub enum DelayedMessageOrChannelSend<T: AsRef<[u8]> + std::fmt::Debug> {
     Data(Vec<u8>),
 }
 
-impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedMessageOrChannelSend<T> {
+impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedMessageOrChannelSend<T> {
     pub(crate) fn new_channel(data: T, channel_id: u16) -> Self {
         Self::Channel(DelayedChannelSend { data, channel_id })
     }
@@ -446,7 +447,7 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedMessageOrChannelSend<T> {
     }
 }
 
-impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedMessageOrChannelSend<T> {
+impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedTransmitBuild for DelayedMessageOrChannelSend<T> {
     fn len(&self) -> usize {
         match self {
             Self::Channel(channel) => channel.len(),
@@ -477,7 +478,11 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> DelayedTransmitBuild for DelayedMessageOr
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::time::Duration;
+    use alloc::borrow::ToOwned;
+    use alloc::string::String;
+    use alloc::vec;
+    use core::time::Duration;
+    use std::println;
 
     use crate::protocol::{EXPIRY_BUFFER, PERMISSION_DURATION};
 
@@ -596,7 +601,7 @@ pub(crate) mod tests {
         assert_eq!(data, out2);
     }
 
-    pub(crate) fn transmit_send_build<T: DelayedTransmitBuild + std::fmt::Debug>(
+    pub(crate) fn transmit_send_build<T: DelayedTransmitBuild + core::fmt::Debug>(
         transmit: TransmitBuild<T>,
     ) -> Transmit<Data<'static>> {
         transmit
@@ -673,7 +678,7 @@ pub(crate) mod tests {
             }
         }
 
-        pub(crate) fn client_recv<T: AsRef<[u8]> + std::fmt::Debug>(
+        pub(crate) fn client_recv<T: AsRef<[u8]> + core::fmt::Debug>(
             &mut self,
             transmit: Transmit<T>,
             now: Instant,
@@ -829,7 +834,7 @@ pub(crate) mod tests {
             self.handle_delete_allocation(transmit, now);
         }
 
-        fn handle_delete_allocation<T: AsRef<[u8]> + std::fmt::Debug>(
+        fn handle_delete_allocation<T: AsRef<[u8]> + core::fmt::Debug>(
             &mut self,
             transmit: Transmit<T>,
             now: Instant,
@@ -873,7 +878,7 @@ pub(crate) mod tests {
             self.handle_create_permission(transmit, now);
         }
 
-        fn handle_create_permission<T: AsRef<[u8]> + std::fmt::Debug>(
+        fn handle_create_permission<T: AsRef<[u8]> + core::fmt::Debug>(
             &mut self,
             transmit: Transmit<T>,
             now: Instant,
@@ -896,7 +901,7 @@ pub(crate) mod tests {
             self.validate_client_permission_state();
         }
 
-        fn maybe_handles_stale_nonce<T: AsRef<[u8]> + std::fmt::Debug>(
+        fn maybe_handles_stale_nonce<T: AsRef<[u8]> + core::fmt::Debug>(
             &mut self,
             transmit: Transmit<T>,
             now: Instant,
@@ -930,7 +935,7 @@ pub(crate) mod tests {
             self.handle_bind_channel(transmit, now);
         }
 
-        fn handle_bind_channel<T: AsRef<[u8]> + std::fmt::Debug>(
+        fn handle_bind_channel<T: AsRef<[u8]> + core::fmt::Debug>(
             &mut self,
             transmit: Transmit<T>,
             now: Instant,

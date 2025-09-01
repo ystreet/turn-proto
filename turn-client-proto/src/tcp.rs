@@ -10,8 +10,9 @@
 //!
 //! An implementation of a TURN client suitable for TCP connections.
 
-use std::net::{IpAddr, SocketAddr};
-use std::ops::Range;
+use alloc::vec::Vec;
+use core::net::{IpAddr, SocketAddr};
+use core::ops::Range;
 
 use stun_proto::agent::{StunAgent, Transmit};
 use stun_proto::types::data::Data;
@@ -148,7 +149,7 @@ impl TurnClientApi for TurnClientTcp {
         self.protocol.bind_channel(transport, peer_addr, now)
     }
 
-    fn send_to<T: AsRef<[u8]> + std::fmt::Debug>(
+    fn send_to<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         transport: TransportType,
         to: SocketAddr,
@@ -158,7 +159,7 @@ impl TurnClientApi for TurnClientTcp {
         self.protocol.send_to(transport, to, data, now).map(Some)
     }
 
-    fn recv<T: AsRef<[u8]> + std::fmt::Debug>(
+    fn recv<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         transmit: Transmit<T>,
         now: Instant,
@@ -295,7 +296,7 @@ impl TurnClientApi for TurnClientTcp {
     }
 }
 
-fn protocol_recv_to_api<T: AsRef<[u8]> + std::fmt::Debug>(
+fn protocol_recv_to_api<T: AsRef<[u8]> + core::fmt::Debug>(
     recv: TurnProtocolRecv<Vec<u8>>,
     original: Transmit<T>,
 ) -> TurnRecvRet<T> {
@@ -327,6 +328,8 @@ pub(crate) fn ensure_data_owned(data: Vec<u8>, range: Range<usize>) -> Vec<u8> {
 mod tests {
     use turn_server_proto::api::TurnServerApi;
     use turn_server_proto::server::TurnServer;
+
+    use alloc::string::String;
 
     use crate::{
         api::tests::{
@@ -480,7 +483,7 @@ mod tests {
         )
     }
 
-    fn combine_transmit<T: AsRef<[u8]> + std::fmt::Debug, R: AsRef<[u8]> + std::fmt::Debug>(
+    fn combine_transmit<T: AsRef<[u8]> + core::fmt::Debug, R: AsRef<[u8]> + core::fmt::Debug>(
         a: &Transmit<T>,
         b: &Transmit<R>,
     ) -> Transmit<Vec<u8>> {

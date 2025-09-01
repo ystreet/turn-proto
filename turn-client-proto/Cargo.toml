@@ -17,11 +17,12 @@ stun-proto.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 smallvec.workspace = true
-turn-types = { path = "../turn-types", version = "0.3.0" }
+turn-types = { path = "../turn-types", version = "0.3.0", default-features = false }
 
 rustls = { workspace = true, optional = true }
 
 [dev-dependencies]
+tracing = { workspace = true, features = ["std"] }
 tracing-subscriber.workspace = true
 turn-server-proto = { path = "../turn-server-proto" }
 clap = {version = "4", features = ["derive"]}
@@ -32,8 +33,9 @@ rcgen = "0.14"
 sans-io-time = "0.1"
 
 [features]
-default = ["rustls"]
-rustls = ["dep:rustls"]
+default = ["rustls", "std"]
+std = ["thiserror/std", "turn-types/std"]
+rustls = ["dep:rustls", "std"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }
