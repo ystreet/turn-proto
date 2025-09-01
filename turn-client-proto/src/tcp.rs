@@ -511,10 +511,10 @@ mod tests {
             .server
             .recv(peer_transmit(&test, peer_data.as_slice()), now)
             .unwrap();
-        let TurnRecvRet::PeerData(peer) = test
-            .client
-            .recv(combine_transmit(&msg_reply, &peer_transmit), now)
-        else {
+        let TurnRecvRet::PeerData(peer) = test.client.recv(
+            combine_transmit(&msg_reply.build(), &peer_transmit.build()),
+            now,
+        ) else {
             unreachable!();
         };
         assert_eq!(peer.data(), peer_data.as_slice());
@@ -537,10 +537,10 @@ mod tests {
             .server
             .recv(peer_transmit(&test, peer_data.as_slice()), now)
             .unwrap();
-        let TurnRecvRet::PeerData(peer) = test
-            .client
-            .recv(combine_transmit(&peer_transmit, &msg_reply), now)
-        else {
+        let TurnRecvRet::PeerData(peer) = test.client.recv(
+            combine_transmit(&peer_transmit.build(), &msg_reply.build()),
+            now,
+        ) else {
             unreachable!();
         };
         assert_eq!(peer.data(), peer_data.as_slice());

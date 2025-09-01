@@ -16,6 +16,7 @@ use byteorder::{BigEndian, ByteOrder};
 use core::net::{IpAddr, SocketAddr};
 use core::time::Duration;
 use pnet_packet::Packet;
+use turn_types::transmit::{DelayedChannel, DelayedMessage, TransmitBuild};
 
 use stun_proto::agent::{StunAgent, Transmit};
 use stun_proto::types::attribute::{
@@ -45,7 +46,9 @@ use turn_types::{AddressFamily, TurnCredentials};
 
 use tracing::{debug, error, info, trace, warn};
 
-use crate::api::{SocketAllocateError, TurnServerApi, TurnServerPollRet};
+use crate::api::{
+    DelayedMessageOrChannelSend, SocketAllocateError, TurnServerApi, TurnServerPollRet,
+};
 
 static MINIMUM_NONCE_EXPIRY_DURATION: Duration = Duration::from_secs(30);
 static DEFAULT_NONCE_EXPIRY_DURATION: Duration = Duration::from_secs(3600);
@@ -876,7 +879,15 @@ impl TurnServer {
         from: SocketAddr,
         to: SocketAddr,
         now: Instant,
-    ) -> Result<Transmit<Vec<u8>>, ()> {
+    ) -> Result<
+        (
+            TransportType,
+            SocketAddr,
+            SocketAddr,
+            core::ops::Range<usize>,
+        ),
+        (),
+    > {
         let peer_address = msg.attribute::<XorPeerAddress>().map_err(|_| ())?;
         let peer_address = peer_address.addr(msg.transaction_id());
 
@@ -898,27 +909,18 @@ impl TurnServer {
             return Err(());
         }
 
-        let Some(permission) = alloc.have_permission(peer_address.ip(), now) else {
+        let Some(_permission) = alloc.have_permission(peer_address.ip(), now) else {
             return Err(());
         };
 
-        let data = msg.attribute::<AData>().map_err(|_| ())?;
+        let (offset, data) = msg.attribute_and_offset::<AData>().map_err(|_| ())?;
         trace!("have {} to send to {:?}", data.data().len(), peer_address);
-        Ok(Transmit::new(
-            data.data().to_vec(),
-            permission.ttype,
+        Ok((
+            alloc.ttype,
             alloc.addr,
             peer_address,
+            offset..offset + data.data().len(),
         ))
-        // XXX: copies the data.  Try to figure out a way to not do this
-        /*
-        self.pending_transmits.push_back(Transmit::new_owned(
-            data.data(),
-            permission.ttype,
-            alloc.addr,
-            peer_address,
-        ));
-        Ok(())*/
     }
 
     #[tracing::instrument(
@@ -936,25 +938,25 @@ impl TurnServer {
         from: SocketAddr,
         to: SocketAddr,
         now: Instant,
-    ) -> Result<Option<Transmit<Vec<u8>>>, MessageWriteVec> {
+    ) -> Result<Option<InternalHandleStun>, MessageWriteVec> {
         trace!("received STUN message {msg}");
         let ret = if msg.has_class(stun_proto::types::message::MessageClass::Request) {
             match msg.method() {
                 BINDING => self
                     .handle_stun_binding(msg, ttype, from, to, now)
-                    .map(Some),
+                    .map(|t| Some(InternalHandleStun::Transmit(t))),
                 ALLOCATE => self
                     .handle_stun_allocate(msg, ttype, from, to, now)
                     .map(|_| None),
                 REFRESH => self
                     .handle_stun_refresh(msg, ttype, from, to, now)
-                    .map(Some),
+                    .map(|t| Some(InternalHandleStun::Transmit(t))),
                 CREATE_PERMISSION => self
                     .handle_stun_create_permission(msg, ttype, from, to, now)
-                    .map(Some),
+                    .map(|t| Some(InternalHandleStun::Transmit(t))),
                 CHANNEL_BIND => self
                     .handle_stun_channel_bind(msg, ttype, from, to, now)
-                    .map(Some),
+                    .map(|t| Some(InternalHandleStun::Transmit(t))),
                 _ => {
                     let credentials = self.validate_stun(msg, ttype, from, to, now)?;
                     let Some(_client) = self.mut_client_from_5tuple(ttype, to, from) else {
@@ -968,7 +970,10 @@ impl TurnServer {
             match msg.method() {
                 SEND => Ok(self
                     .handle_stun_send_indication(msg, ttype, from, to, now)
-                    .ok()),
+                    .ok()
+                    .map(|(transport, from, to, range)| {
+                        InternalHandleStun::Data(transport, from, to, range)
+                    })),
                 _ => Ok(None),
             }
         } else {
@@ -1193,11 +1198,11 @@ impl TurnServerApi for TurnServer {
             data_len = transmit.data.as_ref().len(),
         )
     )]
-    fn recv<T: AsRef<[u8]>>(
+    fn recv<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         transmit: Transmit<T>,
         now: Instant,
-    ) -> Option<Transmit<Vec<u8>>> {
+    ) -> Option<TransmitBuild<DelayedMessageOrChannelSend<T>>> {
         trace!("executing at {now:?}");
         if let Some((client, allocation)) =
             self.allocation_from_public_5tuple(transmit.transport, transmit.to, transmit.from)
@@ -1230,8 +1235,11 @@ impl TurnServerApi for TurnServer {
                 data[2..4].copy_from_slice(&(transmit.data.as_ref().len() as u16).to_be_bytes());
                 // XXX: try to avoid copy?
                 data.extend_from_slice(transmit.data.as_ref());
-                Some(Transmit::new(
-                    data.into_boxed_slice().into(),
+                Some(TransmitBuild::new(
+                    DelayedMessageOrChannelSend::Channel(DelayedChannel::new(
+                        existing.id,
+                        transmit.data,
+                    )),
                     client.transport,
                     client.local_addr,
                     client.remote_addr,
@@ -1242,21 +1250,12 @@ impl TurnServerApi for TurnServer {
                     "no channel for {:?} for this allocation {:?}, using DATA indication",
                     transmit.from, allocation.addr
                 );
-                let transaction_id = TransactionId::generate();
-                let mut builder = Message::builder(
-                    MessageType::from_class_method(MessageClass::Indication, DATA),
-                    transaction_id,
-                    MessageWriteVec::new(),
-                );
-                let peer_address = XorPeerAddress::new(transmit.from, transaction_id);
-                builder.add_attribute(&peer_address).unwrap();
-                let data = AData::new(transmit.data.as_ref());
-                builder.add_attribute(&data).unwrap();
-                // XXX: try to avoid copy?
-                let msg_data = builder.finish();
 
-                Some(Transmit::new(
-                    msg_data.into_boxed_slice().into(),
+                Some(TransmitBuild::new(
+                    DelayedMessageOrChannelSend::Message(DelayedMessage::for_client(
+                        transmit.from,
+                        transmit.data,
+                    )),
                     client.transport,
                     client.local_addr,
                     client.remote_addr,
@@ -1273,13 +1272,29 @@ impl TurnServerApi for TurnServer {
                         transmit.to,
                         now,
                     ) {
-                        Err(builder) => Some(Transmit::new(
-                            builder.finish(),
+                        Err(builder) => Some(TransmitBuild::new(
+                            DelayedMessageOrChannelSend::Owned(builder.finish()),
                             transmit.transport,
                             transmit.to,
                             transmit.from,
                         )),
-                        Ok(transmit) => transmit,
+                        Ok(Some(InternalHandleStun::Transmit(transmit))) => {
+                            Some(TransmitBuild::new(
+                                DelayedMessageOrChannelSend::Owned(transmit.data),
+                                transmit.transport,
+                                transmit.from,
+                                transmit.to,
+                            ))
+                        }
+                        Ok(Some(InternalHandleStun::Data(transport, from, to, range))) => {
+                            Some(TransmitBuild::new(
+                                DelayedMessageOrChannelSend::Range(transmit.data, range),
+                                transport,
+                                from,
+                                to,
+                            ))
+                        }
+                        Ok(None) => None,
                     }
                 }
                 Err(_) => {
@@ -1300,24 +1315,26 @@ impl TurnServerApi for TurnServer {
                         transmit.data.as_ref().len(),
                         transmit.from
                     );
-                    let Ok(channel) = ChannelData::parse(transmit.data.as_ref()) else {
+                    let data = transmit.data.as_ref();
+                    let Ok((channel_id, channel_len)) = ChannelData::parse_header(data) else {
                         return None;
                     };
+                    if data.len() < 2 + channel_len {
+                        // message too short
+                        return None;
+                    }
                     trace!(
-                        "parsed channel data with id {} and data length {}",
-                        channel.id(),
-                        channel.data().len()
+                        "parsed channel data with id {channel_id} and data length {channel_len}",
                     );
                     let Some((allocation, existing)) =
                         client.allocations.iter().find_map(|allocation| {
                             allocation
-                                .channel_from_id(channel.id())
+                                .channel_from_id(channel_id)
                                 .map(|perm| (allocation, perm))
                         })
                     else {
                         warn!(
-                            "no channel id {} for this client {:?}",
-                            channel.id(),
+                            "no channel id {channel_id} for this client {:?}",
                             client.remote_addr
                         );
                         // no channel with that id
@@ -1353,8 +1370,8 @@ impl TurnServerApi for TurnServer {
                         );
                         return None;
                     }
-                    Some(Transmit::new(
-                        channel.data().to_vec(),
+                    Some(TransmitBuild::new(
+                        DelayedMessageOrChannelSend::Range(transmit.data, 2..2 + channel_len),
                         allocation.ttype,
                         allocation.addr,
                         existing.peer_addr,
@@ -1608,6 +1625,16 @@ struct Channel {
     expires_at: Instant,
 }
 
+enum InternalHandleStun {
+    Transmit(Transmit<Vec<u8>>),
+    Data(
+        TransportType,
+        SocketAddr,
+        SocketAddr,
+        core::ops::Range<usize>,
+    ),
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::string::{String, ToString};
@@ -1678,6 +1705,7 @@ mod tests {
                 now,
             )
             .unwrap();
+        let reply = reply.build();
         let msg = Message::from_bytes(&reply.data).unwrap();
         assert!(msg.has_method(BINDING));
         assert!(msg.has_class(MessageClass::Success));
@@ -1736,7 +1764,7 @@ mod tests {
                 now,
             )
             .unwrap();
-        validate_initial_allocate_reply(&reply.data);
+        validate_initial_allocate_reply(&reply.build().data);
     }
 
     #[test]
@@ -1750,14 +1778,14 @@ mod tests {
                 now,
             )
             .unwrap();
-        let (realm, nonce) = validate_initial_allocate_reply(&reply.data);
+        let (realm, nonce) = validate_initial_allocate_reply(&reply.build().data);
         let reply = server
             .recv(
                 client_transmit(initial_allocate_msg(), server.transport()),
                 now,
             )
             .unwrap();
-        let (realm2, nonce2) = validate_initial_allocate_reply(&reply.data);
+        let (realm2, nonce2) = validate_initial_allocate_reply(&reply.build().data);
         assert_eq!(nonce, nonce2);
         assert_eq!(realm, realm2);
     }
@@ -1769,7 +1797,7 @@ mod tests {
                 now,
             )
             .unwrap();
-        validate_initial_allocate_reply(&reply.data)
+        validate_initial_allocate_reply(&reply.build().data)
     }
 
     #[test]
@@ -1814,9 +1842,18 @@ mod tests {
                 .recv(client_transmit(allocate.finish(), server.transport()), now)
                 .unwrap();
             if attr != RequestedTransport::TYPE {
-                validate_unsigned_error_reply(&reply.data, ALLOCATE, ErrorCode::BAD_REQUEST);
+                validate_unsigned_error_reply(
+                    &reply.build().data,
+                    ALLOCATE,
+                    ErrorCode::BAD_REQUEST,
+                );
             } else {
-                validate_signed_error_reply(&reply.data, ALLOCATE, ErrorCode::BAD_REQUEST, creds);
+                validate_signed_error_reply(
+                    &reply.build().data,
+                    ALLOCATE,
+                    ErrorCode::BAD_REQUEST,
+                    creds,
+                );
             }
         }
     }
@@ -1876,7 +1913,7 @@ mod tests {
             now,
         );
         if let Some(transmit) = ret {
-            return transmit;
+            return transmit.build();
         }
         for _ in 0..families.len() {
             let TurnServerPollRet::AllocateSocketUdp {
@@ -2169,7 +2206,7 @@ mod tests {
             )
             .unwrap();
         validate_signed_error_reply(
-            &reply.data,
+            &reply.build().data,
             CREATE_PERMISSION,
             ErrorCode::ALLOCATION_MISMATCH,
             creds,
@@ -2208,7 +2245,7 @@ mod tests {
             )
             .unwrap();
         validate_signed_error_reply(
-            &reply.data,
+            &reply.build().data,
             CREATE_PERMISSION,
             ErrorCode::BAD_REQUEST,
             creds,
@@ -2235,7 +2272,7 @@ mod tests {
             )
             .unwrap();
         validate_signed_error_reply(
-            &reply.data,
+            &reply.build().data,
             CREATE_PERMISSION,
             ErrorCode::PEER_ADDRESS_FAMILY_MISMATCH,
             creds,
@@ -2268,7 +2305,7 @@ mod tests {
             )
             .unwrap();
         validate_signed_error_reply(
-            &reply.data,
+            &reply.build().data,
             CREATE_PERMISSION,
             ErrorCode::PEER_ADDRESS_FAMILY_MISMATCH,
             creds,
@@ -2297,7 +2334,11 @@ mod tests {
                 now,
             )
             .unwrap();
-        validate_unsigned_error_reply(&reply.data, CREATE_PERMISSION, ErrorCode::WRONG_CREDENTIALS);
+        validate_unsigned_error_reply(
+            &reply.build().data,
+            CREATE_PERMISSION,
+            ErrorCode::WRONG_CREDENTIALS,
+        );
     }
 
     #[test]
@@ -2340,7 +2381,7 @@ mod tests {
             )
             .unwrap();
         validate_signed_error_reply(
-            &reply.data,
+            &reply.build().data,
             CREATE_PERMISSION,
             ErrorCode::BAD_REQUEST,
             creds,
@@ -2380,7 +2421,7 @@ mod tests {
             )
             .unwrap();
         validate_signed_error_reply(
-            &reply.data,
+            &reply.build().data,
             CHANNEL_BIND,
             ErrorCode::ALLOCATION_MISMATCH,
             creds,
@@ -2425,7 +2466,7 @@ mod tests {
             )
             .unwrap();
         validate_signed_error_reply(
-            &reply.data,
+            &reply.build().data,
             CHANNEL_BIND,
             ErrorCode::BAD_REQUEST,
             creds.clone(),
@@ -2460,7 +2501,7 @@ mod tests {
             )
             .unwrap();
         validate_signed_error_reply(
-            &reply.data,
+            &reply.build().data,
             CHANNEL_BIND,
             ErrorCode::BAD_REQUEST,
             creds.clone(),
@@ -2506,7 +2547,7 @@ mod tests {
             )
             .unwrap();
         validate_signed_error_reply(
-            &reply.data,
+            &reply.build().data,
             CHANNEL_BIND,
             ErrorCode::BAD_REQUEST,
             creds.clone(),
@@ -2552,7 +2593,7 @@ mod tests {
             )
             .unwrap();
         validate_signed_error_reply(
-            &reply.data,
+            &reply.build().data,
             CHANNEL_BIND,
             ErrorCode::PEER_ADDRESS_FAMILY_MISMATCH,
             creds,
@@ -2580,7 +2621,7 @@ mod tests {
             )
             .unwrap();
         validate_signed_error_reply(
-            &reply.data,
+            &reply.build().data,
             CHANNEL_BIND,
             ErrorCode::ALLOCATION_MISMATCH,
             creds,
@@ -2616,7 +2657,7 @@ mod tests {
                 now,
             )
             .unwrap();
-        validate_signed_success(&reply.data, CHANNEL_BIND, creds.clone());
+        validate_signed_success(&reply.build().data, CHANNEL_BIND, creds.clone());
     }
 
     #[test]
@@ -2658,7 +2699,12 @@ mod tests {
                 now,
             )
             .unwrap();
-        validate_signed_error_reply(&reply.data, CHANNEL_BIND, ErrorCode::BAD_REQUEST, creds);
+        validate_signed_error_reply(
+            &reply.build().data,
+            CHANNEL_BIND,
+            ErrorCode::BAD_REQUEST,
+            creds,
+        );
     }
 
     fn refresh_request_with_lifetime(
@@ -2705,7 +2751,12 @@ mod tests {
                 now,
             )
             .unwrap();
-        validate_signed_error_reply(&reply.data, REFRESH, ErrorCode::ALLOCATION_MISMATCH, creds);
+        validate_signed_error_reply(
+            &reply.build().data,
+            REFRESH,
+            ErrorCode::ALLOCATION_MISMATCH,
+            creds,
+        );
     }
 
     #[test]
@@ -2738,7 +2789,7 @@ mod tests {
                 now,
             )
             .unwrap();
-        validate_signed_success(&reply.data, REFRESH, creds);
+        validate_signed_success(&reply.build().data, REFRESH, creds);
     }
 
     fn delete_request(
@@ -2776,7 +2827,7 @@ mod tests {
                 now,
             )
             .unwrap();
-        validate_signed_success(&reply.data, REFRESH, creds.clone());
+        validate_signed_success(&reply.build().data, REFRESH, creds.clone());
         // duplicate delete results in error
         let reply = server
             .recv(
@@ -2788,7 +2839,7 @@ mod tests {
             )
             .unwrap();
         validate_signed_error_reply(
-            &reply.data,
+            &reply.build().data,
             REFRESH,
             ErrorCode::PEER_ADDRESS_FAMILY_MISMATCH,
             creds.clone(),
@@ -2804,7 +2855,7 @@ mod tests {
                 now,
             )
             .unwrap();
-        validate_signed_success(&reply.data, REFRESH, creds.clone());
+        validate_signed_success(&reply.build().data, REFRESH, creds.clone());
         // duplicate delete when there are no allocation results in error
         let reply = server
             .recv(
@@ -2816,7 +2867,7 @@ mod tests {
             )
             .unwrap();
         validate_signed_error_reply(
-            &reply.data,
+            &reply.build().data,
             REFRESH,
             ErrorCode::ALLOCATION_MISMATCH,
             creds.clone(),
@@ -2830,7 +2881,12 @@ mod tests {
                 now,
             )
             .unwrap();
-        validate_signed_error_reply(&reply.data, REFRESH, ErrorCode::ALLOCATION_MISMATCH, creds);
+        validate_signed_error_reply(
+            &reply.build().data,
+            REFRESH,
+            ErrorCode::ALLOCATION_MISMATCH,
+            creds,
+        );
     }
 
     fn send_indication(peer_addr: SocketAddr) -> Vec<u8> {
@@ -2930,7 +2986,7 @@ mod tests {
                 now,
             )
             .unwrap();
-        validate_signed_success(&reply.data, CREATE_PERMISSION, creds);
+        validate_signed_success(&reply.build().data, CREATE_PERMISSION, creds);
     }
 
     fn create_permission(
@@ -2996,7 +3052,7 @@ mod tests {
             )
             .unwrap();
         validate_signed_error_reply(
-            &reply.data,
+            &reply.build().data,
             Method::new(0x123),
             ErrorCode::BAD_REQUEST,
             creds,

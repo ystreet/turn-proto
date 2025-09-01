@@ -15,6 +15,8 @@ use alloc::vec::Vec;
 use core::net::SocketAddr;
 use core::time::Duration;
 use std::io::{Read, Write};
+use turn_types::prelude::DelayedTransmitBuild;
+use turn_types::transmit::TransmitBuild;
 use turn_types::AddressFamily;
 
 use rustls::{ServerConfig, ServerConnection};
@@ -23,7 +25,9 @@ use stun_proto::Instant;
 use tracing::{info, trace, warn};
 use turn_types::stun::TransportType;
 
-use crate::api::{SocketAllocateError, TurnServerApi, TurnServerPollRet};
+use crate::api::{
+    DelayedMessageOrChannelSend, SocketAllocateError, TurnServerApi, TurnServerPollRet,
+};
 use crate::server::TurnServer;
 
 /// A TURN server that can handle TLS connections.
@@ -73,11 +77,11 @@ impl TurnServerApi for RustlsTurnServer {
             data_len = transmit.data.as_ref().len()
         )
     )]
-    fn recv<T: AsRef<[u8]>>(
+    fn recv<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         transmit: Transmit<T>,
         now: Instant,
-    ) -> Option<Transmit<Vec<u8>>> {
+    ) -> Option<TransmitBuild<DelayedMessageOrChannelSend<T>>> {
         let listen_address = self.listen_address();
         if transmit.transport == TransportType::Tcp && transmit.to == listen_address {
             trace!("receiving TLS data: {:x?}", transmit.data.as_ref());
@@ -138,17 +142,24 @@ impl TurnServerApi for RustlsTurnServer {
                 && transmit.from == listen_address
                 && transmit.to == client_addr
             {
-                conn.writer().write_all(&transmit.data).unwrap();
+                let plaintext = transmit.data.build();
+                conn.writer().write_all(&plaintext).unwrap();
                 let mut out = vec![];
                 conn.write_tls(&mut out).unwrap();
-                Some(Transmit::new(
-                    out,
+                Some(TransmitBuild::new(
+                    DelayedMessageOrChannelSend::Owned(out),
                     TransportType::Tcp,
                     listen_address,
                     client_addr,
                 ))
             } else {
-                Some(transmit)
+                let transmit = transmit.build();
+                Some(TransmitBuild::new(
+                    DelayedMessageOrChannelSend::Owned(transmit.data),
+                    transmit.transport,
+                    transmit.from,
+                    transmit.to,
+                ))
             }
         } else if let Some(transmit) = self.server.recv(transmit, now) {
             // incoming allocated address
@@ -160,11 +171,12 @@ impl TurnServerApi for RustlsTurnServer {
                 else {
                     return Some(transmit);
                 };
-                conn.writer().write_all(&transmit.data).unwrap();
+                let plaintext = transmit.data.build();
+                conn.writer().write_all(&plaintext).unwrap();
                 let mut out = vec![];
                 conn.write_tls(&mut out).unwrap();
-                Some(Transmit::new(
-                    out,
+                Some(TransmitBuild::new(
+                    DelayedMessageOrChannelSend::Owned(out),
                     TransportType::Tcp,
                     listen_address,
                     *client_addr,

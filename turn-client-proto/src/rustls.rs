@@ -576,7 +576,7 @@ mod tests {
                 trace!("have transmit: {transmit:?}");
                 if let Some(transmit) = test.server.recv(transmit, now) {
                     trace!("have transmit: {transmit:?}");
-                    test.client.recv(transmit, now);
+                    test.client.recv(transmit.build(), now);
                 }
             }
             if let Some(transmit) = test.server.poll_transmit(now) {
@@ -687,7 +687,7 @@ mod tests {
         assert_eq!(transmit.transport, test.client.transport());
         assert_eq!(transmit.from, test.server.listen_address());
         assert_eq!(transmit.to, test.client.local_addr());
-        let TurnRecvRet::PeerData(peer_data) = test.client.recv(transmit, now) else {
+        let TurnRecvRet::PeerData(peer_data) = test.client.recv(transmit.build(), now) else {
             unreachable!();
         };
         assert_eq!(peer_data.peer, test.peer_addr);

@@ -42,6 +42,12 @@ pub mod attribute;
 pub mod channel;
 pub mod message;
 pub mod tcp;
+pub mod transmit;
+
+/// Public prelude.
+pub mod prelude {
+    pub use crate::transmit::DelayedTransmitBuild;
+}
 
 use alloc::borrow::ToOwned;
 use alloc::string::{String, ToString};

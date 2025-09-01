@@ -62,9 +62,10 @@ pub mod udp;
 #[cfg(feature = "rustls")]
 pub mod rustls;
 
-/// Public prelude
+/// Public prelude.
 pub mod prelude {
-    pub use crate::api::{DelayedTransmitBuild, TurnClientApi};
+    pub use crate::api::TurnClientApi;
+    pub use turn_types::prelude::DelayedTransmitBuild;
 }
 
 #[cfg(test)]
