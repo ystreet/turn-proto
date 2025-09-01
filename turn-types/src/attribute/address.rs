@@ -8,6 +8,7 @@
 
 use std::net::SocketAddr;
 
+use crate::AddressFamily;
 use stun_types::{
     attribute::*,
     message::{StunParseError, TransactionId},

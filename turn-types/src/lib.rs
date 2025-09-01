@@ -36,7 +36,7 @@ pub mod channel;
 pub mod message;
 pub mod tcp;
 
-pub use stun_types::attribute::AddressFamily;
+pub use stun_types::AddressFamily;
 
 /// Initialize some debugging functionality of the library.
 ///

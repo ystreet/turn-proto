@@ -10,7 +10,6 @@
 //!
 //! An implementation of a TURN client suitable for TLS over TCP connections.
 
-use sans_io_time::Instant;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -20,6 +19,7 @@ use rustls::{ClientConfig, ClientConnection};
 
 use stun_proto::agent::{StunAgent, Transmit};
 use stun_proto::types::data::Data;
+use stun_proto::Instant;
 
 use stun_proto::types::TransportType;
 

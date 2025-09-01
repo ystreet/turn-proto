@@ -14,7 +14,6 @@ arbitrary = { version = "1", features = ["derive"] }
 libfuzzer-sys = "0.4"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"]}
-sans-io-time = "0.1"
 stun-types = { workspace = true, features = ["arbitrary"] }
 turn-types = { path = "../turn-types" }
 turn-client-proto = { path = "../turn-client-proto" }

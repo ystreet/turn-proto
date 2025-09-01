@@ -10,11 +10,11 @@
 //!
 //! An implementation of a TURN client suitable for UDP connections.
 
-use sans_io_time::Instant;
 use std::net::{IpAddr, SocketAddr};
 
 use stun_proto::agent::{StunAgent, Transmit};
 use stun_proto::types::data::Data;
+use stun_proto::Instant;
 
 use stun_proto::types::TransportType;
 
