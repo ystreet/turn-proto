@@ -10,9 +10,12 @@
 //!
 //! An implementation of a TURN client suitable for TLS over TCP connections.
 
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::net::{IpAddr, SocketAddr};
 use std::io::{Read, Write};
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection};
@@ -71,7 +74,7 @@ impl TurnClientTls {
         }
     }
 
-    fn handle_incoming_plaintext<T: AsRef<[u8]> + std::fmt::Debug>(
+    fn handle_incoming_plaintext<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         transmit: Transmit<Vec<u8>>,
         now: Instant,
@@ -289,7 +292,7 @@ impl TurnClientApi for TurnClientTls {
         Ok(())
     }
 
-    fn send_to<T: AsRef<[u8]> + std::fmt::Debug>(
+    fn send_to<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         transport: TransportType,
         to: SocketAddr,
@@ -334,7 +337,7 @@ impl TurnClientApi for TurnClientTls {
             data_len = transmit.data.as_ref().len()
         )
     )]
-    fn recv<T: AsRef<[u8]> + std::fmt::Debug>(
+    fn recv<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         transmit: Transmit<T>,
         now: Instant,
@@ -430,7 +433,9 @@ impl TurnClientApi for TurnClientTls {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use alloc::borrow::ToOwned;
+    use alloc::string::{String, ToString};
+    use core::time::Duration;
 
     use crate::api::tests::{transmit_send_build, TurnTest};
     use crate::client::TurnClient;
@@ -451,6 +456,8 @@ mod tests {
         use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
         use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
         use rustls::DigitallySignedStruct;
+
+        use alloc::vec::Vec;
 
         #[derive(Debug)]
         pub struct NoCertificateVerification(CryptoProvider);

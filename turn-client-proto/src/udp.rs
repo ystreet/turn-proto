@@ -10,7 +10,8 @@
 //!
 //! An implementation of a TURN client suitable for UDP connections.
 
-use std::net::{IpAddr, SocketAddr};
+use alloc::vec::Vec;
+use core::net::{IpAddr, SocketAddr};
 
 use stun_proto::agent::{StunAgent, Transmit};
 use stun_proto::types::data::Data;
@@ -147,7 +148,7 @@ impl TurnClientApi for TurnClientUdp {
         self.protocol.bind_channel(transport, peer_addr, now)
     }
 
-    fn send_to<T: AsRef<[u8]> + std::fmt::Debug>(
+    fn send_to<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         transport: TransportType,
         to: SocketAddr,
@@ -157,7 +158,7 @@ impl TurnClientApi for TurnClientUdp {
         self.protocol.send_to(transport, to, data, now).map(Some)
     }
 
-    fn recv<T: AsRef<[u8]> + std::fmt::Debug>(
+    fn recv<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         transmit: Transmit<T>,
         now: Instant,
@@ -227,6 +228,7 @@ impl TurnClientApi for TurnClientUdp {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use alloc::string::String;
     use turn_server_proto::server::TurnServer;
 
     use super::*;

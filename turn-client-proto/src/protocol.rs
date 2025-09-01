@@ -10,10 +10,13 @@
 //!
 //! Contains the protocol state machine for a TURN client.
 
-use std::collections::VecDeque;
-use std::net::{IpAddr, SocketAddr};
-use std::ops::Range;
-use std::time::Duration;
+use alloc::collections::VecDeque;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::net::{IpAddr, SocketAddr};
+use core::ops::Range;
+use core::time::Duration;
 use stun_proto::agent::{HandleStunReply, StunAgent, StunAgentPollRet, Transmit};
 use stun_proto::types::attribute::{ErrorCode, Nonce, Realm, Username};
 use stun_proto::types::data::Data;
@@ -831,7 +834,7 @@ impl TurnClientProtocol {
             data_len = data.as_ref().len(),
         )
     )]
-    pub(crate) fn handle_message<T: AsRef<[u8]> + std::fmt::Debug>(
+    pub(crate) fn handle_message<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         data: T,
         now: Instant,
@@ -1119,7 +1122,7 @@ impl TurnClientProtocol {
         }
     }
 
-    pub(crate) fn send_to<T: AsRef<[u8]> + std::fmt::Debug>(
+    pub(crate) fn send_to<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         transport: TransportType,
         to: SocketAddr,
@@ -1801,7 +1804,7 @@ enum InternalHandleStunReply {
 }
 
 #[derive(Debug)]
-pub(crate) enum TurnProtocolRecv<T: AsRef<[u8]> + std::fmt::Debug> {
+pub(crate) enum TurnProtocolRecv<T: AsRef<[u8]> + core::fmt::Debug> {
     Handled,
     Ignored(T),
     PeerData {
