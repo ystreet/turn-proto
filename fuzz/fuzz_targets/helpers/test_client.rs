@@ -49,7 +49,7 @@ impl TestClient {
         let now = Instant::ZERO;
         // Initial allocate
         let transmit = self.client.poll_transmit(now).unwrap();
-        let transmit = self.server.recv(transmit, now).unwrap();
+        let transmit = self.server.recv(transmit, now).unwrap().build();
         self.client.recv(transmit, now);
         // authenticated allocate
         let transmit = self.client.poll_transmit(now).unwrap();
@@ -92,7 +92,7 @@ impl TestClient {
             .create_permission(TransportType::Udp, addr.ip(), now)
             .unwrap();
         let transmit = self.client.poll_transmit(now).unwrap();
-        let transmit = self.server.recv(transmit, now).unwrap();
+        let transmit = self.server.recv(transmit, now).unwrap().build();
         self.client.recv(transmit, now);
     }
 }

@@ -14,19 +14,14 @@
 use alloc::vec::Vec;
 use core::net::{IpAddr, SocketAddr};
 use core::ops::Range;
+use turn_types::prelude::DelayedTransmitBuild;
+pub use turn_types::transmit::TransmitBuild;
+use turn_types::transmit::{DelayedChannel, DelayedMessage};
 
-use byteorder::{BigEndian, ByteOrder};
 use stun_proto::agent::Transmit;
 use stun_proto::types::data::Data;
-use stun_proto::types::message::{
-    Message, MessageHeader, MessageType, MessageWriteMutSlice, MessageWriteVec, TransactionId,
-};
-use stun_proto::types::prelude::*;
 use stun_proto::types::TransportType;
 use stun_proto::Instant;
-use turn_types::attribute::Data as AData;
-use turn_types::attribute::XorPeerAddress;
-use turn_types::message::SEND;
 use turn_types::AddressFamily;
 
 /// The public API of a TURN client.
@@ -248,68 +243,6 @@ impl<T: AsRef<[u8]> + core::fmt::Debug> DataRangeOrOwned<T> {
     }
 }
 
-/// A piece of data that needs to be built before it can be transmitted.
-#[derive(Debug)]
-pub struct TransmitBuild<T: DelayedTransmitBuild + core::fmt::Debug> {
-    /// The data blob
-    pub data: T,
-    /// The transport for the transmission
-    pub transport: TransportType,
-    /// The source address of the transmission
-    pub from: SocketAddr,
-    /// The destination address of the transmission
-    pub to: SocketAddr,
-}
-
-impl<T: DelayedTransmitBuild + core::fmt::Debug> TransmitBuild<T> {
-    /// Construct a new [`Transmit`] with the specifid data and 5-tuple.
-    pub fn new(data: T, transport: TransportType, from: SocketAddr, to: SocketAddr) -> Self {
-        Self {
-            data,
-            transport,
-            from,
-            to,
-        }
-    }
-
-    /// Write the [`TransmitBuild`] to a new `Vec<u8>`.
-    pub fn build(self) -> Transmit<Vec<u8>> {
-        Transmit {
-            data: self.data.build(),
-            transport: self.transport,
-            from: self.from,
-            to: self.to,
-        }
-    }
-
-    /// Write the [`TransmitBuild`] into the provided destination buffer.
-    pub fn write_into(self, dest: &mut [u8]) -> Transmit<&mut [u8]> {
-        let len = self.data.write_into(dest);
-        Transmit {
-            data: &mut dest[..len],
-            transport: self.transport,
-            from: self.from,
-            to: self.to,
-        }
-    }
-}
-
-/// A trait for delaying building a byte sequence for transmission
-pub trait DelayedTransmitBuild {
-    /// Write the packet in to a new Vec.
-    fn build(self) -> Vec<u8>;
-    /// The length (in bytes) of the produced data.
-    fn len(&self) -> usize;
-    /// Whether the resulting data would be empty.
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-    /// Write the data into a provided output buffer.
-    ///
-    /// Returns the number of bytes written.
-    fn write_into(self, data: &mut [u8]) -> usize;
-}
-
 /// A `Transmit` where the data is some subset of the provided data.
 #[derive(Debug)]
 pub struct DelayedTransmit<T: AsRef<[u8]> + core::fmt::Debug> {
@@ -338,112 +271,24 @@ impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedTransmitBuild for DelayedTransmit
     }
 }
 
-/// A `Transmit` that will construct a STUN message towards a client with the relevant data.
-#[derive(Debug)]
-pub struct DelayedMessageSend<T: AsRef<[u8]> + core::fmt::Debug> {
-    data: T,
-    peer_addr: SocketAddr,
-}
-
-impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedTransmitBuild for DelayedMessageSend<T> {
-    fn len(&self) -> usize {
-        let xor_peer_addr = XorPeerAddress::new(self.peer_addr, 0.into());
-        let data = AData::new(self.data.as_ref());
-        MessageHeader::LENGTH + xor_peer_addr.padded_len() + data.padded_len()
-    }
-
-    fn build(self) -> Vec<u8> {
-        let transaction_id = TransactionId::generate();
-        let mut msg = Message::builder(
-            MessageType::from_class_method(
-                stun_proto::types::message::MessageClass::Indication,
-                SEND,
-            ),
-            transaction_id,
-            MessageWriteVec::with_capacity(self.len()),
-        );
-        let xor_peer_address = XorPeerAddress::new(self.peer_addr, transaction_id);
-        msg.add_attribute(&xor_peer_address).unwrap();
-        let data = AData::new(self.data.as_ref());
-        msg.add_attribute(&data).unwrap();
-        msg.finish()
-    }
-
-    fn write_into(self, dest: &mut [u8]) -> usize {
-        let transaction_id = TransactionId::generate();
-        let mut msg = Message::builder(
-            MessageType::from_class_method(
-                stun_proto::types::message::MessageClass::Indication,
-                SEND,
-            ),
-            transaction_id,
-            MessageWriteMutSlice::new(dest),
-        );
-        let xor_peer_address = XorPeerAddress::new(self.peer_addr, transaction_id);
-        msg.add_attribute(&xor_peer_address).unwrap();
-        let data = AData::new(self.data.as_ref());
-        msg.add_attribute(&data).unwrap();
-        msg.finish()
-    }
-}
-
-/// A `Transmit` that will construct a channel message towards a TURN server.
-#[derive(Debug)]
-pub struct DelayedChannelSend<T: AsRef<[u8]> + core::fmt::Debug> {
-    data: T,
-    channel_id: u16,
-}
-
-impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedChannelSend<T> {
-    fn write_header_into(&self, len: u16, dest: &mut [u8]) {
-        BigEndian::write_u16(&mut dest[..2], self.channel_id);
-        BigEndian::write_u16(&mut dest[2..4], len);
-    }
-}
-
-impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedTransmitBuild for DelayedChannelSend<T> {
-    fn len(&self) -> usize {
-        self.data.as_ref().len() + 4
-    }
-
-    fn build(self) -> Vec<u8> {
-        let data = self.data.as_ref();
-        let data_len = data.len();
-        let mut header = [0; 4];
-        self.write_header_into(data_len as u16, &mut header);
-        let mut out = Vec::with_capacity(4 + data_len);
-        out.extend(header.as_slice());
-        out.extend_from_slice(data);
-        out
-    }
-
-    fn write_into(self, dest: &mut [u8]) -> usize {
-        let data = self.data.as_ref();
-        let data_len = data.len();
-        self.write_header_into(data_len as u16, dest);
-        dest[4..4 + data_len].copy_from_slice(data);
-        data_len + 4
-    }
-}
-
 /// A delayed `Transmit` that will produce data for a TURN server.
 #[derive(Debug)]
 pub enum DelayedMessageOrChannelSend<T: AsRef<[u8]> + core::fmt::Debug> {
-    /// A [`DelayedChannelSend`].
-    Channel(DelayedChannelSend<T>),
-    /// A [`DelayedMessageSend`].
-    Message(DelayedMessageSend<T>),
+    /// A [`DelayedChannel`].
+    Channel(DelayedChannel<T>),
+    /// A [`DelayedMessage`].
+    Message(DelayedMessage<T>),
     /// An already constructed piece of data.
     Data(Vec<u8>),
 }
 
 impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedMessageOrChannelSend<T> {
     pub(crate) fn new_channel(data: T, channel_id: u16) -> Self {
-        Self::Channel(DelayedChannelSend { data, channel_id })
+        Self::Channel(DelayedChannel::new(channel_id, data))
     }
 
     pub(crate) fn new_message(data: T, peer_addr: SocketAddr) -> Self {
-        Self::Message(DelayedMessageSend { data, peer_addr })
+        Self::Message(DelayedMessage::for_server(peer_addr, data))
     }
 }
 
@@ -489,17 +334,20 @@ pub(crate) mod tests {
     use super::*;
     use tracing::trace;
     use turn_server_proto::api::{TurnServerApi, TurnServerPollRet};
+    use turn_types::stun::{
+        attribute::{
+            AttributeStaticType, ErrorCode, MessageIntegrity, MessageIntegritySha256, Nonce, Realm,
+            Username, XorMappedAddress,
+        },
+        message::{Message, MessageType, MessageWriteVec, Method, TransactionId},
+        prelude::{MessageWrite, MessageWriteExt},
+    };
     use turn_types::{
-        attribute::{Lifetime, RequestedTransport, XorRelayedAddress},
+        attribute::{
+            Data as AData, Lifetime, RequestedTransport, XorPeerAddress, XorRelayedAddress,
+        },
         channel::ChannelData,
         message::{ALLOCATE, CHANNEL_BIND, CREATE_PERMISSION, DATA, REFRESH},
-        stun::{
-            attribute::{
-                ErrorCode, MessageIntegrity, MessageIntegritySha256, Nonce, Realm, Username,
-                XorMappedAddress,
-            },
-            message::Method,
-        },
         TurnCredentials,
     };
 
@@ -516,11 +364,12 @@ pub(crate) mod tests {
         let data = [5; 5];
         let peer_addr = "127.0.0.1:1".parse().unwrap();
         let transmit = TransmitBuild::new(
-            DelayedMessageOrChannelSend::Message(DelayedMessageSend { data, peer_addr }),
+            DelayedMessageOrChannelSend::Message(DelayedMessage::for_server(peer_addr, data)),
             TransportType::Udp,
             local_addr,
             remote_addr,
         );
+        assert!(!transmit.data.is_empty());
         let len = transmit.data.len();
         let out = transmit.build();
         assert_eq!(len, out.data.len());
@@ -530,7 +379,7 @@ pub(crate) mod tests {
         let out_data = msg.attribute::<AData>().unwrap();
         assert_eq!(out_data.data(), data.as_ref());
         let transmit = TransmitBuild::new(
-            DelayedMessageOrChannelSend::Message(DelayedMessageSend { data, peer_addr }),
+            DelayedMessageOrChannelSend::Message(DelayedMessage::for_server(peer_addr, data)),
             TransportType::Udp,
             local_addr,
             remote_addr,
@@ -550,11 +399,12 @@ pub(crate) mod tests {
         let data = [5; 5];
         let channel_id = 0x4567;
         let transmit = TransmitBuild::new(
-            DelayedMessageOrChannelSend::Channel(DelayedChannelSend { data, channel_id }),
+            DelayedMessageOrChannelSend::Channel(DelayedChannel::new(channel_id, data)),
             TransportType::Udp,
             local_addr,
             remote_addr,
         );
+        assert!(!transmit.data.is_empty());
         let len = transmit.data.len();
         let out = transmit.build();
         assert_eq!(len, out.data.len());
@@ -562,7 +412,7 @@ pub(crate) mod tests {
         assert_eq!(channel.id(), channel_id);
         assert_eq!(channel.data(), data.as_ref());
         let transmit = TransmitBuild::new(
-            DelayedMessageOrChannelSend::Channel(DelayedChannelSend { data, channel_id }),
+            DelayedMessageOrChannelSend::Channel(DelayedChannel::new(channel_id, data)),
             TransportType::Udp,
             local_addr,
             remote_addr,
@@ -585,6 +435,7 @@ pub(crate) mod tests {
             local_addr,
             remote_addr,
         );
+        assert!(!transmit.data.is_empty());
         let len = transmit.data.len();
         let out = transmit.build();
         assert_eq!(len, out.data.len());
@@ -726,7 +577,7 @@ pub(crate) mod tests {
             assert!(!msg.has_attribute(MessageIntegrity::TYPE));
             assert!(!msg.has_attribute(MessageIntegritySha256::TYPE));
             // error reply
-            let transmit = self.server.recv(transmit, now).unwrap();
+            let transmit = self.server.recv(transmit, now).unwrap().build();
             let msg = Message::from_bytes(&transmit.data).unwrap();
             assert!(msg.has_method(ALLOCATE));
             assert!(msg.has_class(stun_proto::types::message::MessageClass::Error));
@@ -807,7 +658,7 @@ pub(crate) mod tests {
             assert!(msg.has_attribute(Username::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
             // ok reply
-            let transmit = self.server.recv(transmit, now).unwrap();
+            let transmit = self.server.recv(transmit, now).unwrap().build();
             let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
                 self.refresh(now);
                 return;
@@ -848,7 +699,7 @@ pub(crate) mod tests {
             assert!(msg.has_attribute(Username::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
             // ok reply
-            let transmit = self.server.recv(transmit, now).unwrap();
+            let transmit = self.server.recv(transmit, now).unwrap().build();
             let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
                 let transmit = self.client.poll_transmit(now).unwrap();
                 self.handle_delete_allocation(transmit, now);
@@ -888,7 +739,7 @@ pub(crate) mod tests {
             assert!(msg.has_class(stun_proto::types::message::MessageClass::Request));
             assert!(msg.has_attribute(XorPeerAddress::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
-            let transmit = self.server.recv(transmit, now).unwrap();
+            let transmit = self.server.recv(transmit, now).unwrap().build();
             let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
                 let transmit = self.client.poll_transmit(now).unwrap();
                 self.handle_create_permission(transmit, now);
@@ -945,7 +796,7 @@ pub(crate) mod tests {
             assert!(msg.has_class(stun_proto::types::message::MessageClass::Request));
             assert!(msg.has_attribute(XorPeerAddress::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
-            let transmit = self.server.recv(transmit, now).unwrap();
+            let transmit = self.server.recv(transmit, now).unwrap().build();
             let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
                 let transmit = self.client.poll_transmit(now).unwrap();
                 self.handle_create_permission(transmit, now);
@@ -994,7 +845,8 @@ pub(crate) mod tests {
                     ),
                     now,
                 )
-                .unwrap();
+                .unwrap()
+                .build();
             assert_eq!(transmit.transport, self.client.transport());
             assert_eq!(transmit.from, self.server.listen_address());
             assert_eq!(transmit.to, self.client.local_addr());
@@ -1039,6 +891,7 @@ pub(crate) mod tests {
             let transmit = self
                 .server
                 .recv(transmit, now)
+                .map(|transmit| transmit.build())
                 .or_else(|| self.server.poll_transmit(now))
                 .unwrap();
             assert_eq!(transmit.transport, TransportType::Udp);
@@ -1057,7 +910,8 @@ pub(crate) mod tests {
                     ),
                     now,
                 )
-                .unwrap();
+                .unwrap()
+                .build();
             assert_eq!(transmit.transport, self.client.transport());
             assert_eq!(transmit.from, self.server.listen_address());
             assert_eq!(transmit.to, self.client.local_addr());
@@ -1121,7 +975,7 @@ pub(crate) mod tests {
             .unwrap();
         let transmit = test.client.poll_transmit(now).unwrap();
         let now = now + Duration::from_secs(3000);
-        let transmit = test.server.recv(transmit, now).unwrap();
+        let transmit = test.server.recv(transmit, now).unwrap().build();
         let msg = Message::from_bytes(&transmit.data).unwrap();
         assert!(msg.has_method(CREATE_PERMISSION));
         assert!(msg.has_class(stun_proto::types::message::MessageClass::Error));
@@ -1283,7 +1137,7 @@ pub(crate) mod tests {
             let transmit = test.client.poll_transmit(now).unwrap();
             let msg = Message::from_bytes(&transmit.data).unwrap();
             assert_eq!(msg.method(), CREATE_PERMISSION);
-            test.server.recv(transmit, now).unwrap()
+            test.server.recv(transmit, now).unwrap().build()
         };
 
         let transmit = create_permission(test, now);
@@ -1406,7 +1260,7 @@ pub(crate) mod tests {
                     let transmit = test.client.poll_transmit(now).unwrap();
                     let msg = Message::from_bytes(&transmit.data).unwrap();
                     assert_eq!(msg.method(), CREATE_PERMISSION);
-                    test.server.recv(transmit, now).unwrap()
+                    test.server.recv(transmit, now).unwrap().build()
                 };
 
             let transmit = create_permission(test, now);
@@ -1438,7 +1292,7 @@ pub(crate) mod tests {
         assert_eq!(msg.method(), CHANNEL_BIND);
         let transmit = test.server.recv(transmit, now).unwrap();
         assert!(matches!(
-            test.client.recv(transmit, expiry),
+            test.client.recv(transmit.build(), expiry),
             TurnRecvRet::Handled
         ));
 

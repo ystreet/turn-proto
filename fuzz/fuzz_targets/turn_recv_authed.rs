@@ -33,7 +33,7 @@ fuzz_target!(|data: &[u8]| {
         Transmit::new(data, TransportType::Udp, peer_addr_ipv6, test.relayed_ipv6),
         now,
     ) {
-        test.client.recv(transmit, now);
+        test.client.recv(transmit.build(), now);
     }
     let client_transmit = test
         .server
@@ -41,7 +41,8 @@ fuzz_target!(|data: &[u8]| {
             Transmit::new(data, TransportType::Udp, peer_addr_ipv4, test.relayed_ipv4),
             now,
         )
-        .unwrap();
+        .unwrap()
+        .build();
     test.client.recv(client_transmit, now);
     test.client.recv(
         Transmit::new(
