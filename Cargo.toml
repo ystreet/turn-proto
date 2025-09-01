@@ -4,7 +4,7 @@ default-members = ["turn-types", "turn-client-proto", "turn-server-proto"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0-alpha0"
 repository = "https://github.com/ystreet/turn-proto"
 edition = "2021"
 rust-version = "1.77.0"
@@ -13,7 +13,7 @@ rust-version = "1.77.0"
 byteorder = { version = "1", default-features = false }
 stun-proto = { version = "1.0.0-alpha2", default-features = false }
 stun-types = { version = "1.0.0-alpha2", default-features = false }
-turn-types = { path = "turn-types", version = "0.3.0", default-features = false }
+turn-types = { path = "turn-types", version = "0.4.0-alpha0", default-features = false }
 thiserror = { version = "2", default-features = false }
 tracing = { version = "0.1", default-features = false, features = ["attributes"] }
 tracing-subscriber = "0.3"
