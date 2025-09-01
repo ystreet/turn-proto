@@ -915,6 +915,7 @@ impl TurnServer {
 
         let (offset, data) = msg.attribute_and_offset::<AData>().map_err(|_| ())?;
         trace!("have {} to send to {:?}", data.data().len(), peer_address);
+        let offset = offset + 4;
         Ok((
             alloc.ttype,
             alloc.addr,
@@ -1230,11 +1231,6 @@ impl TurnServerApi for TurnServer {
                     "found existing channel {} for {:?} for this allocation {:?}",
                     existing.id, transmit.from, allocation.addr
                 );
-                let mut data = vec![0; 4];
-                data[0..2].copy_from_slice(&existing.id.to_be_bytes());
-                data[2..4].copy_from_slice(&(transmit.data.as_ref().len() as u16).to_be_bytes());
-                // XXX: try to avoid copy?
-                data.extend_from_slice(transmit.data.as_ref());
                 Some(TransmitBuild::new(
                     DelayedMessageOrChannelSend::Channel(DelayedChannel::new(
                         existing.id,
@@ -1319,7 +1315,7 @@ impl TurnServerApi for TurnServer {
                     let Ok((channel_id, channel_len)) = ChannelData::parse_header(data) else {
                         return None;
                     };
-                    if data.len() < 2 + channel_len {
+                    if data.len() < 4 + channel_len {
                         // message too short
                         return None;
                     }
@@ -1371,7 +1367,7 @@ impl TurnServerApi for TurnServer {
                         return None;
                     }
                     Some(TransmitBuild::new(
-                        DelayedMessageOrChannelSend::Range(transmit.data, 2..2 + channel_len),
+                        DelayedMessageOrChannelSend::Range(transmit.data, 4..4 + channel_len),
                         allocation.ttype,
                         allocation.addr,
                         existing.peer_addr,
@@ -1638,7 +1634,10 @@ enum InternalHandleStun {
 #[cfg(test)]
 mod tests {
     use alloc::string::{String, ToString};
-    use turn_types::stun::message::{IntegrityAlgorithm, Method};
+    use turn_types::{
+        prelude::DelayedTransmitBuild,
+        stun::message::{IntegrityAlgorithm, Method},
+    };
 
     use super::*;
 
@@ -2707,6 +2706,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_server_channel_bind_send_data() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply =
+            authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        channel_bind(&mut server, creds.clone(), &nonce, now);
+        let data = [8; 9];
+        let reply = server
+            .recv(
+                client_transmit(
+                    {
+                        let mut out = [0; 13];
+                        ChannelData::new(0x4000, data.as_slice()).write_into_unchecked(&mut out);
+                        out
+                    },
+                    server.transport(),
+                ),
+                now,
+            )
+            .unwrap();
+        assert_eq!(reply.transport, TransportType::Udp);
+        assert_eq!(reply.from, relayed_address());
+        assert_eq!(reply.to, peer_address());
+        assert_eq!(reply.data.build(), data);
+    }
+
     fn refresh_request_with_lifetime(
         credentials: LongTermCredentials,
         nonce: &str,
@@ -2889,7 +2919,7 @@ mod tests {
         );
     }
 
-    fn send_indication(peer_addr: SocketAddr) -> Vec<u8> {
+    fn send_indication(peer_addr: SocketAddr, data: &[u8]) -> Vec<u8> {
         let mut msg = Message::builder(
             MessageType::from_class_method(MessageClass::Indication, SEND),
             TransactionId::generate(),
@@ -2897,7 +2927,7 @@ mod tests {
         );
         msg.add_attribute(&XorPeerAddress::new(peer_addr, msg.transaction_id()))
             .unwrap();
-        msg.add_attribute(&AData::new([8; 9].as_slice())).unwrap();
+        msg.add_attribute(&AData::new(data)).unwrap();
         msg.finish()
     }
 
@@ -2908,7 +2938,10 @@ mod tests {
         let mut server = new_server(TransportType::Udp);
         assert!(server
             .recv(
-                client_transmit(send_indication(peer_address()), server.transport()),
+                client_transmit(
+                    send_indication(peer_address(), [8; 9].as_slice()),
+                    server.transport()
+                ),
                 now,
             )
             .is_none());
@@ -2927,7 +2960,10 @@ mod tests {
         let now = now + Duration::from_secs(lifetime as u64 + 1);
         assert!(server
             .recv(
-                client_transmit(send_indication(peer_address()), server.transport()),
+                client_transmit(
+                    send_indication(peer_address(), [8; 9].as_slice()),
+                    server.transport()
+                ),
                 now,
             )
             .is_none());
@@ -2946,7 +2982,10 @@ mod tests {
         let now = now + Duration::from_secs(lifetime as u64 + 1);
         assert!(server
             .recv(
-                client_transmit(send_indication(ipv6_peer_address()), server.transport()),
+                client_transmit(
+                    send_indication(ipv6_peer_address(), [8; 9].as_slice()),
+                    server.transport()
+                ),
                 now,
             )
             .is_none());
@@ -2964,7 +3003,10 @@ mod tests {
         validate_authenticated_allocate_reply(&reply.data, creds.clone());
         assert!(server
             .recv(
-                client_transmit(send_indication(peer_address()), server.transport()),
+                client_transmit(
+                    send_indication(peer_address(), [8; 9].as_slice()),
+                    server.transport()
+                ),
                 now,
             )
             .is_none());
@@ -3009,15 +3051,20 @@ mod tests {
             authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
         validate_authenticated_allocate_reply(&reply.data, creds.clone());
         create_permission(&mut server, creds.clone(), &nonce, now);
+        let data = [8; 9];
         let reply = server
             .recv(
-                client_transmit(send_indication(peer_address()), server.transport()),
+                client_transmit(
+                    send_indication(peer_address(), data.as_slice()),
+                    server.transport(),
+                ),
                 now,
             )
             .unwrap();
         assert_eq!(reply.transport, TransportType::Udp);
         assert_eq!(reply.from, relayed_address());
         assert_eq!(reply.to, peer_address());
+        assert_eq!(reply.data.build(), data);
     }
 
     #[test]
