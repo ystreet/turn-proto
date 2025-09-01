@@ -38,13 +38,16 @@ pub const CONNECTION_BIND: Method = Method::new(0x000b);
 pub const CONNECTION_ATTEMPT: Method = Method::new(0x000c);
 
 pub(crate) fn debug_init() {
-    ALLOCATE.add_name("ALLOCATE");
-    REFRESH.add_name("REFRESH");
-    SEND.add_name("SEND");
-    DATA.add_name("DATA");
-    CREATE_PERMISSION.add_name("CREATE_PERMISSION");
-    CHANNEL_BIND.add_name("CHANNEL_BIND");
-    CONNECT.add_name("CONNECT");
-    CONNECTION_BIND.add_name("CONNECTION_BIND");
-    CONNECTION_ATTEMPT.add_name("CONNECTION_ATTEMPT");
+    #[cfg(feature = "std")]
+    {
+        ALLOCATE.add_name("ALLOCATE");
+        REFRESH.add_name("REFRESH");
+        SEND.add_name("SEND");
+        DATA.add_name("DATA");
+        CREATE_PERMISSION.add_name("CREATE_PERMISSION");
+        CHANNEL_BIND.add_name("CHANNEL_BIND");
+        CONNECT.add_name("CONNECT");
+        CONNECTION_BIND.add_name("CONNECTION_BIND");
+        CONNECTION_ATTEMPT.add_name("CONNECTION_ATTEMPT");
+    }
 }

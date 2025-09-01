@@ -94,8 +94,8 @@ impl ChannelNumber {
     }
 }
 
-impl std::fmt::Display for ChannelNumber {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for ChannelNumber {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}: '{}'", self.get_type(), self.channel)
     }
 }
@@ -103,7 +103,9 @@ impl std::fmt::Display for ChannelNumber {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
     use byteorder::{BigEndian, ByteOrder};
+    use std::println;
 
     #[test]
     fn channel_number() {

@@ -103,8 +103,8 @@ impl Icmp {
     }
 }
 
-impl std::fmt::Display for Icmp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for Icmp {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "{}: type:{}, code:{}, data:{}",
@@ -119,6 +119,8 @@ impl std::fmt::Display for Icmp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
+    use std::println;
 
     #[test]
     fn icmp() {

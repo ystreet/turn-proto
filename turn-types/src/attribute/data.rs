@@ -109,8 +109,8 @@ impl<'a> Data<'a> {
     }
 }
 
-impl std::fmt::Display for Data<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for Data<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}: len:{}", self.get_type(), self.data.len())
     }
 }
@@ -118,7 +118,10 @@ impl std::fmt::Display for Data<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
     use byteorder::{BigEndian, ByteOrder};
+    use std::println;
 
     #[test]
     fn data() {

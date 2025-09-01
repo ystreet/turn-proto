@@ -29,6 +29,13 @@
 //! [RFC6156]: https://tools.ietf.org/html/rfc6156
 //! [RFC8656]: https://tools.ietf.org/html/rfc8656
 
+#![no_std]
+
+extern crate alloc;
+
+#[cfg(any(feature = "std", test))]
+extern crate std;
+
 pub use stun_types as stun;
 use stun_types::message::LongTermCredentials;
 pub mod attribute;
@@ -36,6 +43,8 @@ pub mod channel;
 pub mod message;
 pub mod tcp;
 
+use alloc::borrow::ToOwned;
+use alloc::string::{String, ToString};
 pub use stun_types::AddressFamily;
 
 /// Initialize some debugging functionality of the library.
