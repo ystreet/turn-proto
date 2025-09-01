@@ -6,7 +6,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::net::SocketAddr;
+use alloc::boxed::Box;
+use core::net::SocketAddr;
 
 use crate::AddressFamily;
 use stun_types::{
@@ -76,7 +77,7 @@ impl XorPeerAddress {
     ///
     /// ```
     /// # use turn_types::attribute::*;
-    /// # use std::net::SocketAddr;
+    /// # use core::net::SocketAddr;
     /// let addr = "127.0.0.1:1234".parse().unwrap();
     /// let mapped_addr = XorPeerAddress::new(addr, 0x5678.into());
     /// assert_eq!(mapped_addr.addr(0x5678.into()), addr);
@@ -93,7 +94,7 @@ impl XorPeerAddress {
     ///
     /// ```
     /// # use turn_types::attribute::*;
-    /// # use std::net::SocketAddr;
+    /// # use core::net::SocketAddr;
     /// let addr = "[::1]:1234".parse().unwrap();
     /// let mapped_addr = XorPeerAddress::new(addr, 0x5678.into());
     /// assert_eq!(mapped_addr.addr(0x5678.into()), addr);
@@ -103,8 +104,8 @@ impl XorPeerAddress {
     }
 }
 
-impl std::fmt::Display for XorPeerAddress {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for XorPeerAddress {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}: {}", self.get_type(), self.addr)
     }
 }
@@ -171,7 +172,7 @@ impl XorRelayedAddress {
     ///
     /// ```
     /// # use turn_types::attribute::*;
-    /// # use std::net::SocketAddr;
+    /// # use core::net::SocketAddr;
     /// let addr = "127.0.0.1:1234".parse().unwrap();
     /// let mapped_addr = XorRelayedAddress::new(addr, 0x5678.into());
     /// assert_eq!(mapped_addr.addr(0x5678.into()), addr);
@@ -188,7 +189,7 @@ impl XorRelayedAddress {
     ///
     /// ```
     /// # use turn_types::attribute::*;
-    /// # use std::net::SocketAddr;
+    /// # use core::net::SocketAddr;
     /// let addr = "[::1]:1234".parse().unwrap();
     /// let mapped_addr = XorRelayedAddress::new(addr, 0x5678.into());
     /// assert_eq!(mapped_addr.addr(0x5678.into()), addr);
@@ -198,8 +199,8 @@ impl XorRelayedAddress {
     }
 }
 
-impl std::fmt::Display for XorRelayedAddress {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for XorRelayedAddress {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}: {}", self.get_type(), self.addr)
     }
 }
@@ -304,8 +305,8 @@ impl RequestedAddressFamily {
     }
 }
 
-impl std::fmt::Display for RequestedAddressFamily {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for RequestedAddressFamily {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}: {}", self.get_type(), self.family)
     }
 }
@@ -415,8 +416,8 @@ impl AdditionalAddressFamily {
     }
 }
 
-impl std::fmt::Display for AdditionalAddressFamily {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for AdditionalAddressFamily {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}: {}", self.get_type(), self.family)
     }
 }
@@ -486,7 +487,6 @@ impl TryFrom<&RawAttribute<'_>> for AddressErrorCode {
         }
         let tmp_raw = RawAttribute::new(ErrorCode::TYPE, &raw.value);
         let error = ErrorCode::from_raw_ref(&tmp_raw)?;
-        println!("parsed error {error}");
         let family = match raw.value[0] {
             1 => AddressFamily::IPV4,
             2 => AddressFamily::IPV6,
@@ -547,8 +547,8 @@ impl AddressErrorCode {
     }
 }
 
-impl std::fmt::Display for AddressErrorCode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for AddressErrorCode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}: {} {}", self.get_type(), self.family, self.error)
     }
 }
@@ -556,7 +556,9 @@ impl std::fmt::Display for AddressErrorCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
     use byteorder::{BigEndian, ByteOrder};
+    use std::println;
 
     #[test]
     fn xor_peer_address() {

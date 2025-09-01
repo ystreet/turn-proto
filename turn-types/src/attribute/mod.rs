@@ -38,34 +38,37 @@ mod transport;
 pub use transport::RequestedTransport;
 
 pub(super) fn attributes_init() {
-    use stun_types::prelude::*;
+    #[cfg(feature = "std")]
+    {
+        use stun_types::prelude::*;
 
-    stun_types::attribute_display!(XorPeerAddress);
-    XorPeerAddress::TYPE.add_name("XorPeerAddress");
-    stun_types::attribute_display!(XorRelayedAddress);
-    XorRelayedAddress::TYPE.add_name("XorRelayedAddress");
-    stun_types::attribute_display!(ChannelNumber);
-    ChannelNumber::TYPE.add_name("ChannelNumber");
-    stun_types::attribute_display!(Data);
-    Data::TYPE.add_name("Data");
-    stun_types::attribute_display!(EvenPort);
-    EvenPort::TYPE.add_name("EvenPort");
-    stun_types::attribute_display!(DontFragment);
-    DontFragment::TYPE.add_name("DontFragment");
-    stun_types::attribute_display!(Lifetime);
-    Lifetime::TYPE.add_name("Lifetime");
-    stun_types::attribute_display!(ReservationToken);
-    ReservationToken::TYPE.add_name("ReservationToken");
-    stun_types::attribute_display!(RequestedTransport);
-    RequestedTransport::TYPE.add_name("RequestedTransport");
-    stun_types::attribute_display!(RequestedAddressFamily);
-    RequestedAddressFamily::TYPE.add_name("RequestedAddressFamily");
-    stun_types::attribute_display!(ConnectionId);
-    ConnectionId::TYPE.add_name("ConnectionId");
-    stun_types::attribute_display!(AdditionalAddressFamily);
-    AdditionalAddressFamily::TYPE.add_name("AdditionalAddressFamily");
-    stun_types::attribute_display!(AddressErrorCode);
-    AddressErrorCode::TYPE.add_name("AddressErrorCode");
-    stun_types::attribute_display!(Icmp);
-    Icmp::TYPE.add_name("Icmp");
+        stun_types::attribute_display!(XorPeerAddress);
+        XorPeerAddress::TYPE.add_name("XorPeerAddress");
+        stun_types::attribute_display!(XorRelayedAddress);
+        XorRelayedAddress::TYPE.add_name("XorRelayedAddress");
+        stun_types::attribute_display!(ChannelNumber);
+        ChannelNumber::TYPE.add_name("ChannelNumber");
+        stun_types::attribute_display!(Data);
+        Data::TYPE.add_name("Data");
+        stun_types::attribute_display!(EvenPort);
+        EvenPort::TYPE.add_name("EvenPort");
+        stun_types::attribute_display!(DontFragment);
+        DontFragment::TYPE.add_name("DontFragment");
+        stun_types::attribute_display!(Lifetime);
+        Lifetime::TYPE.add_name("Lifetime");
+        stun_types::attribute_display!(ReservationToken);
+        ReservationToken::TYPE.add_name("ReservationToken");
+        stun_types::attribute_display!(RequestedTransport);
+        RequestedTransport::TYPE.add_name("RequestedTransport");
+        stun_types::attribute_display!(RequestedAddressFamily);
+        RequestedAddressFamily::TYPE.add_name("RequestedAddressFamily");
+        stun_types::attribute_display!(ConnectionId);
+        ConnectionId::TYPE.add_name("ConnectionId");
+        stun_types::attribute_display!(AdditionalAddressFamily);
+        AdditionalAddressFamily::TYPE.add_name("AdditionalAddressFamily");
+        stun_types::attribute_display!(AddressErrorCode);
+        AddressErrorCode::TYPE.add_name("AddressErrorCode");
+        stun_types::attribute_display!(Icmp);
+        Icmp::TYPE.add_name("Icmp");
+    }
 }

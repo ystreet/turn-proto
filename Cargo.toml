@@ -10,12 +10,12 @@ edition = "2021"
 rust-version = "1.77.0"
 
 [workspace.dependencies]
-byteorder = "1"
+byteorder = { version = "1", default-features = false }
 rand = "0.9"
-stun-proto = "1.0.0-alpha2"
-stun-types = "1.0.0-alpha2"
+stun-proto = { version = "1.0.0-alpha2", default-features = false }
+stun-types = { version = "1.0.0-alpha2", default-features = false }
 thiserror = "2"
-tracing = "0.1"
+tracing = { version = "0.1", default-features = false, features = ["attributes"] }
 tracing-subscriber = "0.3"
 criterion = "0.7"
 rustls = "0.23"

@@ -69,8 +69,8 @@ impl DontFragment {
     }
 }
 
-impl std::fmt::Display for DontFragment {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for DontFragment {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.get_type())
     }
 }
@@ -78,7 +78,9 @@ impl std::fmt::Display for DontFragment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
     use byteorder::{BigEndian, ByteOrder};
+    use std::println;
 
     #[test]
     fn dont_fragment() {

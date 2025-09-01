@@ -27,7 +27,9 @@
 //!
 //! [RFC6062]: https://tools.ietf.org/html/rfc6062
 
-use std::ops::Range;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::ops::Range;
 
 use stun_proto::agent::Transmit;
 use stun_types::message::{Message, MessageHeader};
@@ -40,7 +42,7 @@ use crate::channel::ChannelData;
 /// The `Transmit<T>` in each value  is always the original value passed to
 /// [`TurnTcpBuffer::incoming_tcp()`].
 #[derive(Debug)]
-pub enum IncomingTcp<T: AsRef<[u8]> + std::fmt::Debug> {
+pub enum IncomingTcp<T: AsRef<[u8]> + core::fmt::Debug> {
     /// Input data (with the provided range) contains a complete STUN Message.
     ///
     /// Any extra data after the range is stored for later processing.
@@ -55,7 +57,7 @@ pub enum IncomingTcp<T: AsRef<[u8]> + std::fmt::Debug> {
     StoredChannel(Vec<u8>, Transmit<T>),
 }
 
-impl<T: AsRef<[u8]> + std::fmt::Debug> IncomingTcp<T> {
+impl<T: AsRef<[u8]> + core::fmt::Debug> IncomingTcp<T> {
     /// The byte slice for this incoming, or stored message, or channel.
     pub fn data(&self) -> &[u8] {
         match self {
@@ -93,7 +95,7 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> IncomingTcp<T> {
     }
 }
 
-impl<T: AsRef<[u8]> + std::fmt::Debug> AsRef<[u8]> for IncomingTcp<T> {
+impl<T: AsRef<[u8]> + core::fmt::Debug> AsRef<[u8]> for IncomingTcp<T> {
     fn as_ref(&self) -> &[u8] {
         self.data()
     }
@@ -117,7 +119,7 @@ impl StoredTcp {
         }
     }
 
-    fn into_incoming<T: AsRef<[u8]> + std::fmt::Debug>(
+    fn into_incoming<T: AsRef<[u8]> + core::fmt::Debug>(
         self,
         transmit: Transmit<T>,
     ) -> IncomingTcp<T> {
@@ -158,7 +160,7 @@ impl TurnTcpBuffer {
             from = ?transmit.from
         )
     )]
-    pub fn incoming_tcp<T: AsRef<[u8]> + std::fmt::Debug>(
+    pub fn incoming_tcp<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         transmit: Transmit<T>,
     ) -> Option<IncomingTcp<T>> {
@@ -262,7 +264,7 @@ impl TurnTcpBuffer {
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
+    use core::net::SocketAddr;
 
     use stun_types::{
         attribute::Software,

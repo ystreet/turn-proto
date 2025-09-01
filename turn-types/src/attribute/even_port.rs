@@ -90,8 +90,8 @@ impl EvenPort {
     }
 }
 
-impl std::fmt::Display for EvenPort {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for EvenPort {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}: {}", self.get_type(), self.requested())
     }
 }
@@ -99,7 +99,9 @@ impl std::fmt::Display for EvenPort {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
     use byteorder::{BigEndian, ByteOrder};
+    use std::println;
 
     #[test]
     fn even_port() {

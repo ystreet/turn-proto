@@ -37,7 +37,7 @@ impl Attribute for ReservationToken {
 
 impl AttributeWrite for ReservationToken {
     fn to_raw(&self) -> RawAttribute<'_> {
-        let mut data = vec![0; 8];
+        let mut data = [0; 8];
         BigEndian::write_u64(&mut data, self.token);
         RawAttribute::new(self.get_type(), &data).into_owned()
     }
@@ -95,8 +95,8 @@ impl ReservationToken {
     }
 }
 
-impl std::fmt::Display for ReservationToken {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for ReservationToken {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}: 0x{:#x}", self.get_type(), self.token())
     }
 }
@@ -104,7 +104,9 @@ impl std::fmt::Display for ReservationToken {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
     use byteorder::{BigEndian, ByteOrder};
+    use std::println;
 
     #[test]
     fn reservation_token() {

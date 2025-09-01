@@ -13,11 +13,13 @@ rust-version.workspace = true
 
 [dependencies]
 byteorder.workspace = true
-rand.workspace = true
 stun-types.workspace = true
 stun-proto.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
+
+[features]
+default = ["std"]
+std = ["stun-proto/std", "stun-types/std"]
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
