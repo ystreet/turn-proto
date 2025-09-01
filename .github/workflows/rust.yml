@@ -39,6 +39,8 @@ jobs:
     - uses: actions/checkout@v2
     - name: Run tests
       run: cargo test --verbose
+    - name: Run tests (without default features)
+      run: cargo test --verbose --no-default-features
   clippy:
     runs-on: ubuntu-latest
     steps:

@@ -8,10 +8,13 @@
 
 //! A TURN server that can handle TLS client connections.
 
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::net::SocketAddr;
+use core::time::Duration;
 use std::io::{Read, Write};
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
 use turn_types::AddressFamily;
 
 use rustls::{ServerConfig, ServerConnection};

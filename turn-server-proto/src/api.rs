@@ -8,7 +8,9 @@
 
 //! API for TURN servers.
 
-use std::{net::SocketAddr, time::Duration};
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::{net::SocketAddr, time::Duration};
 
 use stun_proto::agent::Transmit;
 use stun_proto::Instant;
@@ -18,7 +20,7 @@ use turn_types::{
 };
 
 /// API for TURN servers.
-pub trait TurnServerApi: Send + std::fmt::Debug {
+pub trait TurnServerApi: Send + core::fmt::Debug {
     /// Add a user credentials that would be accepted by this [`TurnServerApi`].
     fn add_user(&mut self, username: String, password: String);
     /// The address that the [`TurnServerApi`] is listening on for incoming client connections.

@@ -8,13 +8,15 @@
 
 //! A TURN server that can handle UDP and TCP connections.
 
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 use byteorder::{BigEndian, ByteOrder};
+use core::net::{IpAddr, SocketAddr};
+use core::time::Duration;
 use pnet_packet::Packet;
-use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, SocketAddr};
-use std::time::Duration;
 
-use rand::Rng;
 use stun_proto::agent::{StunAgent, Transmit};
 use stun_proto::types::attribute::{
     ErrorCode, Fingerprint, MessageIntegrity, Nonce, Realm, Username, XorMappedAddress,
@@ -63,7 +65,7 @@ pub struct TurnServer {
     pending_allocates: VecDeque<PendingClient>,
 
     // username -> password mapping.
-    users: HashMap<String, String>,
+    users: BTreeMap<String, String>,
     nonce_expiry_duration: Duration,
 }
 
@@ -109,7 +111,7 @@ impl TurnServer {
             nonces: vec![],
             pending_transmits: VecDeque::default(),
             pending_allocates: VecDeque::default(),
-            users: HashMap::default(),
+            users: BTreeMap::default(),
             nonce_expiry_duration: DEFAULT_NONCE_EXPIRY_DURATION,
         }
     }
@@ -120,8 +122,19 @@ impl TurnServer {
     }
 
     fn generate_nonce() -> String {
-        let mut rng = rand::rng();
-        String::from_iter((0..16).map(|_| rng.sample(rand::distr::Alphanumeric) as char))
+        #[cfg(not(feature = "std"))]
+        {
+            use rand::Rng;
+            use rand::TryRngCore;
+            let mut rng = rand::rngs::OsRng.unwrap_err();
+            String::from_iter((0..16).map(|_| rng.sample(rand::distr::Alphanumeric) as char))
+        }
+        #[cfg(feature = "std")]
+        {
+            use rand::Rng;
+            let mut rng = rand::rng();
+            String::from_iter((0..16).map(|_| rng.sample(rand::distr::Alphanumeric) as char))
+        }
     }
 
     fn validate_nonce(
@@ -1111,8 +1124,8 @@ impl TurnServerApi for TurnServer {
                 };
                 ipv4 = ipv4::Ipv4Packet::new(&icmpv4.payload()[4..])?;
                 trace!("parsed ipv4: {ipv4:?}");
-                source = IpAddr::V4(ipv4.get_source());
-                destination = IpAddr::V4(ipv4.get_destination());
+                source = IpAddr::V4(ipv4.get_source().octets().into());
+                destination = IpAddr::V4(ipv4.get_destination().octets().into());
                 ipv4.payload()
             }
             AddressFamily::IPV6 => {
@@ -1138,8 +1151,8 @@ impl TurnServerApi for TurnServer {
                 };
                 ipv6 = ipv6::Ipv6Packet::new(&icmpv6.payload()[4..])?;
                 trace!("parsed ipv6: {ipv6:?}");
-                source = IpAddr::V6(ipv6.get_source());
-                destination = IpAddr::V6(ipv6.get_destination());
+                source = IpAddr::V6(ipv6.get_source().segments().into());
+                destination = IpAddr::V6(ipv6.get_destination().segments().into());
                 ipv6.payload()
             }
         };
@@ -1597,6 +1610,7 @@ struct Channel {
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::{String, ToString};
     use turn_types::stun::message::{IntegrityAlgorithm, Method};
 
     use super::*;
@@ -1639,7 +1653,7 @@ mod tests {
         server
     }
 
-    fn client_transmit<T: AsRef<[u8]> + std::fmt::Debug>(
+    fn client_transmit<T: AsRef<[u8]> + core::fmt::Debug>(
         data: T,
         transport: TransportType,
     ) -> Transmit<T> {
@@ -3147,8 +3161,8 @@ mod tests {
                 ip_packet.set_flags(pnet_packet::ipv4::Ipv4Flags::DontFragment);
                 ip_packet.set_ttl(16);
                 ip_packet.set_next_level_protocol(pnet_packet::ip::IpNextHeaderProtocols::Udp);
-                ip_packet.set_source(*source.ip());
-                ip_packet.set_destination(*destination.ip());
+                ip_packet.set_source(source.ip().octets().into());
+                ip_packet.set_destination(destination.ip().octets().into());
                 ip_packet.set_payload(&udp);
                 ip.to_vec()
             }
@@ -3160,8 +3174,8 @@ mod tests {
                 ip_packet.set_payload_length(48);
                 ip_packet.set_hop_limit(16);
                 ip_packet.set_next_header(pnet_packet::ip::IpNextHeaderProtocols::Udp);
-                ip_packet.set_source(*source.ip());
-                ip_packet.set_destination(*destination.ip());
+                ip_packet.set_source(source.ip().segments().into());
+                ip_packet.set_destination(destination.ip().segments().into());
                 ip_packet.set_payload(&udp);
                 ip.to_vec()
             }
