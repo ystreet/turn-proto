@@ -11,7 +11,6 @@
 //! Provides a consistent interface between multiple implementations of TURN clients for different
 //! transports (TCP, and UDP) and wrappers (TLS).
 
-use sans_io_time::Instant;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Range;
 
@@ -23,6 +22,7 @@ use stun_proto::types::message::{
 };
 use stun_proto::types::prelude::*;
 use stun_proto::types::TransportType;
+use stun_proto::Instant;
 use turn_types::attribute::Data as AData;
 use turn_types::attribute::XorPeerAddress;
 use turn_types::message::SEND;

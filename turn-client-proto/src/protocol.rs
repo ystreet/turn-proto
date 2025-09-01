@@ -10,7 +10,6 @@
 //!
 //! Contains the protocol state machine for a TURN client.
 
-use sans_io_time::Instant;
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Range;
@@ -22,6 +21,7 @@ use stun_proto::types::message::{
     LongTermCredentials, Message, MessageClass, MessageIntegrityCredentials, TransactionId,
 };
 use stun_proto::types::TransportType;
+use stun_proto::Instant;
 use tracing::{debug, info, trace, warn};
 use turn_types::attribute::{
     AdditionalAddressFamily, ChannelNumber, Lifetime, RequestedAddressFamily, XorPeerAddress,

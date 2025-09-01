@@ -10,7 +10,6 @@
 
 use byteorder::{BigEndian, ByteOrder};
 use pnet_packet::Packet;
-use sans_io_time::Instant;
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -26,6 +25,7 @@ use stun_proto::types::message::{
 };
 use stun_proto::types::prelude::{Attribute, AttributeFromRaw, AttributeStaticType};
 use stun_proto::types::TransportType;
+use stun_proto::Instant;
 use turn_types::channel::ChannelData;
 
 use turn_types::message::CREATE_PERMISSION;

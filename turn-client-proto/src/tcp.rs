@@ -10,14 +10,13 @@
 //!
 //! An implementation of a TURN client suitable for TCP connections.
 
-use sans_io_time::Instant;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Range;
 
 use stun_proto::agent::{StunAgent, Transmit};
 use stun_proto::types::data::Data;
-
 use stun_proto::types::TransportType;
+use stun_proto::Instant;
 
 use turn_types::channel::ChannelData;
 use turn_types::tcp::{IncomingTcp, StoredTcp, TurnTcpBuffer};

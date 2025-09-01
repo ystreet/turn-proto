@@ -1,6 +1,6 @@
 use core::net::SocketAddr;
-use sans_io_time::Instant;
 use stun_types::TransportType;
+use turn_client_proto::stun::Instant;
 use turn_client_proto::api::TurnClientApi;
 use turn_client_proto::client::TurnClient;
 use turn_client_proto::udp::TurnClientUdp;
