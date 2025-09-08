@@ -65,7 +65,7 @@ use rustls::pki_types::ServerName;
 use rustls::ClientConfig;
 use rustls_platform_verifier::ConfigVerifierExt;
 use turn_client_proto::prelude::*;
-use turn_client_proto::rustls::TurnClientTls;
+use turn_client_proto::rustls::TurnClientRustls;
 use turn_client_proto::tcp::TurnClientTcp;
 use turn_client_proto::types::TurnCredentials;
 use turn_client_proto::udp::{
@@ -430,10 +430,10 @@ struct ClientTcpInner {
 }
 
 #[derive(Clone, Debug)]
-struct ClientTls {
+struct ClientRustls {
     base_instant: std::time::Instant,
     send_sender: SyncSender<Data<'static>>,
-    inner: Arc<(Mutex<ClientTlsInner>, Condvar)>,
+    inner: Arc<(Mutex<ClientRustlsInner>, Condvar)>,
 }
 
 use rustls::crypto::aws_lc_rs as crypto_provider;
@@ -498,7 +498,7 @@ mod danger {
     }
 }
 
-impl ClientTls {
+impl ClientRustls {
     fn new(
         mut socket: TcpStream,
         to: SocketAddr,
@@ -521,7 +521,7 @@ impl ClientTls {
         } else {
             ClientConfig::with_platform_verifier()
         };
-        let client = TurnClientTls::allocate(
+        let client = TurnClientRustls::allocate(
             local_addr,
             remote_addr,
             credentials,
@@ -529,7 +529,7 @@ impl ClientTls {
             server_name,
             Arc::new(config),
         );
-        let inner = Arc::new((Mutex::new(ClientTlsInner { client }), Condvar::new()));
+        let inner = Arc::new((Mutex::new(ClientRustlsInner { client }), Condvar::new()));
 
         let mut socket_clone = socket.try_clone().unwrap();
         let inner_s = inner.clone();
@@ -610,7 +610,7 @@ impl ClientTls {
     }
 }
 
-impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for ClientTls {
+impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for ClientRustls {
     fn close(&self) {
         let mut inner = self.inner.0.lock().unwrap();
         let _ = inner.client.delete(Instant::from_std(self.base_instant));
@@ -664,8 +664,8 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for ClientTls {
 }
 
 #[derive(Debug)]
-struct ClientTlsInner {
-    client: TurnClientTls,
+struct ClientRustlsInner {
+    client: TurnClientRustls,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
@@ -798,7 +798,7 @@ fn main() -> io::Result<()> {
                 } else {
                     server.ip().into()
                 };
-                let client = ClientTls::new(
+                let client = ClientRustls::new(
                     socket,
                     server,
                     credentials,

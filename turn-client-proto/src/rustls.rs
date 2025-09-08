@@ -46,14 +46,14 @@ use turn_types::tcp::{IncomingTcp, StoredTcp, TurnTcpBuffer};
 
 /// A TURN client that communicates over TLS.
 #[derive(Debug)]
-pub struct TurnClientTls {
+pub struct TurnClientRustls {
     protocol: TurnClientProtocol,
     conn: Box<ClientConnection>,
     incoming_tcp_buffer: TurnTcpBuffer,
     closing: bool,
 }
 
-impl TurnClientTls {
+impl TurnClientRustls {
     /// Allocate an address on a TURN server to relay data to and from peers.
     pub fn allocate(
         local_addr: SocketAddr,
@@ -155,7 +155,7 @@ impl TurnClientTls {
     }
 }
 
-impl TurnClientApi for TurnClientTls {
+impl TurnClientApi for TurnClientRustls {
     fn transport(&self) -> TransportType {
         self.protocol.transport()
     }
@@ -546,7 +546,7 @@ mod tests {
         remote_addr: SocketAddr,
         credentials: TurnCredentials,
     ) -> TurnClient {
-        TurnClientTls::allocate(
+        TurnClientRustls::allocate(
             local_addr,
             remote_addr,
             credentials,
