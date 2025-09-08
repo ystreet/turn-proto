@@ -22,6 +22,8 @@ pub use crate::api::{
     TurnRecvRet,
 };
 use crate::api::{DelayedMessageOrChannelSend, TransmitBuild, TurnClientApi, TurnPeerData};
+#[cfg(feature = "openssl")]
+use crate::openssl::TurnClientOpensslTls;
 #[cfg(feature = "rustls")]
 use crate::rustls::TurnClientRustls;
 use crate::tcp::TurnClientTcp;
@@ -37,6 +39,9 @@ pub enum TurnClient {
     #[cfg(feature = "rustls")]
     /// A Rustls TURN client.
     Rustls(TurnClientRustls),
+    #[cfg(feature = "openssl")]
+    /// An Openssl TURN client.
+    Openssl(TurnClientOpensslTls),
 }
 
 impl TurnClientApi for TurnClient {
@@ -47,6 +52,8 @@ impl TurnClientApi for TurnClient {
             Self::Tcp(tcp) => tcp.transport(),
             #[cfg(feature = "rustls")]
             Self::Rustls(tcp) => tcp.transport(),
+            #[cfg(feature = "openssl")]
+            Self::Openssl(tcp) => tcp.transport(),
         }
     }
 
@@ -57,6 +64,8 @@ impl TurnClientApi for TurnClient {
             Self::Tcp(tcp) => tcp.local_addr(),
             #[cfg(feature = "rustls")]
             Self::Rustls(tcp) => tcp.local_addr(),
+            #[cfg(feature = "openssl")]
+            Self::Openssl(tcp) => tcp.local_addr(),
         }
     }
 
@@ -67,6 +76,8 @@ impl TurnClientApi for TurnClient {
             Self::Tcp(tcp) => tcp.remote_addr(),
             #[cfg(feature = "rustls")]
             Self::Rustls(tcp) => tcp.remote_addr(),
+            #[cfg(feature = "openssl")]
+            Self::Openssl(tcp) => tcp.remote_addr(),
         }
     }
 
@@ -77,6 +88,8 @@ impl TurnClientApi for TurnClient {
             Self::Tcp(tcp) => RelayedAddressesIter::Tcp(tcp.relayed_addresses()),
             #[cfg(feature = "rustls")]
             Self::Rustls(tcp) => RelayedAddressesIter::Rustls(tcp.relayed_addresses()),
+            #[cfg(feature = "openssl")]
+            Self::Openssl(tcp) => RelayedAddressesIter::Openssl(tcp.relayed_addresses()),
         }
     }
 
@@ -93,6 +106,10 @@ impl TurnClientApi for TurnClient {
             Self::Rustls(tcp) => {
                 PermissionAddressesIter::Rustls(tcp.permissions(transport, relayed))
             }
+            #[cfg(feature = "openssl")]
+            Self::Openssl(tcp) => {
+                PermissionAddressesIter::Openssl(tcp.permissions(transport, relayed))
+            }
         }
     }
 
@@ -103,6 +120,8 @@ impl TurnClientApi for TurnClient {
             Self::Tcp(tcp) => tcp.delete(now),
             #[cfg(feature = "rustls")]
             Self::Rustls(tcp) => tcp.delete(now),
+            #[cfg(feature = "openssl")]
+            Self::Openssl(tcp) => tcp.delete(now),
         }
     }
 
@@ -118,6 +137,8 @@ impl TurnClientApi for TurnClient {
             Self::Tcp(tcp) => tcp.create_permission(transport, peer_addr, now),
             #[cfg(feature = "rustls")]
             Self::Rustls(tcp) => tcp.create_permission(transport, peer_addr, now),
+            #[cfg(feature = "openssl")]
+            Self::Openssl(tcp) => tcp.create_permission(transport, peer_addr, now),
         }
     }
 
@@ -129,6 +150,8 @@ impl TurnClientApi for TurnClient {
             Self::Tcp(tcp) => tcp.have_permission(transport, to),
             #[cfg(feature = "rustls")]
             Self::Rustls(tcp) => tcp.have_permission(transport, to),
+            #[cfg(feature = "openssl")]
+            Self::Openssl(tcp) => tcp.have_permission(transport, to),
         }
     }
 
@@ -144,6 +167,8 @@ impl TurnClientApi for TurnClient {
             Self::Tcp(tcp) => tcp.bind_channel(transport, peer_addr, now),
             #[cfg(feature = "rustls")]
             Self::Rustls(tcp) => tcp.bind_channel(transport, peer_addr, now),
+            #[cfg(feature = "openssl")]
+            Self::Openssl(tcp) => tcp.bind_channel(transport, peer_addr, now),
         }
     }
 
@@ -164,6 +189,8 @@ impl TurnClientApi for TurnClient {
             Self::Tcp(tcp) => tcp.send_to(transport, to, data, now),
             #[cfg(feature = "rustls")]
             Self::Rustls(tcp) => tcp.send_to(transport, to, data, now),
+            #[cfg(feature = "openssl")]
+            Self::Openssl(tcp) => tcp.send_to(transport, to, data, now),
         }
     }
 
@@ -180,6 +207,8 @@ impl TurnClientApi for TurnClient {
             Self::Tcp(tcp) => tcp.recv(transmit, now),
             #[cfg(feature = "rustls")]
             Self::Rustls(tcp) => tcp.recv(transmit, now),
+            #[cfg(feature = "openssl")]
+            Self::Openssl(tcp) => tcp.recv(transmit, now),
         }
     }
 
@@ -190,6 +219,8 @@ impl TurnClientApi for TurnClient {
             Self::Tcp(tcp) => tcp.poll_recv(now),
             #[cfg(feature = "rustls")]
             Self::Rustls(tcp) => tcp.poll_recv(now),
+            #[cfg(feature = "openssl")]
+            Self::Openssl(tcp) => tcp.poll_recv(now),
         }
     }
 
@@ -200,6 +231,8 @@ impl TurnClientApi for TurnClient {
             Self::Tcp(tcp) => tcp.poll(now),
             #[cfg(feature = "rustls")]
             Self::Rustls(tcp) => tcp.poll(now),
+            #[cfg(feature = "openssl")]
+            Self::Openssl(tcp) => tcp.poll(now),
         }
     }
 
@@ -210,6 +243,8 @@ impl TurnClientApi for TurnClient {
             Self::Tcp(tcp) => tcp.poll_transmit(now),
             #[cfg(feature = "rustls")]
             Self::Rustls(tcp) => tcp.poll_transmit(now),
+            #[cfg(feature = "openssl")]
+            Self::Openssl(tcp) => tcp.poll_transmit(now),
         }
     }
 
@@ -220,6 +255,8 @@ impl TurnClientApi for TurnClient {
             Self::Tcp(tcp) => tcp.poll_event(),
             #[cfg(feature = "rustls")]
             Self::Rustls(tcp) => tcp.poll_event(),
+            #[cfg(feature = "openssl")]
+            Self::Openssl(tcp) => tcp.poll_event(),
         }
     }
 }
@@ -242,7 +279,24 @@ macro_rules! impl_iterator {
     }
 }
 
-#[cfg(feature = "rustls")]
+#[cfg(all(feature = "rustls", feature = "openssl"))]
+impl_iterator!(
+    RelayedAddressesIter,
+    (TransportType, SocketAddr),
+    Udp,
+    Tcp,
+    Rustls,
+    Openssl
+);
+#[cfg(all(not(feature = "rustls"), feature = "openssl"))]
+impl_iterator!(
+    RelayedAddressesIter,
+    (TransportType, SocketAddr),
+    Udp,
+    Tcp,
+    Openssl
+);
+#[cfg(all(feature = "rustls", not(feature = "openssl")))]
 impl_iterator!(
     RelayedAddressesIter,
     (TransportType, SocketAddr),
@@ -250,12 +304,16 @@ impl_iterator!(
     Tcp,
     Rustls
 );
-#[cfg(not(feature = "rustls"))]
+#[cfg(all(not(feature = "rustls"), not(feature = "openssl")))]
 impl_iterator!(RelayedAddressesIter, (TransportType, SocketAddr), Udp, Tcp);
 
-#[cfg(feature = "rustls")]
+#[cfg(all(feature = "rustls", feature = "openssl"))]
+impl_iterator!(PermissionAddressesIter, IpAddr, Udp, Tcp, Rustls, Openssl);
+#[cfg(all(feature = "rustls", not(feature = "openssl")))]
 impl_iterator!(PermissionAddressesIter, IpAddr, Udp, Tcp, Rustls);
-#[cfg(not(feature = "rustls"))]
+#[cfg(all(not(feature = "rustls"), feature = "openssl"))]
+impl_iterator!(PermissionAddressesIter, IpAddr, Udp, Tcp, Openssl);
+#[cfg(all(not(feature = "rustls"), not(feature = "openssl")))]
 impl_iterator!(PermissionAddressesIter, IpAddr, Udp, Tcp);
 
 impl From<TurnClientUdp> for TurnClient {
@@ -274,5 +332,12 @@ impl From<TurnClientTcp> for TurnClient {
 impl From<TurnClientRustls> for TurnClient {
     fn from(value: TurnClientRustls) -> Self {
         Self::Rustls(value)
+    }
+}
+
+#[cfg(feature = "openssl")]
+impl From<TurnClientOpensslTls> for TurnClient {
+    fn from(value: TurnClientOpensslTls) -> Self {
+        Self::Openssl(value)
     }
 }
