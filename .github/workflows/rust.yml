@@ -28,10 +28,21 @@ jobs:
     - name: Use MSRV Cargo.lock
       run: cp Cargo.lock.msrv Cargo.lock
       if: matrix.toolchain == '1.77'
+    # Install openssl through vcpkg from rust-openssl github CI
+    - run: echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+      if: matrix.runs-on == 'windows-latest'
+    - run: vcpkg install openssl:x64-windows-static-md
+      if: matrix.runs-on == 'windows-latest'
     - name: Build
       run: cargo build --verbose
     - name: Build (without default features)
       run: cargo build --verbose --no-default-features
+    - name: Build with --features "std"
+      run: cargo build --verbose --no-default-features --features "std"
+    - name: Build with --features "openssl"
+      run: cargo build --verbose --no-default-features --features "openssl"
+    - name: Build with --features "rustls"
+      run: cargo build --verbose --no-default-features --features "rustls"
   test:
     strategy:
       matrix:
@@ -39,10 +50,13 @@ jobs:
     runs-on: ${{ matrix.runs-on }}
     steps:
     - uses: actions/checkout@v2
+    # Install openssl through vcpkg (from rust-openssl github CI)
+    - run: echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+      if: matrix.runs-on == 'windows-latest'
+    - run: vcpkg install openssl:x64-windows-static-md
+      if: matrix.runs-on == 'windows-latest'
     - name: Run tests
-      run: cargo test --verbose
-    - name: Run tests (without default features)
-      run: cargo test --verbose --no-default-features
+      run: cargo test --verbose --all-features
   clippy:
     runs-on: ubuntu-latest
     steps:

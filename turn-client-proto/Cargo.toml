@@ -20,6 +20,7 @@ smallvec.workspace = true
 turn-types.workspace = true
 
 rustls = { workspace = true, optional = true }
+openssl = { workspace = true, optional = true }
 
 [dev-dependencies]
 tracing = { workspace = true, features = ["std"] }
@@ -33,9 +34,10 @@ rcgen = "0.14"
 sans-io-time = "0.1"
 
 [features]
-default = ["rustls", "std"]
+default = ["rustls", "std", "openssl"]
 std = ["thiserror/std", "turn-types/std"]
 rustls = ["dep:rustls", "std"]
+openssl = ["dep:openssl", "std"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }
