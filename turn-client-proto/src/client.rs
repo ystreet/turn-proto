@@ -23,7 +23,7 @@ pub use crate::api::{
 };
 use crate::api::{DelayedMessageOrChannelSend, TransmitBuild, TurnClientApi, TurnPeerData};
 #[cfg(feature = "rustls")]
-use crate::rustls::TurnClientTls;
+use crate::rustls::TurnClientRustls;
 use crate::tcp::TurnClientTcp;
 use crate::udp::TurnClientUdp;
 
@@ -35,8 +35,8 @@ pub enum TurnClient {
     /// A TCP TURN client.
     Tcp(TurnClientTcp),
     #[cfg(feature = "rustls")]
-    /// A TLS TURN client.
-    Tls(TurnClientTls),
+    /// A Rustls TURN client.
+    Rustls(TurnClientRustls),
 }
 
 impl TurnClientApi for TurnClient {
@@ -46,7 +46,7 @@ impl TurnClientApi for TurnClient {
             Self::Udp(udp) => udp.transport(),
             Self::Tcp(tcp) => tcp.transport(),
             #[cfg(feature = "rustls")]
-            Self::Tls(tcp) => tcp.transport(),
+            Self::Rustls(tcp) => tcp.transport(),
         }
     }
 
@@ -56,7 +56,7 @@ impl TurnClientApi for TurnClient {
             Self::Udp(udp) => udp.local_addr(),
             Self::Tcp(tcp) => tcp.local_addr(),
             #[cfg(feature = "rustls")]
-            Self::Tls(tcp) => tcp.local_addr(),
+            Self::Rustls(tcp) => tcp.local_addr(),
         }
     }
 
@@ -66,7 +66,7 @@ impl TurnClientApi for TurnClient {
             Self::Udp(udp) => udp.remote_addr(),
             Self::Tcp(tcp) => tcp.remote_addr(),
             #[cfg(feature = "rustls")]
-            Self::Tls(tcp) => tcp.remote_addr(),
+            Self::Rustls(tcp) => tcp.remote_addr(),
         }
     }
 
@@ -76,7 +76,7 @@ impl TurnClientApi for TurnClient {
             Self::Udp(udp) => RelayedAddressesIter::Udp(udp.relayed_addresses()),
             Self::Tcp(tcp) => RelayedAddressesIter::Tcp(tcp.relayed_addresses()),
             #[cfg(feature = "rustls")]
-            Self::Tls(tcp) => RelayedAddressesIter::Tls(tcp.relayed_addresses()),
+            Self::Rustls(tcp) => RelayedAddressesIter::Rustls(tcp.relayed_addresses()),
         }
     }
 
@@ -90,7 +90,9 @@ impl TurnClientApi for TurnClient {
             Self::Udp(udp) => PermissionAddressesIter::Udp(udp.permissions(transport, relayed)),
             Self::Tcp(tcp) => PermissionAddressesIter::Tcp(tcp.permissions(transport, relayed)),
             #[cfg(feature = "rustls")]
-            Self::Tls(tcp) => PermissionAddressesIter::Tls(tcp.permissions(transport, relayed)),
+            Self::Rustls(tcp) => {
+                PermissionAddressesIter::Rustls(tcp.permissions(transport, relayed))
+            }
         }
     }
 
@@ -100,7 +102,7 @@ impl TurnClientApi for TurnClient {
             Self::Udp(udp) => udp.delete(now),
             Self::Tcp(tcp) => tcp.delete(now),
             #[cfg(feature = "rustls")]
-            Self::Tls(tcp) => tcp.delete(now),
+            Self::Rustls(tcp) => tcp.delete(now),
         }
     }
 
@@ -115,7 +117,7 @@ impl TurnClientApi for TurnClient {
             Self::Udp(udp) => udp.create_permission(transport, peer_addr, now),
             Self::Tcp(tcp) => tcp.create_permission(transport, peer_addr, now),
             #[cfg(feature = "rustls")]
-            Self::Tls(tcp) => tcp.create_permission(transport, peer_addr, now),
+            Self::Rustls(tcp) => tcp.create_permission(transport, peer_addr, now),
         }
     }
 
@@ -126,7 +128,7 @@ impl TurnClientApi for TurnClient {
             Self::Udp(udp) => udp.have_permission(transport, to),
             Self::Tcp(tcp) => tcp.have_permission(transport, to),
             #[cfg(feature = "rustls")]
-            Self::Tls(tcp) => tcp.have_permission(transport, to),
+            Self::Rustls(tcp) => tcp.have_permission(transport, to),
         }
     }
 
@@ -141,7 +143,7 @@ impl TurnClientApi for TurnClient {
             Self::Udp(udp) => udp.bind_channel(transport, peer_addr, now),
             Self::Tcp(tcp) => tcp.bind_channel(transport, peer_addr, now),
             #[cfg(feature = "rustls")]
-            Self::Tls(tcp) => tcp.bind_channel(transport, peer_addr, now),
+            Self::Rustls(tcp) => tcp.bind_channel(transport, peer_addr, now),
         }
     }
 
@@ -161,7 +163,7 @@ impl TurnClientApi for TurnClient {
             Self::Udp(udp) => udp.send_to(transport, to, data, now),
             Self::Tcp(tcp) => tcp.send_to(transport, to, data, now),
             #[cfg(feature = "rustls")]
-            Self::Tls(tcp) => tcp.send_to(transport, to, data, now),
+            Self::Rustls(tcp) => tcp.send_to(transport, to, data, now),
         }
     }
 
@@ -177,7 +179,7 @@ impl TurnClientApi for TurnClient {
             Self::Udp(udp) => udp.recv(transmit, now),
             Self::Tcp(tcp) => tcp.recv(transmit, now),
             #[cfg(feature = "rustls")]
-            Self::Tls(tcp) => tcp.recv(transmit, now),
+            Self::Rustls(tcp) => tcp.recv(transmit, now),
         }
     }
 
@@ -187,7 +189,7 @@ impl TurnClientApi for TurnClient {
             Self::Udp(udp) => udp.poll_recv(now),
             Self::Tcp(tcp) => tcp.poll_recv(now),
             #[cfg(feature = "rustls")]
-            Self::Tls(tcp) => tcp.poll_recv(now),
+            Self::Rustls(tcp) => tcp.poll_recv(now),
         }
     }
 
@@ -197,7 +199,7 @@ impl TurnClientApi for TurnClient {
             Self::Udp(udp) => udp.poll(now),
             Self::Tcp(tcp) => tcp.poll(now),
             #[cfg(feature = "rustls")]
-            Self::Tls(tcp) => tcp.poll(now),
+            Self::Rustls(tcp) => tcp.poll(now),
         }
     }
 
@@ -207,7 +209,7 @@ impl TurnClientApi for TurnClient {
             Self::Udp(udp) => udp.poll_transmit(now),
             Self::Tcp(tcp) => tcp.poll_transmit(now),
             #[cfg(feature = "rustls")]
-            Self::Tls(tcp) => tcp.poll_transmit(now),
+            Self::Rustls(tcp) => tcp.poll_transmit(now),
         }
     }
 
@@ -217,7 +219,7 @@ impl TurnClientApi for TurnClient {
             Self::Udp(udp) => udp.poll_event(),
             Self::Tcp(tcp) => tcp.poll_event(),
             #[cfg(feature = "rustls")]
-            Self::Tls(tcp) => tcp.poll_event(),
+            Self::Rustls(tcp) => tcp.poll_event(),
         }
     }
 }
@@ -246,13 +248,13 @@ impl_iterator!(
     (TransportType, SocketAddr),
     Udp,
     Tcp,
-    Tls
+    Rustls
 );
 #[cfg(not(feature = "rustls"))]
 impl_iterator!(RelayedAddressesIter, (TransportType, SocketAddr), Udp, Tcp);
 
 #[cfg(feature = "rustls")]
-impl_iterator!(PermissionAddressesIter, IpAddr, Udp, Tcp, Tls);
+impl_iterator!(PermissionAddressesIter, IpAddr, Udp, Tcp, Rustls);
 #[cfg(not(feature = "rustls"))]
 impl_iterator!(PermissionAddressesIter, IpAddr, Udp, Tcp);
 
@@ -269,8 +271,8 @@ impl From<TurnClientTcp> for TurnClient {
 }
 
 #[cfg(feature = "rustls")]
-impl From<TurnClientTls> for TurnClient {
-    fn from(value: TurnClientTls) -> Self {
-        Self::Tls(value)
+impl From<TurnClientRustls> for TurnClient {
+    fn from(value: TurnClientRustls) -> Self {
+        Self::Rustls(value)
     }
 }
