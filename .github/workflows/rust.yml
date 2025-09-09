@@ -57,6 +57,8 @@ jobs:
       if: matrix.runs-on == 'windows-latest'
     - name: Run tests
       run: cargo test --verbose --all-features
+    - name: Build benchmarks
+      run: cargo bench --no-run --verbose
   clippy:
     runs-on: ubuntu-latest
     steps:
