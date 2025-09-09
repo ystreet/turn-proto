@@ -28,7 +28,7 @@ use turn_types::channel::ChannelData;
 use turn_types::AddressFamily;
 use turn_types::TurnCredentials;
 
-use tracing::{trace, warn};
+use tracing::{info, trace, warn};
 
 use crate::api::{
     DataRangeOrOwned, DelayedMessageOrChannelSend, TransmitBuild, TurnClientApi, TurnPeerData,
@@ -74,6 +74,11 @@ impl HandshakeState {
 
         match ret {
             Ok(s) => {
+                info!(
+                    "SSL handshake completed with version {} cipher: {:?}",
+                    s.ssl().version_str(),
+                    s.ssl().current_cipher()
+                );
                 *self = Self::Done(s);
                 Ok(self.complete()?)
             }
@@ -84,11 +89,15 @@ impl HandshakeState {
                     "Would Block",
                 ))
             }
-            Err(HandshakeError::SetupFailure(e)) => Err(std::io::Error::new(
-                std::io::ErrorKind::ConnectionRefused,
-                e,
-            )),
+            Err(HandshakeError::SetupFailure(e)) => {
+                warn!("Error during ssl setup: {e}");
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    e,
+                ))
+            }
             Err(HandshakeError::Failure(mid)) => {
+                warn!("Failure during ssl setup: {}", mid.error());
                 *self = Self::Handshaking(mid);
                 Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
@@ -304,8 +313,20 @@ impl TurnClientApi for TurnClientOpensslTls {
             ));
         }
 
-        let Ok(stream) = self.handshake.complete() else {
-            return None;
+        let stream = match self.handshake.complete() {
+            Ok(stream) => stream,
+            Err(_) => {
+                if let Some(outgoing) = self.handshake.inner_mut().pop_outgoing() {
+                    return Some(Transmit::new(
+                        outgoing.into_boxed_slice().into(),
+                        self.transport(),
+                        self.local_addr(),
+                        self.remote_addr(),
+                    ));
+                } else {
+                    return None;
+                }
+            }
         };
 
         while let Some(transmit) = self.protocol.poll_transmit(now) {
@@ -452,7 +473,7 @@ impl TurnClientApi for TurnClientOpensslTls {
             Err(e) => {
                 if e.kind() != std::io::ErrorKind::WouldBlock {
                     self.protocol.error();
-                    tracing::warn!("Error: {}", e);
+                    tracing::warn!("Error: {e}");
                 }
                 return TurnRecvRet::Ignored(transmit);
             }
@@ -507,10 +528,11 @@ impl TurnClientApi for TurnClientOpensslTls {
 
 #[cfg(test)]
 mod tests {
-    use alloc::borrow::ToOwned;
     use alloc::string::{String, ToString};
     use core::time::Duration;
     use openssl::ssl::SslMethod;
+    use tracing::debug;
+    use turn_server_proto::openssl::OpensslTurnServer;
 
     use crate::api::tests::{transmit_send_build, TurnTest};
     use crate::client::TurnClient;
@@ -521,90 +543,43 @@ mod tests {
     use super::*;
 
     use rcgen::CertifiedKey;
-    use rustls::crypto::aws_lc_rs as crypto_provider;
-    use rustls::pki_types::PrivateKeyDer;
-    use rustls::ServerConfig;
     use turn_server_proto::api::TurnServerApi;
-    use turn_server_proto::rustls::RustlsTurnServer;
-    mod danger {
-        use rustls::client::danger::HandshakeSignatureValid;
-        use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
-        use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-        use rustls::DigitallySignedStruct;
 
-        use alloc::vec::Vec;
-
-        #[derive(Debug)]
-        pub struct NoCertificateVerification(CryptoProvider);
-
-        impl NoCertificateVerification {
-            pub fn new(provider: CryptoProvider) -> Self {
-                Self(provider)
-            }
-        }
-
-        impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
-            fn verify_server_cert(
-                &self,
-                _end_entity: &CertificateDer<'_>,
-                _intermediates: &[CertificateDer<'_>],
-                _server_name: &ServerName<'_>,
-                _ocsp: &[u8],
-                _now: UnixTime,
-            ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-                Ok(rustls::client::danger::ServerCertVerified::assertion())
-            }
-
-            fn verify_tls12_signature(
-                &self,
-                message: &[u8],
-                cert: &CertificateDer<'_>,
-                dss: &DigitallySignedStruct,
-            ) -> Result<HandshakeSignatureValid, rustls::Error> {
-                verify_tls12_signature(
-                    message,
-                    cert,
-                    dss,
-                    &self.0.signature_verification_algorithms,
-                )
-            }
-
-            fn verify_tls13_signature(
-                &self,
-                message: &[u8],
-                cert: &CertificateDer<'_>,
-                dss: &DigitallySignedStruct,
-            ) -> Result<HandshakeSignatureValid, rustls::Error> {
-                verify_tls13_signature(
-                    message,
-                    cert,
-                    dss,
-                    &self.0.signature_verification_algorithms,
-                )
-            }
-
-            fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-                self.0.signature_verification_algorithms.supported_schemes()
-            }
-        }
+    fn test_ssl_context(transport: TransportType) -> SslContext {
+        let method = match transport {
+            TransportType::Udp => SslMethod::dtls_client(),
+            TransportType::Tcp => SslMethod::tls_client(),
+        };
+        let mut builder = SslContext::builder(method).unwrap();
+        builder.set_cipher_list("HIGH+TLSv1.2:!aNULL:!MD5").unwrap();
+        builder.build()
     }
 
-    fn test_ssl_context() -> SslContext {
-        SslContext::builder(SslMethod::tls_client())
-            .unwrap()
-            .build()
-    }
-
-    /*    fn test_tls_server_config() -> SslContext {
+    fn test_openssl_server_config(transport: TransportType) -> SslContext {
         let CertifiedKey { cert, signing_key } =
             rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let method = match transport {
+            TransportType::Udp => SslMethod::dtls_server(),
+            TransportType::Tcp => SslMethod::tls_server(),
+        };
+        let mut builder = SslContext::builder(method).unwrap();
         let cert = openssl::x509::X509::from_der(cert.der()).unwrap();
-        let mut builder = SslContext::builder(SslMethod::tls_server()).unwrap();
-        builder.cert_store().add_cert(cert).unwrap();
-        builder.set_verify_callback(openssl::ssl::SslVerifyMode::FAIL_IF_NO_PEER_CERT, |_ok, _store| {
-            true
+        builder.set_certificate(&cert).unwrap();
+        let pkey = openssl::pkey::PKey::private_key_from_der(signing_key.serialized_der()).unwrap();
+        builder.set_private_key(&pkey).unwrap();
+        builder.set_verify_callback(openssl::ssl::SslVerifyMode::NONE, |_ok, _store| true);
+        builder.set_client_hello_callback(|ssl, _alert| {
+            if let Some(ciphers) = ssl.client_hello_ciphers() {
+                debug!(
+                    "hello cipher list: {:?}",
+                    ssl.bytes_to_cipher_list(ciphers, false).unwrap()
+                );
+            }
+            Ok(openssl::ssl::ClientHelloResponse::SUCCESS)
         });
-    }*/
+        builder.set_cipher_list("HIGH+TLSv1.2:!aNULL:!MD5").unwrap();
+        builder.build()
+    }
 
     fn turn_openssl_new(
         transport: TransportType,
@@ -618,23 +593,60 @@ mod tests {
             remote_addr,
             credentials,
             &[AddressFamily::IPV4],
-            test_ssl_context(),
+            test_ssl_context(transport),
         )
         .into()
     }
-    /*
-    fn turn_server_openssl_new(listen_address: SocketAddr, realm: String) -> RustlsTurnServer {
-        RustlsTurnServer::new(listen_address, realm, server_config())
+
+    fn turn_tcp_openssl_new(
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        credentials: TurnCredentials,
+    ) -> TurnClient {
+        turn_openssl_new(TransportType::Tcp, local_addr, remote_addr, credentials)
     }
 
-    fn create_test() -> TurnTest<TurnClient, RustlsTurnServer> {
-        TurnTest::<TurnClient, RustlsTurnServer>::builder()
-            .build(turn_rustls_new, turn_server_rustls_new)
+    fn turn_udp_openssl_new(
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        credentials: TurnCredentials,
+    ) -> TurnClient {
+        turn_openssl_new(TransportType::Udp, local_addr, remote_addr, credentials)
+    }
+
+    fn turn_server_openssl_new(
+        transport: TransportType,
+        listen_address: SocketAddr,
+        realm: String,
+    ) -> OpensslTurnServer {
+        OpensslTurnServer::new(
+            transport,
+            listen_address,
+            realm,
+            test_openssl_server_config(transport),
+        )
+    }
+
+    fn turn_udp_server_openssl_new(listen_address: SocketAddr, realm: String) -> OpensslTurnServer {
+        turn_server_openssl_new(TransportType::Udp, listen_address, realm)
+    }
+
+    fn turn_tcp_server_openssl_new(listen_address: SocketAddr, realm: String) -> OpensslTurnServer {
+        turn_server_openssl_new(TransportType::Tcp, listen_address, realm)
+    }
+
+    fn create_test(transport: TransportType) -> TurnTest<TurnClient, OpensslTurnServer> {
+        match transport {
+            TransportType::Udp => TurnTest::<TurnClient, OpensslTurnServer>::builder()
+                .build(turn_udp_openssl_new, turn_udp_server_openssl_new),
+            TransportType::Tcp => TurnTest::<TurnClient, OpensslTurnServer>::builder()
+                .build(turn_tcp_openssl_new, turn_tcp_server_openssl_new),
+        }
     }
 
     fn complete_io<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
-        let mut handled = false;
         loop {
+            let mut handled = false;
             test.client.poll(now);
             test.server.poll(now);
             if let Some(transmit) = test.client.poll_transmit(now) {
@@ -653,7 +665,6 @@ mod tests {
             if !handled {
                 break;
             }
-            handled = false;
         }
     }
 
@@ -761,76 +772,86 @@ mod tests {
     }
 
     #[test]
-    fn test_turn_rustls_allocate_udp_permission() {
+    fn test_turn_openssl_allocate_udp_permission() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::ZERO;
-        let mut test = create_test();
-        allocate_udp(&mut test, now);
-        udp_permission(&mut test, now);
-        sendrecv_data(&mut test, now);
+        for transport in [TransportType::Tcp, TransportType::Tcp] {
+            let now = Instant::ZERO;
+            let mut test = create_test(transport);
+            allocate_udp(&mut test, now);
+            udp_permission(&mut test, now);
+            sendrecv_data(&mut test, now);
+        }
     }
 
     #[test]
-    fn test_turn_rustls_allocate_refresh() {
+    fn test_turn_openssl_allocate_refresh() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::ZERO;
-        let mut test = create_test();
-        allocate_udp(&mut test, now);
-        let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
-            unreachable!();
-        };
-        assert!(now + Duration::from_secs(1000) < expiry);
-        // TODO: removing this (REFRESH handling) produces multiple messages in a single TCP
-        // transmit which the server currently does not like.
-        complete_io(&mut test, expiry);
-        udp_permission(&mut test, expiry);
-        sendrecv_data(&mut test, expiry);
+        for transport in [TransportType::Tcp, TransportType::Tcp] {
+            let now = Instant::ZERO;
+            let mut test = create_test(transport);
+            allocate_udp(&mut test, now);
+            let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
+                unreachable!();
+            };
+            assert!(now + Duration::from_secs(1000) < expiry);
+            // TODO: removing this (REFRESH handling) produces multiple messages in a single TCP
+            // transmit which the server currently does not like.
+            complete_io(&mut test, expiry);
+            udp_permission(&mut test, expiry);
+            sendrecv_data(&mut test, expiry);
+        }
     }
 
     #[test]
-    fn test_turn_rustls_allocate_delete() {
+    fn test_turn_openssl_allocate_delete() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::ZERO;
-        let mut test = create_test();
-        allocate_udp(&mut test, now);
-        delete_udp(&mut test, now);
+        for transport in [TransportType::Tcp, TransportType::Tcp] {
+            let now = Instant::ZERO;
+            let mut test = create_test(transport);
+            allocate_udp(&mut test, now);
+            delete_udp(&mut test, now);
+        }
     }
 
     #[test]
-    fn test_turn_rustls_allocate_bind_channel() {
+    fn test_turn_openssl_allocate_bind_channel() {
         let _log = crate::tests::test_init_log();
-        let now = Instant::ZERO;
-        let mut test = create_test();
-        allocate_udp(&mut test, now);
-        channel_bind(&mut test, now);
-        sendrecv_data(&mut test, now);
+        for transport in [TransportType::Tcp, TransportType::Tcp] {
+            let now = Instant::ZERO;
+            let mut test = create_test(transport);
+            allocate_udp(&mut test, now);
+            channel_bind(&mut test, now);
+            sendrecv_data(&mut test, now);
+        }
     }
 
     #[test]
-    fn test_turn_rustls_offpath_data() {
+    fn test_turn_openssl_offpath_data() {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
-        let mut test = create_test();
-        allocate_udp(&mut test, now);
-        udp_permission(&mut test, now);
-        let data = Message::builder(
-            MessageType::from_class_method(
-                turn_types::stun::message::MessageClass::Error,
-                CREATE_PERMISSION,
-            ),
-            TransactionId::generate(),
-            MessageWriteVec::new(),
-        )
-        .finish();
-        let transmit = Transmit::new(
-            data,
-            test.client.transport(),
-            test.turn_alloc_addr,
-            test.client.local_addr(),
-        );
-        assert!(matches!(
-            test.client.recv(transmit, now),
-            TurnRecvRet::Ignored(_)
-        ));
-    }*/
+        for transport in [TransportType::Tcp, TransportType::Tcp] {
+            let mut test = create_test(transport);
+            allocate_udp(&mut test, now);
+            udp_permission(&mut test, now);
+            let data = Message::builder(
+                MessageType::from_class_method(
+                    turn_types::stun::message::MessageClass::Error,
+                    CREATE_PERMISSION,
+                ),
+                TransactionId::generate(),
+                MessageWriteVec::new(),
+            )
+            .finish();
+            let transmit = Transmit::new(
+                data,
+                test.client.transport(),
+                test.turn_alloc_addr,
+                test.client.local_addr(),
+            );
+            assert!(matches!(
+                test.client.recv(transmit, now),
+                TurnRecvRet::Ignored(_)
+            ));
+        }
+    }
 }

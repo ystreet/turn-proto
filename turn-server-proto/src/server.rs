@@ -1469,6 +1469,7 @@ impl TurnServerApi for TurnServer {
         );
 
         if is_all_error && pending.pending_sockets.len() > 1 {
+            trace!("Returning insufficient capacity");
             // RFC8656 ADDITIONAL-ADDRESS-FAMILY path
             let error = ErrorCode::builder(ErrorCode::INSUFFICIENT_CAPACITY)
                 .build()
