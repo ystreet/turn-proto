@@ -30,6 +30,9 @@ pub mod server;
 #[cfg(feature = "rustls")]
 pub mod rustls;
 
+#[cfg(feature = "openssl")]
+pub mod openssl;
+
 #[cfg(test)]
 mod tests {
     use tracing::subscriber::DefaultGuard;

@@ -12,9 +12,10 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["rustls", "std"]
+default = ["rustls", "std", "openssl"]
 rustls = ["dep:rustls", "std"]
 std = ["turn-types/std", "stun-proto/std", "thiserror/std", "rand/std"]
+openssl = ["dep:openssl", "std"]
 
 [dependencies]
 byteorder.workspace = true
@@ -23,6 +24,7 @@ thiserror.workspace = true
 tracing.workspace = true
 turn-types.workspace = true
 pnet_packet = { version = "0.35", default-features = false }
+openssl = { workspace = true, optional = true }
 rand = { version = "0.9", default-features = false, features = ["alloc", "os_rng"] }
 rustls = { workspace = true, optional = true }
 smallvec = "1"
