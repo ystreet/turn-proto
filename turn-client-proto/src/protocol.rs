@@ -10,6 +10,7 @@
 //!
 //! Contains the protocol state machine for a TURN client.
 
+use alloc::borrow::ToOwned;
 use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -33,7 +34,7 @@ use turn_types::attribute::{
 use turn_types::attribute::{Data as AData, DontFragment, RequestedTransport};
 use turn_types::channel::ChannelData;
 use turn_types::message::*;
-use turn_types::stun::message::MessageWriteVec;
+use turn_types::stun::message::{IntegrityAlgorithm, IntegrityKey, MessageWriteVec};
 use turn_types::stun::prelude::{MessageWrite, MessageWriteExt};
 use turn_types::{AddressFamily, TurnCredentials};
 
@@ -133,7 +134,9 @@ impl TurnClientProtocol {
 
     fn send_authenticating_request(
         stun_agent: &mut StunAgent,
-        credentials: LongTermCredentials,
+        username: &str,
+        realm: &str,
+        key: &IntegrityKey,
         nonce: &str,
         address_families: &[AddressFamily],
         now: Instant,
@@ -143,9 +146,9 @@ impl TurnClientProtocol {
         let requested_transport = RequestedTransport::new(RequestedTransport::UDP);
         builder.add_attribute(&requested_transport).unwrap();
         builder.add_attribute(&Lifetime::new(1800)).unwrap();
-        let username = Username::new(credentials.username()).unwrap();
+        let username = Username::new(username).unwrap();
         builder.add_attribute(&username).unwrap();
-        let realm = Realm::new(credentials.realm()).unwrap();
+        let realm = Realm::new(realm).unwrap();
         builder.add_attribute(&realm).unwrap();
         let nonce = Nonce::new(nonce).unwrap();
         builder.add_attribute(&nonce).unwrap();
@@ -169,10 +172,7 @@ impl TurnClientProtocol {
                 .unwrap();
         }
         builder
-            .add_message_integrity(
-                &stun_proto::types::message::MessageIntegrityCredentials::LongTerm(credentials),
-                stun_proto::types::message::IntegrityAlgorithm::Sha1,
-            )
+            .add_message_integrity_with_key(key, IntegrityAlgorithm::Sha1)
             .unwrap();
         let transaction_id = builder.transaction_id();
         let msg = builder.finish();
@@ -303,7 +303,7 @@ impl TurnClientProtocol {
         allocations: &mut [Allocation],
         pending_transmits: &mut VecDeque<Transmit<Data<'static>>>,
         msg: &Message<'_>,
-        credentials: LongTermCredentials,
+        credentials: &TurnCredentials,
         now: Instant,
     ) -> InternalHandleStunReply {
         // only handle STALE_NONCE errors here as that is the only unvalidated case that we have.
@@ -311,21 +311,29 @@ impl TurnClientProtocol {
             return InternalHandleStunReply::Ignored;
         };
 
-        let mut new_credentials = None;
+        let mut new_key = None;
 
         'outer: for alloc in allocations.iter_mut() {
             if let Some((pending, _lifetime)) = alloc.pending_refresh {
                 if pending == msg.transaction_id() {
-                    let credentials = LongTermCredentials::new(
+                    let key = MessageIntegrityCredentials::LongTerm(LongTermCredentials::new(
                         credentials.username().to_string(),
                         credentials.password().to_string(),
-                        realm,
-                    );
+                        realm.clone(),
+                    ))
+                    .make_key();
                     info!("Received STALE_NONCE in response to REFRESH for transaction {pending}, resending");
-                    let (transmit, transaction_id, lifetime) =
-                        Self::send_refresh(stun_agent, credentials.clone(), &nonce, 1800, now);
+                    let (transmit, transaction_id, lifetime) = Self::send_refresh(
+                        stun_agent,
+                        credentials.username(),
+                        &realm,
+                        &key,
+                        &nonce,
+                        1800,
+                        now,
+                    );
                     pending_transmits.push_back(transmit);
-                    new_credentials = Some(credentials);
+                    new_key = Some(key);
                     alloc.pending_refresh = Some((transaction_id, lifetime));
                     stun_agent.remove_outstanding_request(msg.transaction_id());
                     break 'outer;
@@ -338,14 +346,17 @@ impl TurnClientProtocol {
                     continue;
                 }
                 info!("Received STALE_NONCE in response to BIND_CHANNEL {} for transaction {}, resending", channel.peer_addr, msg.transaction_id());
-                let credentials = LongTermCredentials::new(
+                let key = MessageIntegrityCredentials::LongTerm(LongTermCredentials::new(
                     credentials.username().to_string(),
                     credentials.password().to_string(),
                     realm.clone(),
-                );
+                ))
+                .make_key();
                 let (transmit, new_transaction_id) = Self::send_channel_bind_request(
                     stun_agent,
-                    credentials.clone(),
+                    credentials.username(),
+                    &realm,
+                    &key,
                     &nonce,
                     channel.id,
                     channel.peer_addr,
@@ -353,7 +364,7 @@ impl TurnClientProtocol {
                 );
                 *transaction_id = new_transaction_id;
                 pending_transmits.push_back(transmit);
-                new_credentials = Some(credentials);
+                new_key = Some(key);
                 stun_agent.remove_outstanding_request(msg.transaction_id());
                 channel_resent = Some(new_transaction_id);
                 break;
@@ -364,14 +375,17 @@ impl TurnClientProtocol {
                     .is_some_and(|pending| pending == msg.transaction_id())
                 {
                     info!("Received STALE_NONCE in response to BIND_CHANNEL {} for transaction {}, resending", channel.peer_addr, msg.transaction_id());
-                    let credentials = LongTermCredentials::new(
+                    let key = MessageIntegrityCredentials::LongTerm(LongTermCredentials::new(
                         credentials.username().to_string(),
                         credentials.password().to_string(),
                         realm.clone(),
-                    );
+                    ))
+                    .make_key();
                     let (transmit, transaction_id) = Self::send_channel_bind_request(
                         stun_agent,
-                        credentials.clone(),
+                        credentials.username(),
+                        &realm,
+                        &key,
                         &nonce,
                         channel.id,
                         channel.peer_addr,
@@ -379,7 +393,7 @@ impl TurnClientProtocol {
                     );
                     channel.pending_refresh = Some(transaction_id);
                     pending_transmits.push_back(transmit);
-                    new_credentials = Some(credentials);
+                    new_key = Some(key);
                     stun_agent.remove_outstanding_request(msg.transaction_id());
                     channel_resent = Some(transaction_id);
                     break;
@@ -394,22 +408,25 @@ impl TurnClientProtocol {
                     break 'outer;
                 }
                 info!("Received STALE_NONCE in response to CREATE_PERMISSION {} for transaction {}, resending", permission.ip, msg.transaction_id());
-                let credentials = LongTermCredentials::new(
+                let key = MessageIntegrityCredentials::LongTerm(LongTermCredentials::new(
                     credentials.username().to_string(),
                     credentials.password().to_string(),
-                    realm,
-                );
+                    realm.clone(),
+                ))
+                .make_key();
                 let peer_addr = permission.ip;
                 let (transmit, new_transaction_id) = Self::send_create_permission_request(
                     stun_agent,
-                    credentials.clone(),
+                    credentials.username(),
+                    &realm,
+                    &key,
                     &nonce,
                     peer_addr,
                     now,
                 );
                 *transaction_id = new_transaction_id;
                 pending_transmits.push_back(transmit);
-                new_credentials = Some(credentials);
+                new_key = Some(key);
                 stun_agent.remove_outstanding_request(msg.transaction_id());
                 break 'outer;
             }
@@ -423,40 +440,45 @@ impl TurnClientProtocol {
                         break 'outer;
                     }
                     info!("Received STALE_NONCE in response to CREATE_PERMISSION {} for transaction {}, resending", permission.ip, msg.transaction_id());
-                    let credentials = LongTermCredentials::new(
+                    let key = MessageIntegrityCredentials::LongTerm(LongTermCredentials::new(
                         credentials.username().to_string(),
                         credentials.password().to_string(),
-                        realm,
-                    );
+                        realm.clone(),
+                    ))
+                    .make_key();
                     let peer_addr = permission.ip;
                     let (transmit, transaction_id) = Self::send_create_permission_request(
                         stun_agent,
-                        credentials.clone(),
+                        credentials.username(),
+                        &realm,
+                        &key,
                         &nonce,
                         peer_addr,
                         now,
                     );
                     permission.pending_refresh = Some(transaction_id);
                     pending_transmits.push_back(transmit);
-                    new_credentials = Some(credentials);
+                    new_key = Some(key);
                     stun_agent.remove_outstanding_request(msg.transaction_id());
                     break 'outer;
                 }
             }
         }
 
-        if let Some(credentials) = new_credentials {
+        if let Some(key) = new_key {
             match state {
                 AuthState::Error | AuthState::Initial | AuthState::InitialSent(_) => unreachable!(),
                 AuthState::Authenticating {
-                    credentials: _,
+                    key: _,
+                    realm: _,
                     nonce: _,
                     transaction_id: _,
                 } => unreachable!(),
                 AuthState::Authenticated {
-                    credentials: _,
+                    key: _,
+                    realm: _,
                     nonce: _,
-                } => *state = AuthState::Authenticated { credentials, nonce },
+                } => *state = AuthState::Authenticated { key, realm, nonce },
             }
             InternalHandleStunReply::Handled
         } else {
@@ -488,7 +510,9 @@ impl TurnClientProtocol {
         msg: Message<'_>,
         transport: TransportType,
         from: SocketAddr,
-        credentials: LongTermCredentials,
+        credentials: &TurnCredentials,
+        realm: &str,
+        key: &IntegrityKey,
         now: Instant,
     ) -> InternalHandleStunReply {
         trace!("received STUN message {msg}");
@@ -646,8 +670,7 @@ impl TurnClientProtocol {
                 _ => InternalHandleStunReply::Ignored, // Other responses are not expected
             }
         } else if msg.has_class(stun_proto::types::message::MessageClass::Request) {
-            let Ok(_) = msg.validate_integrity(&MessageIntegrityCredentials::LongTerm(credentials))
-            else {
+            let Ok(_) = msg.validate_integrity_with_key(key) else {
                 trace!("incoming message failed integrity check");
                 return InternalHandleStunReply::Ignored;
             };
@@ -677,7 +700,9 @@ impl TurnClientProtocol {
 
     fn send_refresh(
         stun_agent: &mut StunAgent,
-        credentials: LongTermCredentials,
+        username: &str,
+        realm: &str,
+        key: &IntegrityKey,
         nonce: &str,
         lifetime: u32,
         now: Instant,
@@ -687,17 +712,14 @@ impl TurnClientProtocol {
         let transaction_id = refresh.transaction_id();
         let lt = Lifetime::new(lifetime);
         refresh.add_attribute(&lt).unwrap();
-        let username = Username::new(credentials.username()).unwrap();
+        let username = Username::new(username).unwrap();
         refresh.add_attribute(&username).unwrap();
-        let realm = Realm::new(credentials.realm()).unwrap();
+        let realm = Realm::new(realm).unwrap();
         refresh.add_attribute(&realm).unwrap();
         let nonce = Nonce::new(nonce).unwrap();
         refresh.add_attribute(&nonce).unwrap();
         refresh
-            .add_message_integrity(
-                &MessageIntegrityCredentials::LongTerm(credentials.clone()),
-                stun_proto::types::message::IntegrityAlgorithm::Sha1,
-            )
+            .add_message_integrity_with_key(key, IntegrityAlgorithm::Sha1)
             .unwrap();
         let remote_addr = stun_agent.remote_addr().unwrap();
         let refresh = refresh.finish();
@@ -707,7 +729,9 @@ impl TurnClientProtocol {
 
     fn send_create_permission_request(
         stun_agent: &mut StunAgent,
-        credentials: LongTermCredentials,
+        username: &str,
+        realm: &str,
+        key: &IntegrityKey,
         nonce: &str,
         peer_addr: IpAddr,
         now: Instant,
@@ -718,19 +742,14 @@ impl TurnClientProtocol {
 
         let xor_peer_address = XorPeerAddress::new(SocketAddr::new(peer_addr, 0), transaction_id);
         builder.add_attribute(&xor_peer_address).unwrap();
-        let username = Username::new(credentials.username()).unwrap();
+        let username = Username::new(username).unwrap();
         builder.add_attribute(&username).unwrap();
-        let realm = Realm::new(credentials.realm()).unwrap();
+        let realm = Realm::new(realm).unwrap();
         builder.add_attribute(&realm).unwrap();
         let nonce = Nonce::new(nonce).unwrap();
         builder.add_attribute(&nonce).unwrap();
         builder
-            .add_message_integrity(
-                &stun_proto::types::message::MessageIntegrityCredentials::LongTerm(
-                    credentials.clone(),
-                ),
-                stun_proto::types::message::IntegrityAlgorithm::Sha1,
-            )
+            .add_message_integrity_with_key(key, IntegrityAlgorithm::Sha1)
             .unwrap();
         let msg = builder.finish();
         let transmit = stun_agent
@@ -739,9 +758,12 @@ impl TurnClientProtocol {
         (transmit.into_owned(), transaction_id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn send_channel_bind_request(
         stun_agent: &mut StunAgent,
-        credentials: LongTermCredentials,
+        username: &str,
+        realm: &str,
+        key: &IntegrityKey,
         nonce: &str,
         id: u16,
         peer_addr: SocketAddr,
@@ -754,19 +776,14 @@ impl TurnClientProtocol {
         builder.add_attribute(&channel_no).unwrap();
         let xor_peer_address = XorPeerAddress::new(peer_addr, transaction_id);
         builder.add_attribute(&xor_peer_address).unwrap();
-        let username = Username::new(credentials.username()).unwrap();
+        let username = Username::new(username).unwrap();
         builder.add_attribute(&username).unwrap();
-        let realm = Realm::new(credentials.realm()).unwrap();
+        let realm = Realm::new(realm).unwrap();
         builder.add_attribute(&realm).unwrap();
         let nonce = Nonce::new(nonce).unwrap();
         builder.add_attribute(&nonce).unwrap();
         builder
-            .add_message_integrity(
-                &stun_proto::types::message::MessageIntegrityCredentials::LongTerm(
-                    credentials.clone(),
-                ),
-                stun_proto::types::message::IntegrityAlgorithm::Sha1,
-            )
+            .add_message_integrity_with_key(key, IntegrityAlgorithm::Sha1)
             .unwrap();
         let msg = builder.finish();
 
@@ -844,7 +861,7 @@ impl TurnClientProtocol {
             return TurnProtocolRecv::Ignored(data);
         };
         let remote_addr = self.remote_addr();
-        let (credentials, _nonce) = match &mut self.state {
+        let (key, realm, _nonce) = match &mut self.state {
             AuthState::Error | AuthState::Initial => return TurnProtocolRecv::Ignored(data),
             AuthState::InitialSent(transaction_id) => {
                 trace!("received STUN message {msg}");
@@ -889,19 +906,22 @@ impl TurnClientProtocol {
                             .credentials
                             .clone()
                             .into_long_term_credentials(realm.realm());
+                        let credentials = MessageIntegrityCredentials::LongTerm(credentials);
+                        let key = credentials.make_key();
                         let (transmit, transaction_id) = Self::send_authenticating_request(
                             &mut self.stun_agent,
-                            credentials.clone(),
+                            self.credentials.username(),
+                            realm.realm(),
+                            &key,
                             nonce.nonce(),
                             &self.families,
                             now,
                         );
-                        self.stun_agent.set_remote_credentials(
-                            MessageIntegrityCredentials::LongTerm(credentials.clone()),
-                        );
+                        self.stun_agent.set_remote_credentials(credentials);
                         self.pending_transmits.push_back(transmit.into_owned());
                         self.state = AuthState::Authenticating {
-                            credentials,
+                            key,
+                            realm: realm.realm().to_owned(),
                             nonce: nonce.nonce().to_string(),
                             transaction_id,
                         };
@@ -920,7 +940,8 @@ impl TurnClientProtocol {
                 return TurnProtocolRecv::Handled;
             }
             AuthState::Authenticating {
-                credentials,
+                key,
+                realm,
                 nonce,
                 transaction_id,
             } => {
@@ -931,14 +952,16 @@ impl TurnClientProtocol {
                     HandleStunReply::IncomingStun(_) => return TurnProtocolRecv::Ignored(data),
                     HandleStunReply::ValidatedStunResponse(msg) => msg,
                     HandleStunReply::UnvalidatedStunResponse(msg) => {
-                        let Some((new_nonce, _realm)) = Self::validate_stale_nonce(&msg) else {
+                        let Some((new_nonce, realm)) = Self::validate_stale_nonce(&msg) else {
                             return TurnProtocolRecv::Ignored(data);
                         };
                         stun_agent.remove_outstanding_request(*transaction_id);
                         let (transmit, new_transaction_id) = Self::send_authenticating_request(
                             stun_agent,
-                            credentials.clone(),
-                            nonce,
+                            self.credentials.username(),
+                            &realm,
+                            key,
+                            &new_nonce,
                             &self.families,
                             now,
                         );
@@ -983,14 +1006,17 @@ impl TurnClientProtocol {
                                 /* retry the request with a slightly different construction */
                                 let (transmit, transaction_id) = Self::send_authenticating_request(
                                     &mut self.stun_agent,
-                                    credentials.clone(),
+                                    self.credentials.username(),
+                                    realm,
+                                    key,
                                     nonce,
                                     &self.families,
                                     now,
                                 );
                                 self.pending_transmits.push_back(transmit.into_owned());
                                 self.state = AuthState::Authenticating {
-                                    credentials: credentials.clone(),
+                                    key: key.clone(),
+                                    realm: realm.clone(),
                                     nonce: nonce.clone(),
                                     transaction_id,
                                 };
@@ -1074,7 +1100,8 @@ impl TurnClientProtocol {
                             return TurnProtocolRecv::Handled;
                         };
                         self.state = AuthState::Authenticated {
-                            credentials: credentials.clone(),
+                            key: key.clone(),
+                            realm: realm.clone(),
                             nonce: nonce.clone(),
                         };
                         return TurnProtocolRecv::Handled;
@@ -1083,7 +1110,9 @@ impl TurnClientProtocol {
                 }
                 return TurnProtocolRecv::Ignored(data);
             }
-            AuthState::Authenticated { credentials, nonce } => (credentials.clone(), nonce),
+            AuthState::Authenticated { key, realm, nonce } => {
+                (key.clone(), realm.clone(), nonce.clone())
+            }
         };
 
         // FIXME: TCP allocations
@@ -1105,7 +1134,9 @@ impl TurnClientProtocol {
             msg,
             transport,
             remote_addr,
-            credentials,
+            &self.credentials,
+            &realm,
+            &key,
             now,
         ) {
             InternalHandleStunReply::Handled => TurnProtocolRecv::Handled,
@@ -1229,7 +1260,8 @@ impl TurnClientProtocol {
                 return TurnPollRet::WaitUntil(earliest_wait);
             }
             AuthState::Authenticating {
-                credentials: _,
+                key: _,
+                realm: _,
                 nonce: _,
                 transaction_id,
             } => {
@@ -1240,7 +1272,8 @@ impl TurnClientProtocol {
                 return TurnPollRet::WaitUntil(earliest_wait);
             }
             AuthState::Authenticated {
-                credentials: _,
+                key: _,
+                realm: _,
                 nonce: _,
             } => {
                 let mut remove_allocation_indices = vec![];
@@ -1430,11 +1463,12 @@ impl TurnClientProtocol {
             }
             AuthState::InitialSent(_transaction_id) => None,
             AuthState::Authenticating {
-                credentials: _,
+                key: _,
+                realm: _,
                 nonce: _,
                 transaction_id: _,
             } => None,
-            AuthState::Authenticated { credentials, nonce } => {
+            AuthState::Authenticated { key, realm, nonce } => {
                 for alloc in self.allocations.iter_mut() {
                     if alloc.expired || alloc.expires_at < now {
                         continue;
@@ -1442,7 +1476,9 @@ impl TurnClientProtocol {
                     if alloc.pending_refresh.is_none() && alloc.refresh_time() <= now {
                         let (transmit, transaction_id, lifetime) = Self::send_refresh(
                             &mut self.stun_agent,
-                            credentials.clone(),
+                            self.credentials.username(),
+                            realm,
+                            key,
                             nonce,
                             1800,
                             now,
@@ -1465,7 +1501,9 @@ impl TurnClientProtocol {
                             );
                             let (transmit, transaction_id) = Self::send_channel_bind_request(
                                 &mut self.stun_agent,
-                                credentials.clone(),
+                                self.credentials.username(),
+                                realm,
+                                key,
                                 nonce,
                                 channel.id,
                                 channel.peer_addr,
@@ -1488,7 +1526,9 @@ impl TurnClientProtocol {
                             );
                             let (transmit, transaction_id) = Self::send_create_permission_request(
                                 &mut self.stun_agent,
-                                credentials.clone(),
+                                self.credentials.username(),
+                                realm,
+                                key,
                                 nonce,
                                 permission.ip,
                                 now,
@@ -1514,25 +1554,20 @@ impl TurnClientProtocol {
         let mut builder = Message::builder_request(REFRESH, MessageWriteVec::new());
         let transaction_id = builder.transaction_id();
 
-        let AuthState::Authenticated { credentials, nonce } = &self.state else {
+        let AuthState::Authenticated { key, realm, nonce } = &self.state else {
             return Err(DeleteError::NoAllocation);
         };
 
         let lifetime = Lifetime::new(0);
         builder.add_attribute(&lifetime).unwrap();
-        let username = Username::new(credentials.username()).unwrap();
+        let username = Username::new(self.credentials.username()).unwrap();
         builder.add_attribute(&username).unwrap();
-        let realm = Realm::new(credentials.realm()).unwrap();
+        let realm = Realm::new(realm).unwrap();
         builder.add_attribute(&realm).unwrap();
         let nonce = Nonce::new(nonce).unwrap();
         builder.add_attribute(&nonce).unwrap();
         builder
-            .add_message_integrity(
-                &stun_proto::types::message::MessageIntegrityCredentials::LongTerm(
-                    credentials.clone(),
-                ),
-                stun_proto::types::message::IntegrityAlgorithm::Sha1,
-            )
+            .add_message_integrity_with_key(key, IntegrityAlgorithm::Sha1)
             .unwrap();
         let msg = builder.finish();
 
@@ -1587,7 +1622,7 @@ impl TurnClientProtocol {
         {
             return Err(CreatePermissionError::AlreadyExists);
         }
-        let AuthState::Authenticated { credentials, nonce } = &self.state else {
+        let AuthState::Authenticated { key, realm, nonce } = &self.state else {
             warn!("Not authenticated yet: {:?}", self.state);
             return Err(CreatePermissionError::NoAllocation);
         };
@@ -1600,7 +1635,9 @@ impl TurnClientProtocol {
 
         let (transmit, transaction_id) = Self::send_create_permission_request(
             &mut self.stun_agent,
-            credentials.clone(),
+            self.credentials.username(),
+            realm,
+            key,
             nonce,
             peer_addr,
             now,
@@ -1641,7 +1678,7 @@ impl TurnClientProtocol {
             return Err(BindChannelError::AlreadyExists);
         }
 
-        let AuthState::Authenticated { credentials, nonce } = &self.state else {
+        let AuthState::Authenticated { key, realm, nonce } = &self.state else {
             return Err(BindChannelError::NoAllocation);
         };
 
@@ -1669,7 +1706,9 @@ impl TurnClientProtocol {
 
         let (transmit, transaction_id) = Self::send_channel_bind_request(
             &mut self.stun_agent,
-            credentials.clone(),
+            self.credentials.username(),
+            realm,
+            key,
             nonce,
             channel_id,
             peer_addr,
@@ -1714,12 +1753,14 @@ enum AuthState {
     Initial,
     InitialSent(TransactionId),
     Authenticating {
-        credentials: LongTermCredentials,
+        key: IntegrityKey,
+        realm: String,
         nonce: String,
         transaction_id: TransactionId,
     },
     Authenticated {
-        credentials: LongTermCredentials,
+        key: IntegrityKey,
+        realm: String,
         nonce: String,
     },
     Error,

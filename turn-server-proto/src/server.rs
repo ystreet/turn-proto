@@ -8,6 +8,7 @@
 
 //! A TURN server that can handle UDP and TCP connections.
 
+use alloc::borrow::ToOwned;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::vec;
@@ -41,8 +42,8 @@ use turn_types::attribute::{
     ChannelNumber, Lifetime, RequestedTransport, XorPeerAddress, XorRelayedAddress,
 };
 use turn_types::message::{ALLOCATE, CHANNEL_BIND, DATA, REFRESH, SEND};
-use turn_types::stun::message::IntegrityAlgorithm;
-use turn_types::{AddressFamily, TurnCredentials};
+use turn_types::stun::message::{IntegrityAlgorithm, IntegrityKey};
+use turn_types::AddressFamily;
 
 use tracing::{debug, error, info, trace, warn};
 
@@ -69,7 +70,7 @@ pub struct TurnServer {
     pending_allocates: VecDeque<PendingClient>,
 
     // username -> password mapping.
-    users: BTreeMap<String, String>,
+    users: BTreeMap<String, IntegrityKey>,
     nonce_expiry_duration: Duration,
 }
 
@@ -183,7 +184,7 @@ impl TurnServer {
         from: SocketAddr,
         to: SocketAddr,
         now: Instant,
-    ) -> Result<LongTermCredentials, MessageWriteVec> {
+    ) -> Result<&IntegrityKey, MessageWriteVec> {
         let integrity = msg.attribute::<MessageIntegrity>().ok();
         // TODO: check for SHA256 integrity
         if integrity.is_none() {
@@ -240,15 +241,9 @@ impl TurnServer {
         //      an error code of 401 (Unauthorized).  It MUST include REALM and
         //      NONCE attributes and SHOULD NOT include the USERNAME or MESSAGE-
         //      INTEGRITY attribute.
-        let password = self.users.get(username.username());
-        let credentials = TurnCredentials::new(
-            username.username(),
-            password.map_or("", |pass| pass.as_str()),
-        )
-        .into_long_term_credentials(&self.realm);
-        if password.map_or(true, |_password| {
-            msg.validate_integrity(&MessageIntegrityCredentials::LongTerm(credentials.clone()))
-                .is_err()
+        let password_key = self.users.get(username.username());
+        if password_key.map_or(true, |password_key| {
+            msg.validate_integrity_with_key(password_key).is_err()
         }) {
             let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::UNAUTHORIZED).build().unwrap();
@@ -259,6 +254,7 @@ impl TurnServer {
             builder.add_attribute(&nonce).unwrap();
             return Err(builder);
         }
+        let password_key = password_key.unwrap();
 
         // All requests after the initial Allocate must use the same username as
         // that used to create the allocation, to prevent attackers from
@@ -269,23 +265,20 @@ impl TurnServer {
         // not use the same username as used to create the allocation, then the
         // request MUST be rejected with a 441 (Wrong Credentials) error.
         if let Some(client) = self.client_from_5tuple(ttype, to, from) {
-            if client.credentials.username() != username.username() {
+            if client.username != username.username() {
                 let mut builder = Message::builder_error(msg, MessageWriteVec::new());
                 let error = ErrorCode::builder(ErrorCode::WRONG_CREDENTIALS)
                     .build()
                     .unwrap();
                 builder.add_attribute(&error).unwrap();
                 builder
-                    .add_message_integrity(
-                        &MessageIntegrityCredentials::LongTerm(client.credentials.clone()),
-                        stun_proto::types::message::IntegrityAlgorithm::Sha1,
-                    )
+                    .add_message_integrity_with_key(password_key, IntegrityAlgorithm::Sha1)
                     .unwrap();
                 return Err(builder);
             }
         }
 
-        Ok(credentials)
+        Ok(password_key)
     }
 
     fn server_error(msg: &Message<'_>) -> MessageWriteVec {
@@ -303,22 +296,22 @@ impl TurnServer {
         builder
     }
 
-    fn bad_request_signed(msg: &Message<'_>, credentials: LongTermCredentials) -> MessageWriteVec {
+    fn bad_request_signed(msg: &Message<'_>, key: &IntegrityKey) -> MessageWriteVec {
         let mut builder = Self::bad_request(msg);
         builder
-            .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+            .add_message_integrity_with_key(key, IntegrityAlgorithm::Sha1)
             .unwrap();
         builder
     }
 
-    fn allocation_mismatch(msg: &Message<'_>, credentials: LongTermCredentials) -> MessageWriteVec {
+    fn allocation_mismatch(msg: &Message<'_>, key: &IntegrityKey) -> MessageWriteVec {
         let mut response = Message::builder_error(msg, MessageWriteVec::new());
         let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
             .build()
             .unwrap();
         response.add_attribute(&error).unwrap();
         response
-            .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+            .add_message_integrity_with_key(key, IntegrityAlgorithm::Sha1)
             .unwrap();
         response.add_fingerprint().unwrap();
         response
@@ -361,11 +354,11 @@ impl TurnServer {
         to: SocketAddr,
         now: Instant,
     ) -> Result<(), MessageWriteVec> {
-        let credentials = self.validate_stun(msg, ttype, from, to, now)?;
+        let key = self.validate_stun(msg, ttype, from, to, now)?.clone();
         let mut address_families = smallvec::SmallVec::<[AddressFamily; 2]>::new();
 
         if let Some(_client) = self.mut_client_from_5tuple(ttype, to, from) {
-            return Err(Self::allocation_mismatch(msg, credentials));
+            return Err(Self::allocation_mismatch(msg, &key));
         };
 
         if let Some(mut err) = Message::check_attribute_types(
@@ -388,7 +381,7 @@ impl TurnServer {
             ],
             MessageWriteVec::new(),
         ) {
-            err.add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+            err.add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
                 .unwrap();
             return Err(err);
         }
@@ -407,10 +400,7 @@ impl TurnServer {
                 .unwrap();
             builder.add_attribute(&error).unwrap();
             builder
-                .add_message_integrity(
-                    &MessageIntegrityCredentials::LongTerm(credentials),
-                    stun_proto::types::message::IntegrityAlgorithm::Sha1,
-                )
+                .add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
                 .unwrap();
             return Err(builder);
         }
@@ -441,7 +431,7 @@ impl TurnServer {
                     requested_address_family.is_ok(),
                     even_port.is_ok(),
                 );
-                return Err(Self::bad_request_signed(msg, credentials));
+                return Err(Self::bad_request_signed(msg, &key));
             }
             address_families.push(AddressFamily::IPV4);
             address_families.push(additional.family());
@@ -450,7 +440,7 @@ impl TurnServer {
         if let Ok(requested) = requested_address_family {
             if reservation_token.is_ok() {
                 debug!("RequestedAddressFamily with ReservationToken -> Bad Request");
-                return Err(Self::bad_request_signed(msg, credentials));
+                return Err(Self::bad_request_signed(msg, &key));
             }
             address_families.push(requested.family());
         } else if address_families.is_empty() {
@@ -470,7 +460,7 @@ impl TurnServer {
              */
             if even_port.is_ok() {
                 debug!("ReservationToken with EvenPort -> Bad Request");
-                return Err(Self::bad_request_signed(msg, credentials));
+                return Err(Self::bad_request_signed(msg, &key));
             }
 
             // TODO: further RESERVATION-TOKEN handling
@@ -487,7 +477,8 @@ impl TurnServer {
             remote_addr: from,
             local_addr: to,
             allocations: vec![],
-            credentials,
+            username: username.unwrap(),
+            key,
         };
         debug!("have new pending ALLOCATE from client {ttype} from {from} to {to}");
 
@@ -511,10 +502,10 @@ impl TurnServer {
         to: SocketAddr,
         now: Instant,
     ) -> Result<Transmit<Vec<u8>>, MessageWriteVec> {
-        let credentials = self.validate_stun(msg, ttype, from, to, now)?;
+        let key = self.validate_stun(msg, ttype, from, to, now)?.clone();
 
         let Some(client) = self.mut_client_from_5tuple(ttype, to, from) else {
-            return Err(Self::allocation_mismatch(msg, credentials));
+            return Err(Self::allocation_mismatch(msg, &key));
         };
 
         if let Some(mut err) = Message::check_attribute_types(
@@ -531,7 +522,7 @@ impl TurnServer {
             &[Realm::TYPE, Nonce::TYPE, Username::TYPE],
             MessageWriteVec::new(),
         ) {
-            err.add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+            err.add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
                 .unwrap();
             return Err(err);
         }
@@ -547,8 +538,7 @@ impl TurnServer {
             .map(|lt| lt.seconds())
             .unwrap_or(600);
         let mut modified = false;
-        let credentials = if request_lifetime == 0 {
-            let credentials = client.credentials.clone();
+        if request_lifetime == 0 {
             if let Some(family) = requested_family {
                 client.allocations.retain(|allocation| {
                     if (family == AddressFamily::IPV4 && allocation.addr.is_ipv4())
@@ -567,7 +557,6 @@ impl TurnServer {
                 self.remove_client_by_5tuple(ttype, to, from);
                 modified = true;
             }
-            credentials
         } else {
             for allocation in client.allocations.iter_mut() {
                 if requested_family.map_or(true, |family| {
@@ -578,8 +567,7 @@ impl TurnServer {
                     allocation.expires_at = now + Duration::from_secs(request_lifetime as u64)
                 }
             }
-            client.credentials.clone()
-        };
+        }
 
         let mut builder = if modified {
             let mut builder = Message::builder_success(msg, MessageWriteVec::new());
@@ -598,10 +586,7 @@ impl TurnServer {
             builder
         };
         builder
-            .add_message_integrity(
-                &MessageIntegrityCredentials::LongTerm(credentials),
-                stun_proto::types::message::IntegrityAlgorithm::Sha1,
-            )
+            .add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
             .unwrap();
         let response = builder.finish();
         let Ok(transmit) = self.stun.send(response, from, now) else {
@@ -622,10 +607,10 @@ impl TurnServer {
         to: SocketAddr,
         now: Instant,
     ) -> Result<Transmit<Vec<u8>>, MessageWriteVec> {
-        let credentials = self.validate_stun(msg, ttype, from, to, now)?;
+        let key = self.validate_stun(msg, ttype, from, to, now)?.clone();
 
         let Some(client) = self.mut_client_from_5tuple(ttype, to, from) else {
-            return Err(Self::allocation_mismatch(msg, credentials));
+            return Err(Self::allocation_mismatch(msg, &key));
         };
 
         if let Some(mut err) = Message::check_attribute_types(
@@ -646,7 +631,7 @@ impl TurnServer {
             ],
             MessageWriteVec::new(),
         ) {
-            err.add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+            err.add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
                 .unwrap();
             return Err(err);
         }
@@ -658,7 +643,7 @@ impl TurnServer {
             .filter(|(_offset, a)| a.get_type() == XorPeerAddress::TYPE)
         {
             let Ok(peer_addr) = XorPeerAddress::from_raw(peer_addr) else {
-                return Err(Self::bad_request_signed(msg, client.credentials.clone()));
+                return Err(Self::bad_request_signed(msg, &key));
             };
             at_least_one_peer_addr = true;
             let peer_addr = peer_addr.addr(msg.transaction_id());
@@ -677,7 +662,7 @@ impl TurnServer {
                     )
                     .unwrap();
                 response
-                    .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                    .add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
                     .unwrap();
                 response.add_fingerprint().unwrap();
                 return Err(response);
@@ -686,7 +671,7 @@ impl TurnServer {
             if now > alloc.expires_at {
                 trace!("allocation has expired");
                 // allocation has expired
-                return Err(Self::allocation_mismatch(msg, credentials));
+                return Err(Self::allocation_mismatch(msg, &key));
             }
 
             // TODO: support TCP allocations
@@ -707,15 +692,12 @@ impl TurnServer {
         }
 
         if !at_least_one_peer_addr {
-            return Err(Self::bad_request_signed(msg, client.credentials.clone()));
+            return Err(Self::bad_request_signed(msg, &key));
         }
 
         let mut builder = Message::builder_success(msg, MessageWriteVec::new());
         builder
-            .add_message_integrity(
-                &MessageIntegrityCredentials::LongTerm(credentials),
-                stun_proto::types::message::IntegrityAlgorithm::Sha1,
-            )
+            .add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
             .unwrap();
         let response = builder.finish();
 
@@ -739,10 +721,10 @@ impl TurnServer {
         to: SocketAddr,
         now: Instant,
     ) -> Result<Transmit<Vec<u8>>, MessageWriteVec> {
-        let credentials = self.validate_stun(msg, ttype, from, to, now)?;
+        let key = self.validate_stun(msg, ttype, from, to, now)?.clone();
 
         let Some(client) = self.mut_client_from_5tuple(ttype, to, from) else {
-            return Err(Self::allocation_mismatch(msg, credentials));
+            return Err(Self::allocation_mismatch(msg, &key));
         };
 
         if let Some(mut err) = Message::check_attribute_types(
@@ -765,7 +747,7 @@ impl TurnServer {
             ],
             MessageWriteVec::new(),
         ) {
-            err.add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+            err.add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
                 .unwrap();
             return Err(err);
         }
@@ -776,7 +758,7 @@ impl TurnServer {
             .map(|peer_addr| peer_addr.addr(msg.transaction_id()));
         let Some(peer_addr) = peer_addr else {
             trace!("No peer address");
-            return Err(Self::bad_request_signed(msg, credentials));
+            return Err(Self::bad_request_signed(msg, &key));
         };
 
         let Some(alloc) = client
@@ -793,7 +775,7 @@ impl TurnServer {
                 )
                 .unwrap();
             response
-                .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                .add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
                 .unwrap();
             response.add_fingerprint().unwrap();
             return Err(response);
@@ -802,7 +784,7 @@ impl TurnServer {
         if now > alloc.expires_at {
             trace!("allocation has expired");
             // allocation has expired
-            return Err(Self::allocation_mismatch(msg, credentials));
+            return Err(Self::allocation_mismatch(msg, &key));
         }
 
         let mut existing = alloc.channels.iter_mut().find(|channel| {
@@ -815,21 +797,21 @@ impl TurnServer {
             .map(|channel| channel.channel());
         let Some(channel_no) = channel_no else {
             debug!("Bad request: no requested channel id");
-            return Err(Self::bad_request_signed(msg, credentials));
+            return Err(Self::bad_request_signed(msg, &key));
         };
 
         // RFC8656 reduces this range to 0x4000..=0x4fff but we keep the RFC5766 range for
         // backwards compatibility
         if !(0x4000..=0x7fff).contains(&channel_no) {
             trace!("Channel id out of range");
-            return Err(Self::bad_request_signed(msg, credentials));
+            return Err(Self::bad_request_signed(msg, &key));
         }
         if existing
             .as_ref()
             .is_some_and(|existing| existing.id != channel_no)
         {
             trace!("channel peer address does not match channel ID");
-            return Err(Self::bad_request_signed(msg, credentials));
+            return Err(Self::bad_request_signed(msg, &key));
         }
 
         if let Some(existing) = existing.as_mut() {
@@ -859,10 +841,7 @@ impl TurnServer {
 
         let mut builder = Message::builder_success(msg, MessageWriteVec::new());
         builder
-            .add_message_integrity(
-                &MessageIntegrityCredentials::LongTerm(credentials),
-                stun_proto::types::message::IntegrityAlgorithm::Sha1,
-            )
+            .add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
             .unwrap();
         let response = builder.finish();
 
@@ -982,12 +961,12 @@ impl TurnServer {
                     .handle_stun_channel_bind(msg, ttype, from, to, now)
                     .map(|t| Some(InternalHandleStun::Transmit(t))),
                 _ => {
-                    let credentials = self.validate_stun(msg, ttype, from, to, now)?;
+                    let key = self.validate_stun(msg, ttype, from, to, now)?.clone();
                     let Some(_client) = self.mut_client_from_5tuple(ttype, to, from) else {
-                        return Err(Self::allocation_mismatch(msg, credentials));
+                        return Err(Self::allocation_mismatch(msg, &key));
                     };
 
-                    Err(Self::bad_request_signed(msg, credentials))
+                    Err(Self::bad_request_signed(msg, &key))
                 }
             }
         } else if msg.has_class(stun_proto::types::message::MessageClass::Indication) {
@@ -1087,7 +1066,13 @@ impl TurnServer {
 
 impl TurnServerApi for TurnServer {
     fn add_user(&mut self, username: String, password: String) {
-        self.users.insert(username, password);
+        let key = MessageIntegrityCredentials::LongTerm(LongTermCredentials::new(
+            username.to_owned(),
+            password.to_owned(),
+            self.realm.clone(),
+        ))
+        .make_key();
+        self.users.insert(username, key);
     }
 
     fn listen_address(&self) -> SocketAddr {
@@ -1541,10 +1526,7 @@ impl TurnServerApi for TurnServer {
             }
         }
         builder
-            .add_message_integrity(
-                &MessageIntegrityCredentials::LongTerm(pending.client.credentials.clone()),
-                stun_proto::types::message::IntegrityAlgorithm::Sha1,
-            )
+            .add_message_integrity_with_key(&pending.client.key, IntegrityAlgorithm::Sha1)
             .unwrap();
         let msg = builder.finish();
 
@@ -1565,7 +1547,8 @@ struct Client {
     remote_addr: SocketAddr,
 
     allocations: Vec<Allocation>,
-    credentials: LongTermCredentials,
+    username: String,
+    key: IntegrityKey,
 }
 
 #[derive(Debug)]
@@ -1666,6 +1649,7 @@ mod tests {
     use turn_types::{
         prelude::DelayedTransmitBuild,
         stun::message::{IntegrityAlgorithm, Method},
+        TurnCredentials,
     };
 
     use super::*;
