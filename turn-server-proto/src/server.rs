@@ -1045,20 +1045,23 @@ impl TurnServer {
         ttype: TransportType,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
-    ) -> Option<(&Client, &Allocation)> {
+    ) -> Option<(&Client, &Allocation, &Permission)> {
         self.clients.iter().find_map(|client| {
             client
                 .allocations
                 .iter()
-                .find(|allocation| {
-                    allocation.ttype == ttype
-                        && allocation.addr == local_addr
-                        && allocation
+                .find_map(|allocation| {
+                    if allocation.ttype == ttype && allocation.addr == local_addr {
+                        allocation
                             .permissions
                             .iter()
-                            .any(|permission| permission.addr == remote_addr.ip())
+                            .find(|permission| permission.addr == remote_addr.ip())
+                            .map(|permission| (allocation, permission))
+                    } else {
+                        None
+                    }
                 })
-                .map(|allocation| (client, allocation))
+                .map(|(allocation, permission)| (client, allocation, permission))
         })
     }
 }
@@ -1171,7 +1174,7 @@ impl TurnServerApi for TurnServer {
         let source = SocketAddr::new(source, udp.get_source());
         let destination = SocketAddr::new(destination, udp.get_destination());
         trace!("clients: {:?}", self.clients);
-        let (client, allocation) =
+        let (client, allocation, _permission) =
             self.allocation_from_public_5tuple(TransportType::Udp, source, destination)?;
         if allocation.expires_at < now {
             return None;
@@ -1209,16 +1212,11 @@ impl TurnServerApi for TurnServer {
         now: Instant,
     ) -> Option<TransmitBuild<DelayedMessageOrChannelSend<T>>> {
         trace!("executing at {now:?}");
-        if let Some((client, allocation)) =
+        if let Some((client, allocation, permission)) =
             self.allocation_from_public_5tuple(transmit.transport, transmit.to, transmit.from)
         {
             // A packet from the relayed address needs to be sent to the client that set up
             // the allocation.
-
-            // SAFETY: permission existence is checked by `allocation_from_public_5tuple()`
-            let permission = allocation
-                .permission_from_5tuple(transmit.transport, transmit.to, transmit.from)
-                .unwrap();
             if permission.expires_at < now {
                 trace!(
                     "permission for {} expired {:?} ago",
