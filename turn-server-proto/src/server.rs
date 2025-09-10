@@ -21,7 +21,8 @@ use turn_types::transmit::{DelayedChannel, DelayedMessage, TransmitBuild};
 
 use stun_proto::agent::{StunAgent, Transmit};
 use stun_proto::types::attribute::{
-    ErrorCode, Fingerprint, MessageIntegrity, Nonce, Realm, Username, XorMappedAddress,
+    AttributeType, ErrorCode, Fingerprint, MessageIntegrity, Nonce, Realm, Username,
+    XorMappedAddress,
 };
 use stun_proto::types::message::{
     LongTermCredentials, Message, MessageClass, MessageIntegrityCredentials, MessageType,
@@ -185,7 +186,21 @@ impl TurnServer {
         to: SocketAddr,
         now: Instant,
     ) -> Result<&IntegrityKey, MessageWriteVec> {
-        let integrity = msg.attribute::<MessageIntegrity>().ok();
+        let mut integrity = None;
+        let mut username = None;
+        let mut realm = None;
+        let mut nonce = None;
+
+        for (_offset, attr) in msg.iter_attributes() {
+            match attr.get_type() {
+                MessageIntegrity::TYPE => integrity = MessageIntegrity::from_raw(attr).ok(),
+                Username::TYPE => username = Username::from_raw(attr).ok(),
+                Realm::TYPE => realm = Realm::from_raw(attr).ok(),
+                Nonce::TYPE => nonce = Nonce::from_raw(attr).ok(),
+                _ => (),
+            }
+        }
+
         // TODO: check for SHA256 integrity
         if integrity.is_none() {
             //   o  If the message does not contain a MESSAGE-INTEGRITY attribute, the
@@ -212,9 +227,6 @@ impl TurnServer {
         //      generate an error response with an error code of 400 (Bad
         //      Request).  This response SHOULD NOT include a USERNAME, NONCE,
         //      REALM, or MESSAGE-INTEGRITY attribute.
-        let username = msg.attribute::<Username>().ok();
-        let realm = msg.attribute::<Realm>().ok();
-        let nonce = msg.attribute::<Nonce>().ok();
         let Some(((username, _realm), nonce)) = username.zip(realm).zip(nonce) else {
             trace!("bad request due to missing username, realm, nonce");
             return Err(Self::bad_request(msg));
@@ -361,33 +373,62 @@ impl TurnServer {
             return Err(Self::allocation_mismatch(msg, &key));
         };
 
-        if let Some(mut err) = Message::check_attribute_types(
-            msg,
-            &[
-                Username::TYPE,
-                MessageIntegrity::TYPE,
-                Lifetime::TYPE,
-                Realm::TYPE,
-                Nonce::TYPE,
-                RequestedAddressFamily::TYPE,
-                RequestedTransport::TYPE,
-                // TODO: EVEN-PORT, RESERVATION-TOKEN, DONT-FRAGMENT
-            ],
-            &[
-                Realm::TYPE,
-                Nonce::TYPE,
-                Username::TYPE,
-                RequestedTransport::TYPE,
-            ],
-            MessageWriteVec::new(),
-        ) {
+        let mut requested_transport = None;
+        let mut lifetime = None;
+        let mut reservation_token = None;
+        let mut even_port = None;
+        let mut requested_address_family = None;
+        let mut additional_address_family = None;
+        let mut username = None;
+
+        let mut unknown_attributes = smallvec::SmallVec::<[AttributeType; 4]>::default();
+        for (_offset, attr) in msg.iter_attributes() {
+            match attr.get_type() {
+                // checked by validate_stun()
+                Realm::TYPE | Nonce::TYPE | MessageIntegrity::TYPE => (),
+                Username::TYPE => {
+                    username = Username::from_raw(attr)
+                        .ok()
+                        .map(|u| u.username().to_owned())
+                }
+                RequestedTransport::TYPE => {
+                    requested_transport = RequestedTransport::from_raw(attr).ok()
+                }
+                Lifetime::TYPE => lifetime = Lifetime::from_raw(attr).ok(),
+                ReservationToken::TYPE => reservation_token = Some(attr),
+                EvenPort::TYPE => even_port = Some(attr),
+                RequestedAddressFamily::TYPE => {
+                    if additional_address_family.is_some() {
+                        return Err(Self::bad_request_signed(msg, &key));
+                    } else {
+                        requested_address_family = Some(attr)
+                    }
+                }
+                AdditionalAddressFamily::TYPE => {
+                    if requested_address_family.is_some() {
+                        return Err(Self::bad_request_signed(msg, &key));
+                    } else {
+                        additional_address_family = Some(attr)
+                    }
+                }
+                atype => {
+                    if atype.comprehension_required() {
+                        unknown_attributes.push(atype);
+                    }
+                }
+            }
+        }
+        if !unknown_attributes.is_empty() {
+            let mut err =
+                Message::unknown_attributes(msg, &unknown_attributes, MessageWriteVec::new());
             err.add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
                 .unwrap();
             return Err(err);
         }
 
-        // checked by Message::check_attribute_types()
-        let requested_transport = msg.attribute::<RequestedTransport>().unwrap();
+        let Some(requested_transport) = requested_transport else {
+            return Err(Self::bad_request_signed(msg, &key));
+        };
 
         if requested_transport.protocol() != RequestedTransport::UDP {
             debug!(
@@ -405,12 +446,10 @@ impl TurnServer {
             return Err(builder);
         }
 
-        let reservation_token = msg.attribute::<ReservationToken>();
-        let even_port = msg.attribute::<EvenPort>();
-        let requested_address_family = msg.attribute::<RequestedAddressFamily>();
-        let additional_address_family = msg.attribute::<AdditionalAddressFamily>();
-
-        if let Ok(additional) = additional_address_family {
+        if let Some(additional) = additional_address_family {
+            let Ok(additional) = AdditionalAddressFamily::from_raw(additional) else {
+                return Err(Self::bad_request_signed(msg, &key));
+            };
             /* The server checks if the request contains both
              * REQUESTED-ADDRESS-FAMILY and ADDITIONAL-ADDRESS-FAMILY attributes. If yes,
              * then the server rejects the request with a 400 (Bad Request) error.
@@ -419,17 +458,17 @@ impl TurnServer {
              * attribute. If yes, and the attribute value is 0x01 (IPv4 address family),
              * then the server rejects the request with a 400 (Bad Request) error.
              */
-            if requested_address_family.is_ok()
+            if requested_address_family.is_some()
                 || additional.family() == AddressFamily::IPV4
-                || reservation_token.is_ok()
-                || even_port.is_ok()
+                || reservation_token.is_some()
+                || even_port.is_some()
             {
                 debug!(
                     "AdditionalAddressFamily with either {} == IPV4, ReservationToken {}, RequestedAddressFamily {}, or EvenPort {}. Bad Request",
                     additional.family(),
-                    reservation_token.is_ok(),
-                    requested_address_family.is_ok(),
-                    even_port.is_ok(),
+                    reservation_token.is_some(),
+                    requested_address_family.is_some(),
+                    even_port.is_some(),
                 );
                 return Err(Self::bad_request_signed(msg, &key));
             }
@@ -437,8 +476,11 @@ impl TurnServer {
             address_families.push(additional.family());
         }
 
-        if let Ok(requested) = requested_address_family {
-            if reservation_token.is_ok() {
+        if let Some(requested) = requested_address_family {
+            let Ok(requested) = RequestedAddressFamily::from_raw(requested) else {
+                return Err(Self::bad_request_signed(msg, &key));
+            };
+            if reservation_token.is_some() {
                 debug!("RequestedAddressFamily with ReservationToken -> Bad Request");
                 return Err(Self::bad_request_signed(msg, &key));
             }
@@ -447,7 +489,7 @@ impl TurnServer {
             address_families.push(AddressFamily::IPV4);
         }
 
-        if let Ok(_reservation_token) = msg.attribute::<ReservationToken>() {
+        if let Some(_reservation_token) = reservation_token {
             /* The server checks if the request contains a RESERVATION-TOKEN
              * attribute. If yes, and the request also contains an EVEN-PORT or
              * REQUESTED-ADDRESS-FAMILY or ADDITIONAL-ADDRESS-FAMILY attribute,
@@ -458,14 +500,13 @@ impl TurnServer {
              * not valid for some reason, the server rejects the request with a
              * 508 (Insufficient Capacity) error.
              */
-            if even_port.is_ok() {
+            if even_port.is_some() {
                 debug!("ReservationToken with EvenPort -> Bad Request");
                 return Err(Self::bad_request_signed(msg, &key));
             }
 
             // TODO: further RESERVATION-TOKEN handling
         }
-        let lifetime = msg.attribute::<Lifetime>().ok();
 
         // TODO: DONT-FRAGMENT
         // TODO: EVEN-PORT
@@ -508,35 +549,46 @@ impl TurnServer {
             return Err(Self::allocation_mismatch(msg, &key));
         };
 
-        if let Some(mut err) = Message::check_attribute_types(
-            msg,
-            &[
-                Username::TYPE,
-                MessageIntegrity::TYPE,
-                Lifetime::TYPE,
-                Realm::TYPE,
-                Nonce::TYPE,
-                RequestedAddressFamily::TYPE,
-                // TODO: EVEN-PORT, RESERVATION-TOKEN, DONT-FRAGMENT
-            ],
-            &[Realm::TYPE, Nonce::TYPE, Username::TYPE],
-            MessageWriteVec::new(),
-        ) {
+        let mut request_lifetime = None;
+        let mut requested_family = None;
+
+        let mut unknown_attributes = smallvec::SmallVec::<[AttributeType; 4]>::default();
+        for (_offset, attr) in msg.iter_attributes() {
+            match attr.get_type() {
+                // handled by validate_stun
+                Username::TYPE | Realm::TYPE | Nonce::TYPE | MessageIntegrity::TYPE => (),
+                Lifetime::TYPE => {
+                    request_lifetime = Lifetime::from_raw(attr).ok().map(|lt| lt.seconds())
+                }
+                RequestedAddressFamily::TYPE => {
+                    requested_family = RequestedAddressFamily::from_raw(attr)
+                        .ok()
+                        .map(|r| r.family())
+                }
+                atype => {
+                    if atype.comprehension_required() {
+                        unknown_attributes.push(atype);
+                    }
+                }
+            }
+        }
+        if !unknown_attributes.is_empty() {
+            let mut err =
+                Message::unknown_attributes(msg, &unknown_attributes, MessageWriteVec::new());
             err.add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
                 .unwrap();
             return Err(err);
         }
 
-        let requested_family = msg
-            .attribute::<RequestedAddressFamily>()
-            .ok()
-            .map(|requested| requested.family());
-
         // TODO: proper lifetime handling
-        let request_lifetime = msg
-            .attribute::<Lifetime>()
-            .map(|lt| lt.seconds())
-            .unwrap_or(600);
+        let mut request_lifetime =
+            request_lifetime.unwrap_or(DEFAULT_ALLOCATION_DURATION.as_secs() as u32);
+        if request_lifetime > 0 {
+            request_lifetime = request_lifetime.clamp(
+                DEFAULT_ALLOCATION_DURATION.as_secs() as u32,
+                MAXIMUM_ALLOCATION_DURATION.as_secs() as u32,
+            );
+        }
         let mut modified = false;
         if request_lifetime == 0 {
             if let Some(family) = requested_family {
@@ -613,41 +665,37 @@ impl TurnServer {
             return Err(Self::allocation_mismatch(msg, &key));
         };
 
-        if let Some(mut err) = Message::check_attribute_types(
-            msg,
-            &[
-                Username::TYPE,
-                MessageIntegrity::TYPE,
-                Realm::TYPE,
-                Nonce::TYPE,
-                XorPeerAddress::TYPE,
-                // TODO: EVEN-PORT, RESERVATION-TOKEN, DONT-FRAGMENT
-            ],
-            &[
-                Realm::TYPE,
-                Nonce::TYPE,
-                Username::TYPE,
-                XorPeerAddress::TYPE,
-            ],
-            MessageWriteVec::new(),
-        ) {
+        let mut peer_addresses = smallvec::SmallVec::<[SocketAddr; 4]>::default();
+        let mut unknown_attributes = smallvec::SmallVec::<[AttributeType; 4]>::default();
+        for (_offset, attr) in msg.iter_attributes() {
+            match attr.get_type() {
+                // checked by validate_stun()
+                Username::TYPE | Realm::TYPE | Nonce::TYPE | MessageIntegrity::TYPE => (),
+                XorPeerAddress::TYPE => {
+                    let Ok(xor_peer_addr) = XorPeerAddress::from_raw(attr) else {
+                        return Err(Self::bad_request_signed(msg, &key));
+                    };
+                    peer_addresses.push(xor_peer_addr.addr(msg.transaction_id()));
+                }
+                atype => {
+                    if atype.comprehension_required() {
+                        unknown_attributes.push(atype);
+                    }
+                }
+            }
+        }
+        if !unknown_attributes.is_empty() {
+            let mut err =
+                Message::unknown_attributes(msg, &unknown_attributes, MessageWriteVec::new());
             err.add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
                 .unwrap();
             return Err(err);
         }
+        if peer_addresses.is_empty() {
+            return Err(Self::bad_request_signed(msg, &key));
+        }
 
-        let mut peer_addresses = vec![];
-        let mut at_least_one_peer_addr = false;
-        for (_offset, peer_addr) in msg
-            .iter_attributes()
-            .filter(|(_offset, a)| a.get_type() == XorPeerAddress::TYPE)
-        {
-            let Ok(peer_addr) = XorPeerAddress::from_raw(peer_addr) else {
-                return Err(Self::bad_request_signed(msg, &key));
-            };
-            at_least_one_peer_addr = true;
-            let peer_addr = peer_addr.addr(msg.transaction_id());
-
+        for peer_addr in peer_addresses.iter() {
             let Some(alloc) = client
                 .allocations
                 .iter_mut()
@@ -688,11 +736,6 @@ impl TurnServer {
                     expires_at: now + PERMISSION_DURATION,
                 });
             }
-            peer_addresses.push(peer_addr.ip());
-        }
-
-        if !at_least_one_peer_addr {
-            return Err(Self::bad_request_signed(msg, &key));
         }
 
         let mut builder = Message::builder_success(msg, MessageWriteVec::new());
@@ -727,35 +770,34 @@ impl TurnServer {
             return Err(Self::allocation_mismatch(msg, &key));
         };
 
-        if let Some(mut err) = Message::check_attribute_types(
-            msg,
-            &[
-                Username::TYPE,
-                MessageIntegrity::TYPE,
-                Realm::TYPE,
-                Nonce::TYPE,
-                XorPeerAddress::TYPE,
-                ChannelNumber::TYPE,
-                // TODO: EVEN-PORT, RESERVATION-TOKEN, DONT-FRAGMENT
-            ],
-            &[
-                Realm::TYPE,
-                Nonce::TYPE,
-                Username::TYPE,
-                XorPeerAddress::TYPE,
-                ChannelNumber::TYPE,
-            ],
-            MessageWriteVec::new(),
-        ) {
+        let mut xor_peer_address = None;
+        let mut channel_number = None;
+
+        let mut unknown_attributes = smallvec::SmallVec::<[AttributeType; 4]>::default();
+        for (_offset, attr) in msg.iter_attributes() {
+            match attr.get_type() {
+                // checked by validate_stun()
+                Username::TYPE | Realm::TYPE | Nonce::TYPE | MessageIntegrity::TYPE => (),
+                XorPeerAddress::TYPE => xor_peer_address = XorPeerAddress::from_raw(attr).ok(),
+                ChannelNumber::TYPE => channel_number = ChannelNumber::from_raw(attr).ok(),
+                atype => {
+                    if atype.comprehension_required() {
+                        unknown_attributes.push(atype);
+                    }
+                }
+            }
+        }
+        if !unknown_attributes.is_empty() {
+            let mut err =
+                Message::unknown_attributes(msg, &unknown_attributes, MessageWriteVec::new());
             err.add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
                 .unwrap();
             return Err(err);
         }
 
-        let peer_addr = msg
-            .attribute::<XorPeerAddress>()
-            .ok()
-            .map(|peer_addr| peer_addr.addr(msg.transaction_id()));
+        let peer_addr = xor_peer_address.map(|peer_addr| peer_addr.addr(msg.transaction_id()));
+        let channel_no = channel_number.map(|channel| channel.channel());
+
         let Some(peer_addr) = peer_addr else {
             trace!("No peer address");
             return Err(Self::bad_request_signed(msg, &key));
@@ -791,10 +833,6 @@ impl TurnServer {
             channel.peer_addr == peer_addr && channel.peer_transport == TransportType::Udp
         });
 
-        let channel_no = msg
-            .attribute::<ChannelNumber>()
-            .ok()
-            .map(|channel| channel.channel());
         let Some(channel_no) = channel_no else {
             debug!("Bad request: no requested channel id");
             return Err(Self::bad_request_signed(msg, &key));
