@@ -892,8 +892,29 @@ impl TurnServer {
         ),
         (),
     > {
-        let peer_address = msg.attribute::<XorPeerAddress>().map_err(|_| ())?;
-        let peer_address = peer_address.addr(msg.transaction_id());
+        let mut peer_address = None;
+        let mut data = None;
+
+        for (offset, attr) in msg.iter_attributes() {
+            match attr.get_type() {
+                XorPeerAddress::TYPE => {
+                    peer_address = Some(
+                        XorPeerAddress::from_raw(attr)
+                            .map_err(|_| ())?
+                            .addr(msg.transaction_id()),
+                    );
+                }
+                AData::TYPE => data = AData::from_raw(attr).ok().map(|adata| (offset + 4, adata)),
+                atype => {
+                    if atype.comprehension_required() {
+                        return Err(());
+                    }
+                }
+            }
+        }
+        let Some((peer_address, (offset, data))) = peer_address.zip(data) else {
+            return Err(());
+        };
 
         let Some(client) = self.client_from_5tuple(ttype, to, from) else {
             trace!("no client for transport {ttype:?} from {from:?}, to {to:?}");
@@ -917,9 +938,7 @@ impl TurnServer {
             return Err(());
         };
 
-        let (offset, data) = msg.attribute_and_offset::<AData>().map_err(|_| ())?;
         trace!("have {} to send to {:?}", data.data().len(), peer_address);
-        let offset = offset + 4;
         Ok((
             alloc.ttype,
             alloc.addr,
