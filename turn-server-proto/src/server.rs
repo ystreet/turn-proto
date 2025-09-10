@@ -52,7 +52,8 @@ use crate::api::{
 
 static MINIMUM_NONCE_EXPIRY_DURATION: Duration = Duration::from_secs(30);
 static DEFAULT_NONCE_EXPIRY_DURATION: Duration = Duration::from_secs(3600);
-static DEFAULT_ALLOCATION_DURATION: Duration = Duration::from_secs(1800);
+static MAXIMUM_ALLOCATION_DURATION: Duration = Duration::from_secs(3600);
+static DEFAULT_ALLOCATION_DURATION: Duration = Duration::from_secs(600);
 static PERMISSION_DURATION: Duration = Duration::from_secs(300);
 static CHANNEL_DURATION: Duration = Duration::from_secs(600);
 
@@ -80,6 +81,7 @@ struct PendingClient {
     pending_families: smallvec::SmallVec<[AddressFamily; 2]>,
     pending_sockets:
         smallvec::SmallVec<[(AddressFamily, Result<SocketAddr, SocketAllocateError>); 2]>,
+    requested_lifetime: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -473,6 +475,7 @@ impl TurnServer {
 
             // TODO: further RESERVATION-TOKEN handling
         }
+        let lifetime = msg.attribute::<Lifetime>().ok();
 
         // TODO: DONT-FRAGMENT
         // TODO: EVEN-PORT
@@ -494,6 +497,7 @@ impl TurnServer {
             to_ask_families: address_families.clone(),
             pending_families: address_families,
             pending_sockets: Default::default(),
+            requested_lifetime: lifetime.map(|lt| lt.seconds()),
         });
 
         Ok(())
@@ -1451,6 +1455,13 @@ impl TurnServerApi for TurnServer {
         let mut pending = self.pending_allocates.remove(position).unwrap();
         let transaction_id = pending.transaction_id;
         let to = pending.client.remote_addr;
+        let lifetime_seconds = pending
+            .requested_lifetime
+            .unwrap_or(DEFAULT_ALLOCATION_DURATION.as_secs() as u32)
+            .clamp(
+                DEFAULT_ALLOCATION_DURATION.as_secs() as u32,
+                MAXIMUM_ALLOCATION_DURATION.as_secs() as u32,
+            );
 
         let is_all_error = pending.pending_sockets.iter().all(|addr| addr.1.is_err());
         let n_pending_sockets = pending.pending_sockets.len();
@@ -1482,13 +1493,13 @@ impl TurnServerApi for TurnServer {
                         pending.client.allocations.push(Allocation {
                             addr,
                             ttype: TransportType::Udp,
-                            expires_at: now + DEFAULT_ALLOCATION_DURATION,
+                            expires_at: now + Duration::from_secs(lifetime_seconds as u64),
                             permissions: vec![],
                             channels: vec![],
                         });
                         let relayed_address = XorRelayedAddress::new(addr, transaction_id);
                         builder.add_attribute(&relayed_address).unwrap();
-                        let lifetime = Lifetime::new(1800);
+                        let lifetime = Lifetime::new(lifetime_seconds);
                         builder.add_attribute(&lifetime).unwrap();
                         // TODO RESERVATION-TOKEN
                         let mapped_address =

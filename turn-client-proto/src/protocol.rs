@@ -97,7 +97,7 @@ impl TurnClientProtocol {
     fn send_initial_request(&mut self, now: Instant) -> (Transmit<Data<'static>>, TransactionId) {
         info!("sending initial ALLOCATE");
         let mut msg = Message::builder_request(ALLOCATE, MessageWriteVec::new());
-        let lifetime = Lifetime::new(3600);
+        let lifetime = Lifetime::new(1800);
         msg.add_attribute(&lifetime).unwrap();
         let requested = RequestedTransport::new(RequestedTransport::UDP);
         msg.add_attribute(&requested).unwrap();
@@ -142,6 +142,7 @@ impl TurnClientProtocol {
         let mut builder = Message::builder_request(ALLOCATE, MessageWriteVec::new());
         let requested_transport = RequestedTransport::new(RequestedTransport::UDP);
         builder.add_attribute(&requested_transport).unwrap();
+        builder.add_attribute(&Lifetime::new(1800)).unwrap();
         let username = Username::new(credentials.username()).unwrap();
         builder.add_attribute(&username).unwrap();
         let realm = Realm::new(credentials.realm()).unwrap();
