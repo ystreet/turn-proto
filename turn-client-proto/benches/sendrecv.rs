@@ -8,11 +8,11 @@
 
 #![cfg(not(tarpaulin))]
 
-use sans_io_time::Instant;
 use std::net::SocketAddr;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use stun_proto::agent::Transmit;
+use stun_proto::Instant;
 use turn_client_proto::api::{DelayedMessageOrChannelSend, TurnEvent, TurnRecvRet};
 use turn_client_proto::prelude::*;
 use turn_client_proto::udp::TurnClientUdp;
