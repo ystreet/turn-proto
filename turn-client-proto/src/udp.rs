@@ -20,7 +20,7 @@ use stun_proto::Instant;
 use stun_proto::types::TransportType;
 
 use turn_types::channel::ChannelData;
-use turn_types::stun::message::MessageHeader;
+use turn_types::stun::message::Message;
 use turn_types::AddressFamily;
 use turn_types::TurnCredentials;
 
@@ -177,7 +177,7 @@ impl TurnClientApi for TurnClientUdp {
         }
 
         let data = transmit.data.as_ref();
-        let Ok(_hdr) = MessageHeader::from_bytes(data) else {
+        let Ok(msg) = Message::from_bytes(data) else {
             let Ok(channel) = ChannelData::parse(data) else {
                 return TurnRecvRet::Ignored(transmit);
             };
@@ -200,21 +200,18 @@ impl TurnClientApi for TurnClientUdp {
                 }
             }
         };
-        match self.protocol.handle_message(transmit.data, now) {
+        match self.protocol.handle_message(msg, now) {
             TurnProtocolRecv::Handled => TurnRecvRet::Handled,
-            TurnProtocolRecv::Ignored(data) => TurnRecvRet::Ignored(Transmit::new(
-                data,
-                transmit.transport,
-                transmit.from,
-                transmit.to,
-            )),
+            TurnProtocolRecv::Ignored => TurnRecvRet::Ignored(transmit),
             TurnProtocolRecv::PeerData {
-                data,
                 range,
                 transport,
                 peer,
             } => TurnRecvRet::PeerData(TurnPeerData {
-                data: DataRangeOrOwned::Range { data, range },
+                data: DataRangeOrOwned::Range {
+                    data: transmit.data,
+                    range,
+                },
                 transport,
                 peer,
             }),

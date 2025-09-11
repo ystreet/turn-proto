@@ -13,6 +13,7 @@
 use alloc::vec::Vec;
 use core::net::{IpAddr, SocketAddr};
 use core::ops::Range;
+use turn_types::stun::message::Message;
 
 use stun_proto::agent::{StunAgent, Transmit};
 use stun_proto::types::data::Data;
@@ -180,18 +181,22 @@ impl TurnClientApi for TurnClientTcp {
         let ret = match self.incoming_tcp_buffer.incoming_tcp(transmit) {
             None => TurnRecvRet::Handled,
             Some(IncomingTcp::CompleteMessage(transmit, msg_range)) => {
-                match self.protocol.handle_message(transmit.data, now) {
+                let Ok(msg) =
+                    Message::from_bytes(&transmit.data.as_ref()[msg_range.start..msg_range.end])
+                else {
+                    return TurnRecvRet::Handled;
+                };
+                match self.protocol.handle_message(msg, now) {
                     TurnProtocolRecv::Handled => TurnRecvRet::Handled,
                     // XXX: Ignored should probably produce an error for TCP
-                    TurnProtocolRecv::Ignored(_data) => TurnRecvRet::Handled,
+                    TurnProtocolRecv::Ignored => TurnRecvRet::Handled,
                     TurnProtocolRecv::PeerData {
-                        data,
                         range,
                         transport,
                         peer,
                     } => TurnRecvRet::PeerData(TurnPeerData {
                         data: DataRangeOrOwned::Range {
-                            data,
+                            data: transmit.data,
                             range: msg_range.start + range.start..msg_range.start + range.end,
                         },
                         transport,
@@ -203,6 +208,7 @@ impl TurnClientApi for TurnClientTcp {
                 let channel =
                     ChannelData::parse(&transmit.data.as_ref()[range.start..range.end]).unwrap();
                 match self.protocol.handle_channel(channel, now) {
+                    // XXX: Ignored should probably produce an error for TCP
                     TurnProtocolChannelRecv::Ignored => TurnRecvRet::Ignored(transmit),
                     TurnProtocolChannelRecv::PeerData {
                         range,
@@ -218,12 +224,29 @@ impl TurnClientApi for TurnClientTcp {
                     }),
                 }
             }
-            Some(IncomingTcp::StoredMessage(msg, transmit)) => {
-                protocol_recv_to_api(self.protocol.handle_message(msg, now), transmit)
+            Some(IncomingTcp::StoredMessage(msg_data, transmit)) => {
+                let Ok(msg) = Message::from_bytes(&msg_data) else {
+                    return TurnRecvRet::Handled;
+                };
+                match self.protocol.handle_message(msg, now) {
+                    TurnProtocolRecv::Handled => TurnRecvRet::Handled,
+                    // XXX: Ignored should probably produce an error for TCP
+                    TurnProtocolRecv::Ignored => TurnRecvRet::Ignored(transmit),
+                    TurnProtocolRecv::PeerData {
+                        range,
+                        transport,
+                        peer,
+                    } => TurnRecvRet::PeerData(TurnPeerData {
+                        data: DataRangeOrOwned::Owned(ensure_data_owned(msg_data, range)),
+                        transport,
+                        peer,
+                    }),
+                }
             }
             Some(IncomingTcp::StoredChannel(data, transmit)) => {
                 let channel = ChannelData::parse(&data).unwrap();
                 match self.protocol.handle_channel(channel, now) {
+                    // XXX: Ignored should probably produce an error for TCP
                     TurnProtocolChannelRecv::Ignored => TurnRecvRet::Ignored(transmit),
                     TurnProtocolChannelRecv::PeerData {
                         range,
@@ -258,16 +281,21 @@ impl TurnClientApi for TurnClientTcp {
     fn poll_recv(&mut self, now: Instant) -> Option<TurnPeerData<Vec<u8>>> {
         while let Some(recv) = self.incoming_tcp_buffer.poll_recv() {
             match recv {
-                StoredTcp::Message(msg) => {
+                StoredTcp::Message(msg_data) => {
+                    let Ok(msg) = Message::from_bytes(&msg_data) else {
+                        continue;
+                    };
                     if let TurnProtocolRecv::PeerData {
-                        data,
                         range,
                         transport,
                         peer,
                     } = self.protocol.handle_message(msg, now)
                     {
                         return Some(TurnPeerData {
-                            data: DataRangeOrOwned::Range { data, range },
+                            data: DataRangeOrOwned::Range {
+                                data: msg_data,
+                                range,
+                            },
                             transport,
                             peer,
                         });
@@ -293,26 +321,6 @@ impl TurnClientApi for TurnClientTcp {
             }
         }
         None
-    }
-}
-
-fn protocol_recv_to_api<T: AsRef<[u8]> + core::fmt::Debug>(
-    recv: TurnProtocolRecv<Vec<u8>>,
-    original: Transmit<T>,
-) -> TurnRecvRet<T> {
-    match recv {
-        TurnProtocolRecv::Handled => TurnRecvRet::Handled,
-        TurnProtocolRecv::Ignored(_) => TurnRecvRet::Ignored(original),
-        TurnProtocolRecv::PeerData {
-            data,
-            range,
-            transport,
-            peer,
-        } => TurnRecvRet::PeerData(TurnPeerData {
-            data: DataRangeOrOwned::Owned(ensure_data_owned(data, range)),
-            transport,
-            peer,
-        }),
     }
 }
 
