@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 use core::net::{IpAddr, SocketAddr};
 use openssl::ssl::{HandshakeError, MidHandshakeSslStream, Ssl, SslContext, SslStream};
 use std::io::{Read, Write};
+use turn_types::stun::message::Message;
 
 use stun_proto::agent::{StunAgent, Transmit};
 use stun_proto::types::data::Data;
@@ -197,15 +198,16 @@ impl TurnClientOpensslTls {
         match self.incoming_tcp_buffer.incoming_tcp(transmit) {
             None => TurnRecvRet::Handled,
             Some(IncomingTcp::CompleteMessage(transmit, msg_range)) => {
-                match self.protocol.handle_message(
-                    &transmit.data.as_slice()[msg_range.start..msg_range.end],
-                    now,
-                ) {
+                let Ok(msg) =
+                    Message::from_bytes(&transmit.data.as_slice()[msg_range.start..msg_range.end])
+                else {
+                    return TurnRecvRet::Handled;
+                };
+                match self.protocol.handle_message(msg, now) {
                     TurnProtocolRecv::Handled => TurnRecvRet::Handled,
                     // XXX: this might be grounds for connection termination.
-                    TurnProtocolRecv::Ignored(_) => TurnRecvRet::Handled,
+                    TurnProtocolRecv::Ignored => TurnRecvRet::Handled,
                     TurnProtocolRecv::PeerData {
-                        data: _,
                         range,
                         transport,
                         peer,
@@ -234,11 +236,13 @@ impl TurnClientOpensslTls {
                 }
             }
             Some(IncomingTcp::StoredMessage(data, transmit)) => {
-                match self.protocol.handle_message(data, now) {
+                let Ok(msg) = Message::from_bytes(&data) else {
+                    return TurnRecvRet::Handled;
+                };
+                match self.protocol.handle_message(msg, now) {
                     TurnProtocolRecv::Handled => TurnRecvRet::Handled,
-                    TurnProtocolRecv::Ignored(_) => TurnRecvRet::Handled,
+                    TurnProtocolRecv::Ignored => TurnRecvRet::Handled,
                     TurnProtocolRecv::PeerData {
-                        data: _,
                         range,
                         transport,
                         peer,
@@ -488,16 +492,21 @@ impl TurnClientApi for TurnClientOpensslTls {
     fn poll_recv(&mut self, now: Instant) -> Option<TurnPeerData<Vec<u8>>> {
         while let Some(recv) = self.incoming_tcp_buffer.poll_recv() {
             match recv {
-                StoredTcp::Message(msg) => {
+                StoredTcp::Message(msg_data) => {
+                    let Ok(msg) = Message::from_bytes(&msg_data) else {
+                        continue;
+                    };
                     if let TurnProtocolRecv::PeerData {
-                        data,
                         range,
                         transport,
                         peer,
                     } = self.protocol.handle_message(msg, now)
                     {
                         return Some(TurnPeerData {
-                            data: DataRangeOrOwned::Range { data, range },
+                            data: DataRangeOrOwned::Range {
+                                data: msg_data,
+                                range,
+                            },
                             transport,
                             peer,
                         });

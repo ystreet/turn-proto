@@ -845,36 +845,23 @@ impl TurnClientProtocol {
         TurnProtocolChannelRecv::Ignored
     }
 
-    #[tracing::instrument(
-        name = "turn_client_handle_message",
-        skip(self, data),
-        fields(
-            data_len = data.as_ref().len(),
-        )
-    )]
-    pub(crate) fn handle_message<T: AsRef<[u8]> + core::fmt::Debug>(
-        &mut self,
-        data: T,
-        now: Instant,
-    ) -> TurnProtocolRecv<T> {
-        let Ok(msg) = Message::from_bytes(data.as_ref()) else {
-            return TurnProtocolRecv::Ignored(data);
-        };
+    #[tracing::instrument(name = "turn_client_handle_message", skip(self, msg))]
+    pub(crate) fn handle_message(&mut self, msg: Message<'_>, now: Instant) -> TurnProtocolRecv {
         let remote_addr = self.remote_addr();
         let (key, realm, _nonce) = match &mut self.state {
-            AuthState::Error | AuthState::Initial => return TurnProtocolRecv::Ignored(data),
+            AuthState::Error | AuthState::Initial => return TurnProtocolRecv::Ignored,
             AuthState::InitialSent(transaction_id) => {
                 trace!("received STUN message {msg}");
                 let msg = match self.stun_agent.handle_stun(msg, remote_addr) {
                     HandleStunReply::Drop => return TurnProtocolRecv::Handled,
-                    HandleStunReply::IncomingStun(_) => return TurnProtocolRecv::Ignored(data),
+                    HandleStunReply::IncomingStun(_) => return TurnProtocolRecv::Ignored,
                     HandleStunReply::ValidatedStunResponse(msg) => msg,
                     HandleStunReply::UnvalidatedStunResponse(_msg) => {
-                        return TurnProtocolRecv::Ignored(data)
+                        return TurnProtocolRecv::Ignored
                     }
                 };
                 if !msg.is_response() || &msg.transaction_id() != transaction_id {
-                    return TurnProtocolRecv::Ignored(data);
+                    return TurnProtocolRecv::Ignored;
                 }
                 /* The Initial stun request should result in an unauthorized error as there were
                  * no credentials in the initial request */
@@ -949,11 +936,11 @@ impl TurnClientProtocol {
                 let stun_agent = &mut self.stun_agent;
                 let msg = match stun_agent.handle_stun(msg, remote_addr) {
                     HandleStunReply::Drop => return TurnProtocolRecv::Handled,
-                    HandleStunReply::IncomingStun(_) => return TurnProtocolRecv::Ignored(data),
+                    HandleStunReply::IncomingStun(_) => return TurnProtocolRecv::Ignored,
                     HandleStunReply::ValidatedStunResponse(msg) => msg,
                     HandleStunReply::UnvalidatedStunResponse(msg) => {
                         let Some((new_nonce, realm)) = Self::validate_stale_nonce(&msg) else {
-                            return TurnProtocolRecv::Ignored(data);
+                            return TurnProtocolRecv::Ignored;
                         };
                         stun_agent.remove_outstanding_request(*transaction_id);
                         let (transmit, new_transaction_id) = Self::send_authenticating_request(
@@ -972,7 +959,7 @@ impl TurnClientProtocol {
                     }
                 };
                 if !msg.is_response() || &msg.transaction_id() != transaction_id {
-                    return TurnProtocolRecv::Ignored(data);
+                    return TurnProtocolRecv::Ignored;
                 }
                 match msg.class() {
                     stun_proto::types::message::MessageClass::Error => {
@@ -1108,7 +1095,7 @@ impl TurnClientProtocol {
                     }
                     _ => (),
                 }
-                return TurnProtocolRecv::Ignored(data);
+                return TurnProtocolRecv::Ignored;
             }
             AuthState::Authenticated { key, realm, nonce } => {
                 (key.clone(), realm.clone(), nonce.clone())
@@ -1122,7 +1109,7 @@ impl TurnClientProtocol {
             .map(|allocation| allocation.transport)
             .next()
         else {
-            return TurnProtocolRecv::Ignored(data);
+            return TurnProtocolRecv::Ignored;
         };
 
         match Self::handle_stun(
@@ -1140,13 +1127,12 @@ impl TurnClientProtocol {
             now,
         ) {
             InternalHandleStunReply::Handled => TurnProtocolRecv::Handled,
-            InternalHandleStunReply::Ignored => TurnProtocolRecv::Ignored(data),
+            InternalHandleStunReply::Ignored => TurnProtocolRecv::Ignored,
             InternalHandleStunReply::PeerData {
                 range,
                 transport,
                 peer,
             } => TurnProtocolRecv::PeerData {
-                data,
                 range,
                 transport,
                 peer,
@@ -1846,11 +1832,10 @@ enum InternalHandleStunReply {
 }
 
 #[derive(Debug)]
-pub(crate) enum TurnProtocolRecv<T: AsRef<[u8]> + core::fmt::Debug> {
+pub(crate) enum TurnProtocolRecv {
     Handled,
-    Ignored(T),
+    Ignored,
     PeerData {
-        data: T,
         range: Range<usize>,
         transport: TransportType,
         peer: SocketAddr,
@@ -1919,25 +1904,26 @@ mod tests {
         method: Method,
         reply: F,
         now: Instant,
-    ) -> TurnProtocolRecv<Vec<u8>> {
+    ) -> TurnProtocolRecv {
         let transmit = client.poll_transmit(now).unwrap();
         let msg = Message::from_bytes(&transmit.data).unwrap();
         assert_eq!(msg.method(), method);
         let reply = reply(msg);
-        client.handle_message(reply, now)
+        let msg = Message::from_bytes(&reply).unwrap();
+        client.handle_message(msg, now)
     }
 
     fn allocate_response<F: FnOnce(Message<'_>) -> Vec<u8>>(
         client: &mut TurnClientProtocol,
         reply: F,
         now: Instant,
-    ) -> TurnProtocolRecv<Vec<u8>> {
+    ) -> TurnProtocolRecv {
         response(client, ALLOCATE, reply, now)
     }
 
     fn check_allocate_reply_failed(
         client: &mut TurnClientProtocol,
-        ret: TurnProtocolRecv<Vec<u8>>,
+        ret: TurnProtocolRecv,
         now: Instant,
     ) {
         assert!(matches!(ret, TurnProtocolRecv::Handled));
@@ -1971,7 +1957,7 @@ mod tests {
             |_msg| Message::builder_request(ALLOCATE, MessageWriteVec::new()).finish(),
             now,
         );
-        assert!(matches!(ret, TurnProtocolRecv::Ignored(_)));
+        assert!(matches!(ret, TurnProtocolRecv::Ignored));
     }
 
     #[test]
@@ -2114,7 +2100,7 @@ mod tests {
             },
             now,
         );
-        assert!(matches!(ret, TurnProtocolRecv::Ignored(_)));
+        assert!(matches!(ret, TurnProtocolRecv::Ignored));
     }
 
     #[test]
@@ -2329,7 +2315,7 @@ mod tests {
             },
             now,
         );
-        assert!(matches!(ret, TurnProtocolRecv::Ignored(_)));
+        assert!(matches!(ret, TurnProtocolRecv::Ignored));
 
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
@@ -2343,7 +2329,7 @@ mod tests {
             },
             now,
         );
-        assert!(matches!(ret, TurnProtocolRecv::Ignored(_)));
+        assert!(matches!(ret, TurnProtocolRecv::Ignored));
 
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
@@ -2359,7 +2345,7 @@ mod tests {
             },
             now,
         );
-        assert!(matches!(ret, TurnProtocolRecv::Ignored(_)));
+        assert!(matches!(ret, TurnProtocolRecv::Ignored));
     }
 
     #[test]
@@ -2498,7 +2484,7 @@ mod tests {
         client: &mut TurnClientProtocol,
         reply: F,
         now: Instant,
-    ) -> TurnProtocolRecv<Vec<u8>> {
+    ) -> TurnProtocolRecv {
         response(client, REFRESH, reply, now)
     }
 
@@ -2673,14 +2659,11 @@ mod tests {
         client: &mut TurnClientProtocol,
         reply: F,
         now: Instant,
-    ) -> TurnProtocolRecv<Vec<u8>> {
+    ) -> TurnProtocolRecv {
         response(client, CHANNEL_BIND, reply, now)
     }
 
-    fn check_permission_create_failed(
-        client: &mut TurnClientProtocol,
-        ret: TurnProtocolRecv<Vec<u8>>,
-    ) {
+    fn check_permission_create_failed(client: &mut TurnClientProtocol, ret: TurnProtocolRecv) {
         let (transport, relayed) = client.relayed_addresses().next().unwrap();
         assert_eq!(client.permissions(transport, relayed).count(), 0);
         assert!(matches!(ret, TurnProtocolRecv::Handled));
@@ -2690,7 +2673,7 @@ mod tests {
         ));
     }
 
-    fn check_channel_bind_failed(client: &mut TurnClientProtocol, ret: TurnProtocolRecv<Vec<u8>>) {
+    fn check_channel_bind_failed(client: &mut TurnClientProtocol, ret: TurnProtocolRecv) {
         let (transport, relayed) = client.relayed_addresses().next().unwrap();
         assert_eq!(client.permissions(transport, relayed).count(), 0);
         assert!(matches!(ret, TurnProtocolRecv::Handled));
@@ -2899,7 +2882,7 @@ mod tests {
         client: &mut TurnClientProtocol,
         reply: F,
         now: Instant,
-    ) -> TurnProtocolRecv<Vec<u8>> {
+    ) -> TurnProtocolRecv {
         response(client, CREATE_PERMISSION, reply, now)
     }
 
