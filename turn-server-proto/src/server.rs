@@ -234,6 +234,7 @@ impl TurnServer {
 
         let nonce_value = self.validate_nonce(ttype, from, to, now);
         if nonce_value != nonce.nonce() {
+            trace!("stale nonce");
             let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::STALE_NONCE).build().unwrap();
             builder.add_attribute(&error).unwrap();
@@ -257,6 +258,7 @@ impl TurnServer {
         if password_key.map_or(true, |password_key| {
             msg.validate_integrity_with_key(password_key).is_err()
         }) {
+            trace!("integrity failed");
             let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::UNAUTHORIZED).build().unwrap();
             builder.add_attribute(&error).unwrap();
@@ -278,6 +280,7 @@ impl TurnServer {
         // request MUST be rejected with a 441 (Wrong Credentials) error.
         if let Some(client) = self.client_from_5tuple(ttype, to, from) {
             if client.username != username.username() {
+                trace!("mismatched username");
                 let mut builder = Message::builder_error(msg, MessageWriteVec::new());
                 let error = ErrorCode::builder(ErrorCode::WRONG_CREDENTIALS)
                     .build()
@@ -370,6 +373,7 @@ impl TurnServer {
         let mut address_families = smallvec::SmallVec::<[AddressFamily; 2]>::new();
 
         if let Some(_client) = self.mut_client_from_5tuple(ttype, to, from) {
+            trace!("allocation mismatch");
             return Err(Self::allocation_mismatch(msg, &key));
         };
 
@@ -419,6 +423,7 @@ impl TurnServer {
             }
         }
         if !unknown_attributes.is_empty() {
+            trace!("unknown attributes: {unknown_attributes:?}");
             let mut err =
                 Message::unknown_attributes(msg, &unknown_attributes, MessageWriteVec::new());
             err.add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
@@ -546,6 +551,7 @@ impl TurnServer {
         let key = self.validate_stun(msg, ttype, from, to, now)?.clone();
 
         let Some(client) = self.mut_client_from_5tuple(ttype, to, from) else {
+            trace!("allocation mismatch");
             return Err(Self::allocation_mismatch(msg, &key));
         };
 
@@ -573,6 +579,7 @@ impl TurnServer {
             }
         }
         if !unknown_attributes.is_empty() {
+            trace!("unknown attributes: {unknown_attributes:?}");
             let mut err =
                 Message::unknown_attributes(msg, &unknown_attributes, MessageWriteVec::new());
             err.add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
@@ -627,6 +634,7 @@ impl TurnServer {
             builder.add_attribute(&lifetime).unwrap();
             builder
         } else {
+            trace!("peer address family mismatch");
             let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             builder
                 .add_attribute(
@@ -662,6 +670,7 @@ impl TurnServer {
         let key = self.validate_stun(msg, ttype, from, to, now)?.clone();
 
         let Some(client) = self.mut_client_from_5tuple(ttype, to, from) else {
+            trace!("allocation mismatch");
             return Err(Self::allocation_mismatch(msg, &key));
         };
 
@@ -685,6 +694,7 @@ impl TurnServer {
             }
         }
         if !unknown_attributes.is_empty() {
+            trace!("unknown attributes: {unknown_attributes:?}");
             let mut err =
                 Message::unknown_attributes(msg, &unknown_attributes, MessageWriteVec::new());
             err.add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
@@ -701,6 +711,7 @@ impl TurnServer {
                 .iter_mut()
                 .find(|a| a.addr.is_ipv4() == peer_addr.is_ipv4())
             else {
+                trace!("peer address family mismatch");
                 let mut response = Message::builder_error(msg, MessageWriteVec::new());
                 response
                     .add_attribute(
@@ -767,6 +778,7 @@ impl TurnServer {
         let key = self.validate_stun(msg, ttype, from, to, now)?.clone();
 
         let Some(client) = self.mut_client_from_5tuple(ttype, to, from) else {
+            trace!("allocation mismatch");
             return Err(Self::allocation_mismatch(msg, &key));
         };
 
@@ -788,6 +800,7 @@ impl TurnServer {
             }
         }
         if !unknown_attributes.is_empty() {
+            trace!("unknown attributes: {unknown_attributes:?}");
             let mut err =
                 Message::unknown_attributes(msg, &unknown_attributes, MessageWriteVec::new());
             err.add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
@@ -808,6 +821,7 @@ impl TurnServer {
             .iter_mut()
             .find(|allocation| allocation.addr.is_ipv4() == peer_addr.is_ipv4())
         else {
+            trace!("peer address family mismatch");
             let mut response = Message::builder_error(msg, MessageWriteVec::new());
             response
                 .add_attribute(
@@ -952,6 +966,7 @@ impl TurnServer {
         }
 
         let Some(_permission) = alloc.have_permission(peer_address.ip(), now) else {
+            trace!("no permission for {}", peer_address);
             return Err(());
         };
 
@@ -1212,10 +1227,8 @@ impl TurnServerApi for TurnServer {
             }
         };
         let udp = udp::UdpPacket::new(payload)?;
-        trace!("parsed udp: {udp:?}");
         let source = SocketAddr::new(source, udp.get_source());
         let destination = SocketAddr::new(destination, udp.get_destination());
-        trace!("clients: {:?}", self.clients);
         let (client, allocation, _permission) =
             self.allocation_from_public_5tuple(TransportType::Udp, source, destination)?;
         if allocation.expires_at < now {
