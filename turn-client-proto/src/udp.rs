@@ -29,7 +29,7 @@ use tracing::{trace, warn};
 use crate::api::{
     DataRangeOrOwned, DelayedMessageOrChannelSend, TransmitBuild, TurnClientApi, TurnPeerData,
 };
-use crate::protocol::{TurnClientProtocol, TurnProtocolChannelRecv, TurnProtocolRecv};
+use crate::protocol::{TurnClientProtocol, TurnProtocolChannelRecv};
 
 pub use crate::api::{
     BindChannelError, CreatePermissionError, DeleteError, SendError, TurnEvent, TurnPollRet,
@@ -200,22 +200,7 @@ impl TurnClientApi for TurnClientUdp {
                 }
             }
         };
-        match self.protocol.handle_message(msg, now) {
-            TurnProtocolRecv::Handled => TurnRecvRet::Handled,
-            TurnProtocolRecv::Ignored => TurnRecvRet::Ignored(transmit),
-            TurnProtocolRecv::PeerData {
-                range,
-                transport,
-                peer,
-            } => TurnRecvRet::PeerData(TurnPeerData {
-                data: DataRangeOrOwned::Range {
-                    data: transmit.data,
-                    range,
-                },
-                transport,
-                peer,
-            }),
-        }
+        TurnRecvRet::from_protocol_recv(self.protocol.handle_message(msg, now), transmit)
     }
 
     fn poll_recv(&mut self, _now: Instant) -> Option<TurnPeerData<Vec<u8>>> {

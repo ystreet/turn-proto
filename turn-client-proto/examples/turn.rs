@@ -174,6 +174,18 @@ fn udp_recv_thread(
                     );
                     continue;
                 }
+                TurnRecvRet::PeerIcmp {
+                    transport,
+                    peer,
+                    icmp_type,
+                    icmp_code,
+                    icmp_data,
+                } => {
+                    println!(
+                        "received ICMP type {icmp_type} code {icmp_code} data {icmp_data} from {peer:?} using {transport:?}",
+                    );
+                    continue;
+                }
             }
         }
     });
@@ -368,6 +380,18 @@ fn tcp_recv_thread(
                     println!(
                         "received {len} bytes from {:?} using {:?}: {s:?}",
                         peer_data.peer, peer_data.transport
+                    );
+                    continue;
+                }
+                TurnRecvRet::PeerIcmp {
+                    transport,
+                    peer,
+                    icmp_type,
+                    icmp_code,
+                    icmp_data,
+                } => {
+                    println!(
+                        "received ICMP type {icmp_type} code {icmp_code} data {icmp_data} from {peer:?} using {transport:?}",
                     );
                     continue;
                 }
