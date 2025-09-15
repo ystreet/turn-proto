@@ -88,20 +88,10 @@ impl TurnClientRustls {
                 else {
                     return TurnRecvRet::Handled;
                 };
-                match self.protocol.handle_message(msg, now) {
-                    TurnProtocolRecv::Handled => TurnRecvRet::Handled,
-                    // XXX: this might be grounds for connection termination.
-                    TurnProtocolRecv::Ignored => TurnRecvRet::Handled,
-                    TurnProtocolRecv::PeerData {
-                        range,
-                        transport,
-                        peer,
-                    } => TurnRecvRet::PeerData(TurnPeerData {
-                        data: DataRangeOrOwned::Owned(ensure_data_owned(transmit.data, range)),
-                        transport,
-                        peer,
-                    }),
-                }
+                TurnRecvRet::from_protocol_recv_stored_ignored(
+                    self.protocol.handle_message(msg, now),
+                    transmit.data,
+                )
             }
             Some(IncomingTcp::CompleteChannel(transmit, msg_range)) => {
                 let channel =
@@ -124,19 +114,10 @@ impl TurnClientRustls {
                 let Ok(msg) = Message::from_bytes(&data) else {
                     return TurnRecvRet::Handled;
                 };
-                match self.protocol.handle_message(msg, now) {
-                    TurnProtocolRecv::Handled => TurnRecvRet::Handled,
-                    TurnProtocolRecv::Ignored => TurnRecvRet::Handled,
-                    TurnProtocolRecv::PeerData {
-                        range,
-                        transport,
-                        peer,
-                    } => TurnRecvRet::PeerData(TurnPeerData {
-                        data: DataRangeOrOwned::Owned(ensure_data_owned(transmit.data, range)),
-                        transport,
-                        peer,
-                    }),
-                }
+                TurnRecvRet::from_protocol_recv_stored_ignored(
+                    self.protocol.handle_message(msg, now),
+                    transmit.data,
+                )
             }
             Some(IncomingTcp::StoredChannel(data, transmit)) => {
                 let channel = ChannelData::parse(&data).unwrap();

@@ -186,23 +186,11 @@ impl TurnClientApi for TurnClientTcp {
                 else {
                     return TurnRecvRet::Handled;
                 };
-                match self.protocol.handle_message(msg, now) {
-                    TurnProtocolRecv::Handled => TurnRecvRet::Handled,
-                    // XXX: Ignored should probably produce an error for TCP
-                    TurnProtocolRecv::Ignored => TurnRecvRet::Handled,
-                    TurnProtocolRecv::PeerData {
-                        range,
-                        transport,
-                        peer,
-                    } => TurnRecvRet::PeerData(TurnPeerData {
-                        data: DataRangeOrOwned::Range {
-                            data: transmit.data,
-                            range: msg_range.start + range.start..msg_range.start + range.end,
-                        },
-                        transport,
-                        peer,
-                    }),
-                }
+                TurnRecvRet::from_protocol_recv_subrange(
+                    self.protocol.handle_message(msg, now),
+                    transmit,
+                    msg_range.start,
+                )
             }
             Some(IncomingTcp::CompleteChannel(transmit, range)) => {
                 let channel =
@@ -228,20 +216,11 @@ impl TurnClientApi for TurnClientTcp {
                 let Ok(msg) = Message::from_bytes(&msg_data) else {
                     return TurnRecvRet::Handled;
                 };
-                match self.protocol.handle_message(msg, now) {
-                    TurnProtocolRecv::Handled => TurnRecvRet::Handled,
-                    // XXX: Ignored should probably produce an error for TCP
-                    TurnProtocolRecv::Ignored => TurnRecvRet::Ignored(transmit),
-                    TurnProtocolRecv::PeerData {
-                        range,
-                        transport,
-                        peer,
-                    } => TurnRecvRet::PeerData(TurnPeerData {
-                        data: DataRangeOrOwned::Owned(ensure_data_owned(msg_data, range)),
-                        transport,
-                        peer,
-                    }),
-                }
+                TurnRecvRet::from_protocol_recv_stored(
+                    self.protocol.handle_message(msg, now),
+                    transmit,
+                    msg_data,
+                )
             }
             Some(IncomingTcp::StoredChannel(data, transmit)) => {
                 let channel = ChannelData::parse(&data).unwrap();

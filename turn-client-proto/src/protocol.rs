@@ -28,20 +28,23 @@ use stun_proto::types::TransportType;
 use stun_proto::Instant;
 use tracing::{debug, info, trace, warn};
 use turn_types::attribute::{
-    AdditionalAddressFamily, ChannelNumber, Lifetime, RequestedAddressFamily, XorPeerAddress,
+    AdditionalAddressFamily, ChannelNumber, Icmp, Lifetime, RequestedAddressFamily, XorPeerAddress,
     XorRelayedAddress,
 };
 use turn_types::attribute::{Data as AData, DontFragment, RequestedTransport};
 use turn_types::channel::ChannelData;
 use turn_types::message::*;
 use turn_types::stun::message::{IntegrityAlgorithm, IntegrityKey, MessageWriteVec};
-use turn_types::stun::prelude::{MessageWrite, MessageWriteExt};
+use turn_types::stun::prelude::{
+    Attribute, AttributeFromRaw, AttributeStaticType, MessageWrite, MessageWriteExt,
+};
 use turn_types::{AddressFamily, TurnCredentials};
 
 use crate::api::{
-    BindChannelError, CreatePermissionError, DelayedMessageOrChannelSend, DeleteError, SendError,
-    TransmitBuild, TurnEvent, TurnPollRet,
+    BindChannelError, CreatePermissionError, DataRangeOrOwned, DelayedMessageOrChannelSend,
+    DeleteError, SendError, TransmitBuild, TurnEvent, TurnPeerData, TurnPollRet, TurnRecvRet,
 };
+use crate::tcp::ensure_data_owned;
 
 /// Buffer before an expiration time before sending a refresh packet.
 pub(crate) static EXPIRY_BUFFER: Duration = Duration::from_secs(60);
@@ -305,10 +308,10 @@ impl TurnClientProtocol {
         msg: &Message<'_>,
         credentials: &TurnCredentials,
         now: Instant,
-    ) -> InternalHandleStunReply {
+    ) -> TurnProtocolRecv {
         // only handle STALE_NONCE errors here as that is the only unvalidated case that we have.
         let Some((nonce, realm)) = Self::validate_stale_nonce(msg) else {
-            return InternalHandleStunReply::Ignored;
+            return TurnProtocolRecv::Ignored;
         };
 
         let mut new_key = None;
@@ -480,9 +483,9 @@ impl TurnClientProtocol {
                     nonce: _,
                 } => *state = AuthState::Authenticated { key, realm, nonce },
             }
-            InternalHandleStunReply::Handled
+            TurnProtocolRecv::Handled
         } else {
-            InternalHandleStunReply::Ignored
+            TurnProtocolRecv::Ignored
         }
     }
 
@@ -514,10 +517,10 @@ impl TurnClientProtocol {
         realm: &str,
         key: &IntegrityKey,
         now: Instant,
-    ) -> InternalHandleStunReply {
+    ) -> TurnProtocolRecv {
         trace!("received STUN message {msg}");
         let msg = match stun_agent.handle_stun(msg, from) {
-            HandleStunReply::Drop => return InternalHandleStunReply::Ignored,
+            HandleStunReply::Drop => return TurnProtocolRecv::Ignored,
             HandleStunReply::IncomingStun(msg) => msg,
             HandleStunReply::ValidatedStunResponse(msg) => msg,
             HandleStunReply::UnvalidatedStunResponse(msg) => {
@@ -579,13 +582,13 @@ impl TurnClientProtocol {
                             info!("Successfully refreshed allocation");
                         }
                     }
-                    InternalHandleStunReply::Handled
+                    TurnProtocolRecv::Handled
                 }
                 CREATE_PERMISSION => {
                     if Self::update_permission_state(allocations, pending_events, msg, now) {
-                        InternalHandleStunReply::Handled
+                        TurnProtocolRecv::Handled
                     } else {
-                        InternalHandleStunReply::Ignored
+                        TurnProtocolRecv::Ignored
                     }
                 }
                 CHANNEL_BIND => {
@@ -614,7 +617,7 @@ impl TurnClientProtocol {
                                 channel.peer_addr,
                             ));
                             channel.expires_at = now;
-                            return InternalHandleStunReply::Handled;
+                            return TurnProtocolRecv::Handled;
                         }
                         info!("Succesfully created/refreshed {channel:?}");
                         Self::update_permission_state(allocations, pending_events, msg, now);
@@ -624,7 +627,7 @@ impl TurnClientProtocol {
                             channel.peer_addr,
                         ));
                         allocations[alloc_idx].channels.push(channel);
-                        return InternalHandleStunReply::Handled;
+                        return TurnProtocolRecv::Handled;
                     } else if let Some((alloc_idx, existing_idx)) = allocations
                         .iter()
                         .enumerate()
@@ -657,43 +660,79 @@ impl TurnClientProtocol {
                                 channel.peer_addr,
                             ));
                             channel.expires_at = now;
-                            return InternalHandleStunReply::Handled;
+                            return TurnProtocolRecv::Handled;
                         }
                         info!("Succesfully created/refreshed {channel:?}");
                         Self::update_permission_state(allocations, pending_events, msg, now);
                         allocations[alloc_idx].channels[existing_idx].expires_at =
                             now + CHANNEL_DURATION;
-                        return InternalHandleStunReply::Handled;
+                        return TurnProtocolRecv::Handled;
                     }
-                    InternalHandleStunReply::Ignored
+                    TurnProtocolRecv::Ignored
                 }
-                _ => InternalHandleStunReply::Ignored, // Other responses are not expected
+                _ => TurnProtocolRecv::Ignored, // Other responses are not expected
             }
         } else if msg.has_class(stun_proto::types::message::MessageClass::Request) {
             let Ok(_) = msg.validate_integrity_with_key(key) else {
                 trace!("incoming message failed integrity check");
-                return InternalHandleStunReply::Ignored;
+                return TurnProtocolRecv::Ignored;
             };
 
             // TODO: reply with an error?
-            InternalHandleStunReply::Ignored
+            TurnProtocolRecv::Ignored
         } else {
             /* The message is an indication */
             match msg.method() {
                 DATA => {
-                    let Ok(peer_addr) = msg.attribute::<XorPeerAddress>() else {
-                        return InternalHandleStunReply::Ignored;
+                    let mut peer_addr = None;
+                    let mut data = None;
+                    let mut icmp = None;
+
+                    for (offset, attr) in msg.iter_attributes() {
+                        match attr.get_type() {
+                            XorPeerAddress::TYPE => peer_addr = XorPeerAddress::from_raw(attr).ok(),
+                            AData::TYPE => {
+                                data = AData::from_raw(attr).ok().map(|data| (offset, data))
+                            }
+                            Icmp::TYPE => icmp = Icmp::from_raw(attr).ok(),
+                            _atype => return TurnProtocolRecv::Ignored,
+                        }
+                    }
+                    let Some(peer_addr) = peer_addr else {
+                        return TurnProtocolRecv::Ignored;
                     };
-                    let Ok((offset, data)) = msg.attribute_and_offset::<AData>() else {
-                        return InternalHandleStunReply::Ignored;
-                    };
-                    InternalHandleStunReply::PeerData {
-                        range: offset + 4..offset + 4 + data.data().len(),
-                        transport,
-                        peer: peer_addr.addr(msg.transaction_id()),
+                    let peer_addr = peer_addr.addr(msg.transaction_id());
+                    if let Some((offset, data)) = data {
+                        if allocations
+                            .iter()
+                            .all(|alloc| !alloc.have_permission(peer_addr.ip()))
+                        {
+                            return TurnProtocolRecv::Ignored;
+                        }
+                        TurnProtocolRecv::PeerData {
+                            range: offset + 4..offset + 4 + data.data().len(),
+                            transport,
+                            peer: peer_addr,
+                        }
+                    } else if let Some(icmp) = icmp {
+                        if allocations
+                            .iter()
+                            .all(|alloc| !alloc.have_permission(peer_addr.ip()))
+                        {
+                            return TurnProtocolRecv::Ignored;
+                        }
+                        TurnProtocolRecv::PeerIcmp {
+                            transport,
+                            peer: peer_addr,
+                            icmp_type: icmp.icmp_type(),
+                            icmp_code: icmp.code(),
+                            icmp_data: icmp.data(),
+                        }
+                    } else {
+                        TurnProtocolRecv::Ignored
                     }
                 }
-                _ => InternalHandleStunReply::Ignored, // All other indications should be ignored
+                _ => TurnProtocolRecv::Ignored, // All other indications should be ignored
             }
         }
     }
@@ -1112,7 +1151,7 @@ impl TurnClientProtocol {
             return TurnProtocolRecv::Ignored;
         };
 
-        match Self::handle_stun(
+        Self::handle_stun(
             &mut self.stun_agent,
             &mut self.state,
             &mut self.allocations,
@@ -1125,19 +1164,7 @@ impl TurnClientProtocol {
             &realm,
             &key,
             now,
-        ) {
-            InternalHandleStunReply::Handled => TurnProtocolRecv::Handled,
-            InternalHandleStunReply::Ignored => TurnProtocolRecv::Ignored,
-            InternalHandleStunReply::PeerData {
-                range,
-                transport,
-                peer,
-            } => TurnProtocolRecv::PeerData {
-                range,
-                transport,
-                peer,
-            },
-        }
+        )
     }
 
     pub(crate) fn send_to<T: AsRef<[u8]> + core::fmt::Debug>(
@@ -1821,17 +1848,6 @@ impl Permission {
 }
 
 #[derive(Debug)]
-enum InternalHandleStunReply {
-    Handled,
-    Ignored,
-    PeerData {
-        range: Range<usize>,
-        transport: TransportType,
-        peer: SocketAddr,
-    },
-}
-
-#[derive(Debug)]
 pub(crate) enum TurnProtocolRecv {
     Handled,
     Ignored,
@@ -1840,6 +1856,148 @@ pub(crate) enum TurnProtocolRecv {
         transport: TransportType,
         peer: SocketAddr,
     },
+    PeerIcmp {
+        transport: TransportType,
+        peer: SocketAddr,
+        icmp_type: u8,
+        icmp_code: u8,
+        icmp_data: u32,
+    },
+}
+
+impl<T: AsRef<[u8]> + core::fmt::Debug> TurnRecvRet<T> {
+    pub(crate) fn from_protocol_recv(proto: TurnProtocolRecv, original: Transmit<T>) -> Self {
+        match proto {
+            TurnProtocolRecv::Handled => TurnRecvRet::Handled,
+            TurnProtocolRecv::Ignored => TurnRecvRet::Ignored(original),
+            TurnProtocolRecv::PeerData {
+                range,
+                transport,
+                peer,
+            } => TurnRecvRet::PeerData(TurnPeerData {
+                data: DataRangeOrOwned::Range {
+                    data: original.data,
+                    range,
+                },
+                transport,
+                peer,
+            }),
+            TurnProtocolRecv::PeerIcmp {
+                transport,
+                peer,
+                icmp_type,
+                icmp_code,
+                icmp_data,
+            } => TurnRecvRet::PeerIcmp {
+                transport,
+                peer,
+                icmp_type,
+                icmp_code,
+                icmp_data,
+            },
+        }
+    }
+
+    pub(crate) fn from_protocol_recv_subrange(
+        proto: TurnProtocolRecv,
+        original: Transmit<T>,
+        offset: usize,
+    ) -> Self {
+        match proto {
+            TurnProtocolRecv::Handled => TurnRecvRet::Handled,
+            TurnProtocolRecv::Ignored => TurnRecvRet::Ignored(original),
+            TurnProtocolRecv::PeerData {
+                range,
+                transport,
+                peer,
+            } => TurnRecvRet::PeerData(TurnPeerData {
+                data: DataRangeOrOwned::Range {
+                    data: original.data,
+                    range: offset + range.start..offset + range.end,
+                },
+                transport,
+                peer,
+            }),
+            TurnProtocolRecv::PeerIcmp {
+                transport,
+                peer,
+                icmp_type,
+                icmp_code,
+                icmp_data,
+            } => TurnRecvRet::PeerIcmp {
+                transport,
+                peer,
+                icmp_type,
+                icmp_code,
+                icmp_data,
+            },
+        }
+    }
+
+    pub(crate) fn from_protocol_recv_stored(
+        proto: TurnProtocolRecv,
+        original: Transmit<T>,
+        msg_data: Vec<u8>,
+    ) -> Self {
+        match proto {
+            TurnProtocolRecv::Handled => TurnRecvRet::Handled,
+            TurnProtocolRecv::Ignored => TurnRecvRet::Ignored(original),
+            TurnProtocolRecv::PeerData {
+                range,
+                transport,
+                peer,
+            } => TurnRecvRet::PeerData(TurnPeerData {
+                data: DataRangeOrOwned::Owned(ensure_data_owned(msg_data, range)),
+                transport,
+                peer,
+            }),
+            TurnProtocolRecv::PeerIcmp {
+                transport,
+                peer,
+                icmp_type,
+                icmp_code,
+                icmp_data,
+            } => TurnRecvRet::PeerIcmp {
+                transport,
+                peer,
+                icmp_type,
+                icmp_code,
+                icmp_data,
+            },
+        }
+    }
+
+    pub(crate) fn from_protocol_recv_stored_ignored(
+        proto: TurnProtocolRecv,
+        msg_data: Vec<u8>,
+    ) -> Self {
+        match proto {
+            TurnProtocolRecv::Handled => TurnRecvRet::Handled,
+            TurnProtocolRecv::Ignored => TurnRecvRet::Handled,
+            TurnProtocolRecv::PeerData {
+                range,
+                transport,
+                peer,
+            } => TurnRecvRet::PeerData(TurnPeerData {
+                data: DataRangeOrOwned::Owned(ensure_data_owned(msg_data, range)),
+                transport,
+                peer,
+            }),
+            TurnProtocolRecv::PeerIcmp {
+                transport,
+                peer,
+                icmp_type,
+                icmp_code,
+                icmp_data,
+            } => TurnRecvRet::PeerIcmp {
+                transport,
+                peer,
+                icmp_type,
+                icmp_code,
+                icmp_data,
+            },
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -3038,6 +3196,57 @@ mod tests {
             ),
             Err(CreatePermissionError::NoAllocation)
         ));
+    }
+
+    fn generate_icmp_message(peer: SocketAddr) -> Vec<u8> {
+        let mut msg = Message::builder_indication(DATA, MessageWriteVec::new());
+        msg.add_attribute(&XorPeerAddress::new(peer, msg.transaction_id()))
+            .unwrap();
+        msg.add_attribute(&Icmp::new(0x1, 0x2, 0x3)).unwrap();
+        msg.finish()
+    }
+
+    #[test]
+    fn test_turn_client_protocol_icmp_without_permission() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(&[AddressFamily::IPV4]);
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+
+        let msg = generate_icmp_message(generate_xor_peer_address());
+        let msg = Message::from_bytes(&msg).unwrap();
+        assert!(matches!(
+            client.handle_message(msg, now),
+            TurnProtocolRecv::Ignored
+        ));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_icmp() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(&[AddressFamily::IPV4]);
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        create_permission(&mut client, now);
+        let msg = generate_icmp_message(generate_xor_peer_address());
+        let msg = Message::from_bytes(&msg).unwrap();
+        let TurnProtocolRecv::PeerIcmp {
+            transport,
+            peer,
+            icmp_type,
+            icmp_code,
+            icmp_data,
+        } = client.handle_message(msg, now)
+        else {
+            unreachable!();
+        };
+        assert_eq!(transport, TransportType::Udp);
+        assert_eq!(peer, generate_xor_peer_address());
+        assert_eq!(icmp_type, 0x1);
+        assert_eq!(icmp_code, 0x2);
+        assert_eq!(icmp_data, 0x3);
     }
 
     #[test]

@@ -122,6 +122,19 @@ pub enum TurnRecvRet<T: AsRef<[u8]> + core::fmt::Debug> {
     Ignored(Transmit<T>),
     /// Data has been received from a peer of the TURN server.
     PeerData(TurnPeerData<T>),
+    /// An ICMP packet has been received from a peer of the TURN server.
+    PeerIcmp {
+        /// The [`TransportType`] of the peer address.
+        transport: TransportType,
+        /// The network address of the peer that produced the ICMP data.
+        peer: SocketAddr,
+        /// The type of ICMP data.
+        icmp_type: u8,
+        /// The ICMP code.
+        icmp_code: u8,
+        /// The ICMP data.
+        icmp_data: u32,
+    },
 }
 
 /// Data that has been received from the TURN server.

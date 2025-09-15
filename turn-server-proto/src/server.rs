@@ -1229,9 +1229,9 @@ impl TurnServerApi for TurnServer {
         let udp = udp::UdpPacket::new(payload)?;
         let source = SocketAddr::new(source, udp.get_source());
         let destination = SocketAddr::new(destination, udp.get_destination());
-        let (client, allocation, _permission) =
+        let (client, allocation, permission) =
             self.allocation_from_public_5tuple(TransportType::Udp, source, destination)?;
-        if allocation.expires_at < now {
+        if allocation.expires_at < now || permission.expires_at < now {
             return None;
         }
 
