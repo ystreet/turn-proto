@@ -520,7 +520,7 @@ impl TurnClientProtocol {
     ) -> TurnProtocolRecv {
         trace!("received STUN message {msg}");
         let msg = match stun_agent.handle_stun(msg, from) {
-            HandleStunReply::Drop => return TurnProtocolRecv::Ignored,
+            HandleStunReply::Drop(_) => return TurnProtocolRecv::Ignored,
             HandleStunReply::IncomingStun(msg) => msg,
             HandleStunReply::ValidatedStunResponse(msg) => msg,
             HandleStunReply::UnvalidatedStunResponse(msg) => {
@@ -892,7 +892,7 @@ impl TurnClientProtocol {
             AuthState::InitialSent(transaction_id) => {
                 trace!("received STUN message {msg}");
                 let msg = match self.stun_agent.handle_stun(msg, remote_addr) {
-                    HandleStunReply::Drop => return TurnProtocolRecv::Handled,
+                    HandleStunReply::Drop(_) => return TurnProtocolRecv::Handled,
                     HandleStunReply::IncomingStun(_) => return TurnProtocolRecv::Ignored,
                     HandleStunReply::ValidatedStunResponse(msg) => msg,
                     HandleStunReply::UnvalidatedStunResponse(_msg) => {
@@ -974,7 +974,7 @@ impl TurnClientProtocol {
                 trace!("received STUN message {msg}");
                 let stun_agent = &mut self.stun_agent;
                 let msg = match stun_agent.handle_stun(msg, remote_addr) {
-                    HandleStunReply::Drop => return TurnProtocolRecv::Handled,
+                    HandleStunReply::Drop(_) => return TurnProtocolRecv::Handled,
                     HandleStunReply::IncomingStun(_) => return TurnProtocolRecv::Ignored,
                     HandleStunReply::ValidatedStunResponse(msg) => msg,
                     HandleStunReply::UnvalidatedStunResponse(msg) => {
