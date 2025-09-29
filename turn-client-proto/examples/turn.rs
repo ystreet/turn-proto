@@ -489,7 +489,7 @@ impl ClientTcp {
                 )))
                 .with_no_client_auth()
         } else {
-            ClientConfig::with_platform_verifier()
+            ClientConfig::with_platform_verifier().unwrap()
         };
         let client = TurnClientRustls::allocate(
             local_addr,
