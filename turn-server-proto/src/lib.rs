@@ -17,6 +17,7 @@
 
 #![deny(missing_debug_implementations)]
 #![deny(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
 #![no_std]
 
 extern crate alloc;
