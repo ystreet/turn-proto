@@ -19,7 +19,7 @@ tracing = { version = "0.1", default-features = false, features = ["attributes"]
 tracing-subscriber = "0.3"
 criterion = "0.7"
 rustls = "0.23"
-rustls-platform-verifier = "0.5"
+rustls-platform-verifier = "0.6"
 smallvec = "1"
 openssl = "0.10"
 
