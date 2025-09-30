@@ -11,16 +11,22 @@
 //! `turn-client-proto` provides a sans-IO API for a TURN client communicating with a TURN server.
 //!
 //! Relevant standards:
-//! - [RFC5766]
+//! - [RFC5766]: Traversal Using Relays around NAT (TURN).
+//! - [RFC6156]: Traversal Using Relays around NAT (TURN) Extension for IPv6
+//! - [RFC8656]: Traversal Using Relays around NAT (TURN): Relay Extensions to Session
+//!   Traversal Utilities for NAT (STUN)
 //!
 //! [RFC5766]: https://datatracker.ietf.org/doc/html/rfc5766
+//! [RFC6156]: https://tools.ietf.org/html/rfc6156
+//! [RFC8656]: https://tools.ietf.org/html/rfc8656
 //!
 //! # Getting Started
 //!
 //! The entry point for starting with a TURN client implementation depends on the transport
 //! protocol that you are looking to use. For UDP connections, you should start in the [`udp`]
-//! module, for TCP connections, the [`tcp`] module, and for TLS connections, the [`rustls`] module
-//! (when the `rustls` feature is enabled).
+//! module, for TCP connections, the [`tcp`] module, for TLS connections, the [`rustls`] module
+//! (when the `rustls` feature is enabled), or the [`openssl`] module (when the `openssl` feature
+//! is enabled.
 //!
 //! From there, the [`api`] module provides the interface that all of the TURN clients implement and
 //! the [`client`] module can be used to combine one of the above options into a single value for

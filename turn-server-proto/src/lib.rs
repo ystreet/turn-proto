@@ -8,12 +8,17 @@
 
 //! # turn-server-proto
 //!
-//! `turn-server-proto` provides a sans-IO API for a TURN server communicating with many TURN client.
+//! `turn-server-proto` provides a sans-IO API for a TURN server communicating with many TURN clients.
 //!
 //! Relevant standards:
-//! - [RFC5766]
+//! - [RFC5766]: Traversal Using Relays around NAT (TURN).
+//! - [RFC6156]: Traversal Using Relays around NAT (TURN) Extension for IPv6
+//! - [RFC8656]: Traversal Using Relays around NAT (TURN): Relay Extensions to Session
+//!   Traversal Utilities for NAT (STUN)
 //!
 //! [RFC5766]: https://datatracker.ietf.org/doc/html/rfc5766
+//! [RFC6156]: https://tools.ietf.org/html/rfc6156
+//! [RFC8656]: https://tools.ietf.org/html/rfc8656
 
 #![deny(missing_debug_implementations)]
 #![deny(missing_docs)]
