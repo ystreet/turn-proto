@@ -1758,6 +1758,10 @@ impl TurnClientProtocol {
     pub(crate) fn error(&mut self) {
         warn!("user produced an error");
         self.state = AuthState::Error;
+        for &family in self.families.iter() {
+            self.pending_events
+                .push_front(TurnEvent::AllocationCreateFailed(family));
+        }
     }
 }
 

@@ -15,6 +15,7 @@ use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::net::{IpAddr, SocketAddr};
+use core::time::Duration;
 use openssl::ssl::{HandshakeError, MidHandshakeSslStream, Ssl, SslContext, SslStream};
 use std::io::{Read, Write};
 use turn_types::stun::message::Message;
@@ -269,6 +270,15 @@ impl TurnClientApi for TurnClientOpensslTls {
     }
 
     fn poll(&mut self, now: Instant) -> TurnPollRet {
+        if let Err(e) = self.handshake.complete() {
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                // FIXME: try to determine a more appropriate timeout for an in progress handshake.
+                return TurnPollRet::WaitUntil(now + Duration::from_millis(200));
+            } else {
+                warn!("Openssl produced error: {e:?}");
+                return TurnPollRet::Closed;
+            }
+        };
         let protocol_ret = self.protocol.poll(now);
         if !self.handshake.inner_mut().outgoing.is_empty() {
             return TurnPollRet::WaitUntil(now);
