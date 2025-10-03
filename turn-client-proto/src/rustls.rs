@@ -15,6 +15,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::net::{IpAddr, SocketAddr};
+use core::time::Duration;
 use std::io::{Read, Write};
 use turn_types::stun::message::Message;
 
@@ -31,7 +32,7 @@ use turn_types::channel::ChannelData;
 use turn_types::AddressFamily;
 use turn_types::TurnCredentials;
 
-use tracing::{trace, warn};
+use tracing::{debug, trace, warn};
 
 use crate::api::{
     DataRangeOrOwned, DelayedMessageOrChannelSend, TransmitBuild, TurnClientApi, TurnPeerData,
@@ -162,9 +163,19 @@ impl TurnClientApi for TurnClientRustls {
                 return TurnPollRet::Closed;
             }
         };
-        let protocol_ret = self.protocol.poll(now);
-        if io_state.tls_bytes_to_write() > 0 {
+        let tls_write_bytes = io_state.tls_bytes_to_write();
+        if tls_write_bytes > 0 {
+            trace!("have {tls_write_bytes} bytes to write");
             return TurnPollRet::WaitUntil(now);
+        }
+        let protocol_ret = self.protocol.poll(now);
+        if matches!(protocol_ret, TurnPollRet::Closed) {
+            debug!("Closed");
+            return protocol_ret;
+        }
+        if self.conn.is_handshaking() {
+            debug!("Currently handshaking, waiting for reply");
+            return TurnPollRet::WaitUntil(now + Duration::from_secs(60));
         }
         protocol_ret
     }
@@ -182,24 +193,27 @@ impl TurnClientApi for TurnClientRustls {
     }
 
     fn poll_transmit(&mut self, now: Instant) -> Option<Transmit<Data<'static>>> {
-        if self.conn.is_handshaking() && self.conn.wants_write() {
-            // TODO: avoid this allocation
-            let mut out = vec![];
-            match self.conn.write_tls(&mut out) {
-                Ok(_written) => {
-                    return Some(Transmit::new(
-                        Data::from(out.into_boxed_slice()),
-                        self.transport(),
-                        self.local_addr(),
-                        self.remote_addr(),
-                    ))
-                }
-                Err(e) => {
-                    warn!("error during handshake: {e:?}");
-                    self.protocol.error();
-                    return None;
+        if self.conn.is_handshaking() {
+            if self.conn.wants_write() {
+                // TODO: avoid this allocation
+                let mut out = vec![];
+                match self.conn.write_tls(&mut out) {
+                    Ok(_written) => {
+                        return Some(Transmit::new(
+                            Data::from(out.into_boxed_slice()),
+                            self.transport(),
+                            self.local_addr(),
+                            self.remote_addr(),
+                        ))
+                    }
+                    Err(e) => {
+                        warn!("error during handshake: {e:?}");
+                        self.protocol.error();
+                        return None;
+                    }
                 }
             }
+            return None;
         }
 
         if !self.conn.wants_write() {
