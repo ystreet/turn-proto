@@ -67,6 +67,7 @@ pub struct TurnServer {
 
     clients: Vec<Client>,
     nonces: Vec<NonceData>,
+    earliest_nonce_expiry: Option<Instant>,
     pending_transmits: VecDeque<Transmit<Vec<u8>>>,
     pending_allocates: VecDeque<PendingClient>,
 
@@ -116,6 +117,7 @@ impl TurnServer {
             stun,
             clients: vec![],
             nonces: vec![],
+            earliest_nonce_expiry: None,
             pending_transmits: VecDeque::default(),
             pending_allocates: VecDeque::default(),
             users: BTreeMap::default(),
@@ -144,6 +146,15 @@ impl TurnServer {
         }
     }
 
+    fn recalculate_nonce_expiry(&mut self, now: Instant) {
+        self.earliest_nonce_expiry = self
+            .nonces
+            .iter()
+            .try_fold(now + self.nonce_expiry_duration, |ret, val| {
+                Some(ret.min(val.expires_at))
+            });
+    }
+
     fn validate_nonce(
         &mut self,
         ttype: TransportType,
@@ -163,8 +174,17 @@ impl TurnServer {
             if nonce_data.expires_at < now {
                 nonce_data.nonce = Self::generate_nonce();
                 nonce_data.expires_at = now + nonce_expiry_duration;
+                let ret = nonce_data.nonce.clone();
+                if self
+                    .earliest_nonce_expiry
+                    .map_or(true, |earliest| earliest < now)
+                {
+                    self.recalculate_nonce_expiry(now);
+                }
+                ret
+            } else {
+                nonce_data.nonce.clone()
             }
-            nonce_data.nonce.clone()
         } else {
             let nonce_value = Self::generate_nonce();
             self.nonces.push(NonceData {
@@ -174,6 +194,7 @@ impl TurnServer {
                 nonce: nonce_value.clone(),
                 expires_at: now + self.nonce_expiry_duration,
             });
+            self.recalculate_nonce_expiry(now);
             nonce_value
         }
     }
@@ -219,6 +240,7 @@ impl TurnServer {
             builder.add_attribute(&realm).unwrap();
             let error = ErrorCode::builder(ErrorCode::UNAUTHORIZED).build().unwrap();
             builder.add_attribute(&error).unwrap();
+            error!("unauth size {}", builder.len());
             return Err(builder);
         }
 
@@ -1436,6 +1458,7 @@ impl TurnServerApi for TurnServer {
 
     #[tracing::instrument(level = "debug", name = "turn_server_poll", skip(self), ret)]
     fn poll(&mut self, now: Instant) -> TurnServerPollRet {
+        let mut lowest_wait = now + Duration::from_secs(3600);
         for pending in self.pending_allocates.iter_mut() {
             if let Some(family) = pending.to_ask_families.pop() {
                 // TODO: TCP
@@ -1457,6 +1480,7 @@ impl TurnServerApi for TurnServer {
                     allocation
                         .channels
                         .retain_mut(|channel| channel.expires_at >= now);
+                    lowest_wait = lowest_wait.min(allocation.expires_at);
                     true
                 } else {
                     false
@@ -1464,7 +1488,17 @@ impl TurnServerApi for TurnServer {
             });
         }
 
-        TurnServerPollRet::WaitUntil(now + Duration::from_secs(60))
+        if let Some(earliest) = self.earliest_nonce_expiry {
+            if earliest < now {
+                self.nonces.retain(|nonce| nonce.expires_at >= now);
+                self.recalculate_nonce_expiry(now);
+            };
+            if let Some(earliest) = self.earliest_nonce_expiry {
+                lowest_wait = lowest_wait.min(earliest);
+            }
+        }
+
+        TurnServerPollRet::WaitUntil(lowest_wait.max(now))
     }
 
     #[tracing::instrument(name = "turn_server_poll_transmit", skip(self))]
@@ -2234,6 +2268,22 @@ mod tests {
             address_error_code.error().code(),
             ErrorCode::ADDRESS_FAMILY_NOT_SUPPORTED
         );
+    }
+
+    #[test]
+    fn test_server_allocation_expire() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut server = new_server(TransportType::Udp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply =
+            authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        let (_msg, lifetime) = validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        let TurnServerPollRet::WaitUntil(wait) = server.poll(now) else {
+            unreachable!();
+        };
+        assert_eq!(wait, now + Duration::from_secs(lifetime as u64));
     }
 
     fn create_permission_request(
