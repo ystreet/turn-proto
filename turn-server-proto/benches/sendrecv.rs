@@ -203,6 +203,52 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
         )
     });
 
+    c.bench_function("Allocate/Authenticated/SocketErr", |b| {
+        b.iter_batched(
+            || {
+                let mut test = TurnTest::new(
+                    |local_addr: SocketAddr,
+                     remote_addr: SocketAddr,
+                     credentials: TurnCredentials| {
+                        TurnClientUdp::allocate(
+                            local_addr,
+                            remote_addr,
+                            credentials,
+                            &[AddressFamily::IPV4],
+                        )
+                    },
+                );
+                let transmit = test.client.poll_transmit(now).unwrap();
+                let transmit = test.server.recv(transmit, now).unwrap();
+                test.client.recv(transmit.build(), now);
+                let transmit = test.client.poll_transmit(now).unwrap();
+                (test, transmit)
+            },
+            |(mut test, transmit)| {
+                assert!(test.server.recv(transmit, now).is_none());
+                let TurnServerPollRet::AllocateSocketUdp {
+                    transport: _,
+                    local_addr,
+                    remote_addr,
+                    family,
+                } = test.server.poll(now)
+                else {
+                    unreachable!();
+                };
+                test.server.allocated_udp_socket(
+                    TransportType::Udp,
+                    local_addr,
+                    remote_addr,
+                    family,
+                    Err(turn_server_proto::api::SocketAllocateError::InsufficientCapacity),
+                    now,
+                );
+                let _transmit = test.server.poll_transmit(now).unwrap();
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
+
     c.bench_function("CreatePermission", |b| {
         b.iter_batched(
             || {
