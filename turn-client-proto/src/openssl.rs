@@ -102,8 +102,8 @@ impl HandshakeState {
                 warn!("Failure during ssl setup: {}", mid.error());
                 *self = Self::Handshaking(mid);
                 Err(std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    "Would Block",
+                    std::io::ErrorKind::ConnectionRefused,
+                    "Failure to setup SSL parameters",
                 ))
             }
         }
