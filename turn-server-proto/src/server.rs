@@ -1162,7 +1162,7 @@ impl TurnServerApi for TurnServer {
     }
 
     #[tracing::instrument(
-        name = "turn_server_recv",
+        name = "turn_server_recv_icmp",
         skip(self, bytes, now),
         fields(
             data_len = bytes.as_ref().len(),
