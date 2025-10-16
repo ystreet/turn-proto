@@ -1336,7 +1336,9 @@ impl TurnServerApi for TurnServer {
                     client.remote_addr,
                 ))
             }
-        } else {
+        } else if transmit.transport == self.stun.transport()
+            && transmit.to == self.stun.local_addr()
+        {
             // TODO: TCP buffering requirements
             match Message::from_bytes(transmit.data.as_ref()) {
                 Ok(msg) => {
@@ -1453,6 +1455,8 @@ impl TurnServerApi for TurnServer {
                     ))
                 }
             }
+        } else {
+            None
         }
     }
 
@@ -1525,10 +1529,10 @@ impl TurnServerApi for TurnServer {
                 && pending.client.remote_addr == remote_addr
                 && pending.pending_families.contains(&family)
         }) else {
-            warn!("No pending allocation for transport: Udp, local: {local_addr:?}, remote {remote_addr:?}");
+            warn!("No pending allocation for transport: {transport}, local: {local_addr:?}, remote {remote_addr:?}");
             return;
         };
-        info!("pending allocation for transport: Udp, local: {local_addr:?}, remote {remote_addr:?} family {family} resulted in {socket_addr:?}");
+        info!("pending allocation for transport: {transport}, local: {local_addr:?}, remote {remote_addr:?} family {family} resulted in Udp {socket_addr:?}");
         let pending = &mut self.pending_allocates[position];
         pending.pending_sockets.push((family, socket_addr));
         pending.pending_families.retain(|fam| *fam != family);
