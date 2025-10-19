@@ -17,6 +17,7 @@ use byteorder::{BigEndian, ByteOrder};
 use core::net::{IpAddr, SocketAddr};
 use core::time::Duration;
 use pnet_packet::Packet;
+use turn_types::tcp::{IncomingTcp, TurnTcpBuffer};
 use turn_types::transmit::{DelayedChannel, DelayedMessage, TransmitBuild};
 
 use stun_proto::agent::{StunAgent, Transmit};
@@ -64,6 +65,7 @@ static CHANNEL_DURATION: Duration = Duration::from_secs(600);
 pub struct TurnServer {
     realm: String,
     stun: StunAgent,
+    incoming_stun_tcp_buffer: TurnTcpBuffer,
 
     clients: Vec<Client>,
     nonces: Vec<NonceData>,
@@ -97,6 +99,13 @@ struct NonceData {
     local_addr: SocketAddr,
 }
 
+#[derive(Debug)]
+struct ForwardChannelData {
+    transport: TransportType,
+    from: SocketAddr,
+    to: SocketAddr,
+}
+
 impl TurnServer {
     /// Construct a new [`TurnServer`]
     ///
@@ -115,6 +124,7 @@ impl TurnServer {
         Self {
             realm,
             stun,
+            incoming_stun_tcp_buffer: TurnTcpBuffer::new(),
             clients: vec![],
             nonces: vec![],
             earliest_nonce_expiry: None,
@@ -1137,6 +1147,78 @@ impl TurnServer {
                 .map(|(allocation, permission)| (client, allocation, permission))
         })
     }
+
+    fn handle_channel(
+        &mut self,
+        transport: TransportType,
+        from: SocketAddr,
+        to: SocketAddr,
+        channel: ChannelData<'_>,
+        now: Instant,
+    ) -> Option<ForwardChannelData> {
+        let Some(client) = self.client_from_5tuple(transport, to, from) else {
+            trace!(
+                "No handler for {} bytes over {:?} from {:?}, to {:?}. Ignoring",
+                channel.data().len() + 4,
+                transport,
+                from,
+                to
+            );
+            return None;
+        };
+        trace!(
+            "received channel {} with {} bytes from {:?}",
+            channel.id(),
+            channel.data().len(),
+            from
+        );
+        let Some((allocation, existing)) = client.allocations.iter().find_map(|allocation| {
+            allocation
+                .channel_from_id(channel.id())
+                .map(|perm| (allocation, perm))
+        }) else {
+            warn!(
+                "no channel id {} for this client {:?}",
+                channel.id(),
+                client.remote_addr
+            );
+            // no channel with that id
+            return None;
+        };
+        if existing.expires_at < now {
+            trace!(
+                "channel for {from} expired {:?} ago",
+                now - existing.expires_at
+            );
+            return None;
+        }
+
+        // A packet from the client needs to be sent to the peer referenced by the
+        // configured channel.
+        let Some(permission) = allocation.permission_from_5tuple(
+            allocation.ttype,
+            allocation.addr,
+            existing.peer_addr,
+        ) else {
+            warn!(
+                "no permission for {:?} for this allocation {:?}",
+                existing.peer_addr, allocation.addr
+            );
+            return None;
+        };
+        if permission.expires_at < now {
+            trace!(
+                "permission for {from} expired {:?} ago",
+                now - permission.expires_at
+            );
+            return None;
+        }
+        Some(ForwardChannelData {
+            transport: allocation.ttype,
+            from: allocation.addr,
+            to: existing.peer_addr,
+        })
+    }
 }
 
 impl TurnServerApi for TurnServer {
@@ -1339,121 +1421,191 @@ impl TurnServerApi for TurnServer {
         } else if transmit.transport == self.stun.transport()
             && transmit.to == self.stun.local_addr()
         {
-            // TODO: TCP buffering requirements
-            match Message::from_bytes(transmit.data.as_ref()) {
-                Ok(msg) => {
-                    match self.handle_stun(
-                        &msg,
-                        transmit.transport,
-                        transmit.from,
-                        transmit.to,
-                        now,
-                    ) {
-                        Err(builder) => Some(TransmitBuild::new(
-                            DelayedMessageOrChannelSend::Owned(builder.finish()),
+            match transmit.transport {
+                TransportType::Tcp => match self.incoming_stun_tcp_buffer.incoming_tcp(transmit) {
+                    None => None,
+                    Some(IncomingTcp::CompleteMessage(transmit, range)) => {
+                        let Ok(msg) =
+                            Message::from_bytes(&transmit.data.as_ref()[range.start..range.end])
+                        else {
+                            return None;
+                        };
+                        match self.handle_stun(
+                            &msg,
                             transmit.transport,
+                            transmit.from,
                             transmit.to,
-                            transmit.from,
-                        )),
-                        Ok(Some(InternalHandleStun::Transmit(transmit))) => {
-                            Some(TransmitBuild::new(
-                                DelayedMessageOrChannelSend::Owned(transmit.data),
+                            now,
+                        ) {
+                            Err(builder) => Some(TransmitBuild::new(
+                                DelayedMessageOrChannelSend::Owned(builder.finish()),
                                 transmit.transport,
-                                transmit.from,
                                 transmit.to,
-                            ))
+                                transmit.from,
+                            )),
+                            Ok(Some(InternalHandleStun::Transmit(transmit))) => {
+                                Some(TransmitBuild::new(
+                                    DelayedMessageOrChannelSend::Owned(transmit.data),
+                                    transmit.transport,
+                                    transmit.from,
+                                    transmit.to,
+                                ))
+                            }
+                            Ok(Some(InternalHandleStun::Data(transport, from, to, range))) => {
+                                Some(TransmitBuild::new(
+                                    DelayedMessageOrChannelSend::Range(transmit.data, range),
+                                    transport,
+                                    from,
+                                    to,
+                                ))
+                            }
+                            Ok(None) => None,
                         }
-                        Ok(Some(InternalHandleStun::Data(transport, from, to, range))) => {
-                            Some(TransmitBuild::new(
-                                DelayedMessageOrChannelSend::Range(transmit.data, range),
-                                transport,
-                                from,
-                                to,
-                            ))
-                        }
-                        Ok(None) => None,
                     }
-                }
-                Err(_) => {
-                    let Some(client) =
-                        self.client_from_5tuple(transmit.transport, transmit.to, transmit.from)
-                    else {
-                        trace!(
-                            "No handler for {} bytes over {:?} from {:?}, to {:?}. Ignoring",
-                            transmit.data.as_ref().len(),
+                    Some(IncomingTcp::CompleteChannel(transmit, range)) => {
+                        let Ok(channel) =
+                            ChannelData::parse(&transmit.data.as_ref()[range.start..range.end])
+                        else {
+                            return None;
+                        };
+                        let ForwardChannelData {
+                            transport,
+                            from,
+                            to,
+                        } = self.handle_channel(
                             transmit.transport,
                             transmit.from,
-                            transmit.to
-                        );
-                        return None;
-                    };
-                    trace!(
-                        "received {} bytes from {:?}",
-                        transmit.data.as_ref().len(),
-                        transmit.from
-                    );
-                    let data = transmit.data.as_ref();
-                    let Ok((channel_id, channel_len)) = ChannelData::parse_header(data) else {
-                        return None;
-                    };
-                    if data.len() < 4 + channel_len {
-                        // message too short
-                        return None;
+                            transmit.to,
+                            channel,
+                            now,
+                        )?;
+                        Some(TransmitBuild::new(
+                            DelayedMessageOrChannelSend::Range(
+                                transmit.data,
+                                4 + range.start..range.end,
+                            ),
+                            transport,
+                            from,
+                            to,
+                        ))
                     }
-                    trace!(
-                        "parsed channel data with id {channel_id} and data length {channel_len}",
-                    );
-                    let Some((allocation, existing)) =
-                        client.allocations.iter().find_map(|allocation| {
-                            allocation
-                                .channel_from_id(channel_id)
-                                .map(|perm| (allocation, perm))
-                        })
-                    else {
-                        warn!(
-                            "no channel id {channel_id} for this client {:?}",
-                            client.remote_addr
-                        );
-                        // no channel with that id
-                        return None;
-                    };
-                    if existing.expires_at < now {
-                        trace!(
-                            "channel for {} expired {:?} ago",
+                    Some(IncomingTcp::StoredMessage(data, transmit)) => {
+                        let Ok(msg) = Message::from_bytes(&data) else {
+                            return None;
+                        };
+                        match self.handle_stun(
+                            &msg,
+                            transmit.transport,
                             transmit.from,
-                            now - existing.expires_at
-                        );
-                        return None;
+                            transmit.to,
+                            now,
+                        ) {
+                            Err(builder) => Some(TransmitBuild::new(
+                                DelayedMessageOrChannelSend::Owned(builder.finish()),
+                                transmit.transport,
+                                transmit.to,
+                                transmit.from,
+                            )),
+                            Ok(Some(InternalHandleStun::Transmit(transmit))) => {
+                                Some(TransmitBuild::new(
+                                    DelayedMessageOrChannelSend::Owned(transmit.data),
+                                    transmit.transport,
+                                    transmit.from,
+                                    transmit.to,
+                                ))
+                            }
+                            Ok(Some(InternalHandleStun::Data(transport, from, to, range))) => {
+                                Some(TransmitBuild::new(
+                                    DelayedMessageOrChannelSend::Range(transmit.data, range),
+                                    transport,
+                                    from,
+                                    to,
+                                ))
+                            }
+                            Ok(None) => None,
+                        }
                     }
-
-                    // A packet from the client needs to be sent to the peer referenced by the
-                    // configured channel.
-                    let Some(permission) = allocation.permission_from_5tuple(
-                        allocation.ttype,
-                        allocation.addr,
-                        existing.peer_addr,
-                    ) else {
-                        warn!(
-                            "no permission for {:?} for this allocation {:?}",
-                            existing.peer_addr, allocation.addr
-                        );
-                        return None;
-                    };
-                    if permission.expires_at < now {
-                        trace!(
-                            "permission for {} expired {:?} ago",
+                    Some(IncomingTcp::StoredChannel(data, transmit)) => {
+                        let Ok(channel) = ChannelData::parse(&data) else {
+                            return None;
+                        };
+                        let ForwardChannelData {
+                            transport,
+                            from,
+                            to,
+                        } = self.handle_channel(
+                            transmit.transport,
                             transmit.from,
-                            now - permission.expires_at
-                        );
-                        return None;
+                            transmit.to,
+                            channel,
+                            now,
+                        )?;
+                        Some(TransmitBuild::new(
+                            DelayedMessageOrChannelSend::Owned(data[4..].to_vec()),
+                            transport,
+                            from,
+                            to,
+                        ))
                     }
-                    Some(TransmitBuild::new(
-                        DelayedMessageOrChannelSend::Range(transmit.data, 4..4 + channel_len),
-                        allocation.ttype,
-                        allocation.addr,
-                        existing.peer_addr,
-                    ))
-                }
+                },
+                TransportType::Udp => match Message::from_bytes(transmit.data.as_ref()) {
+                    Ok(msg) => {
+                        match self.handle_stun(
+                            &msg,
+                            transmit.transport,
+                            transmit.from,
+                            transmit.to,
+                            now,
+                        ) {
+                            Err(builder) => Some(TransmitBuild::new(
+                                DelayedMessageOrChannelSend::Owned(builder.finish()),
+                                transmit.transport,
+                                transmit.to,
+                                transmit.from,
+                            )),
+                            Ok(Some(InternalHandleStun::Transmit(transmit))) => {
+                                Some(TransmitBuild::new(
+                                    DelayedMessageOrChannelSend::Owned(transmit.data),
+                                    transmit.transport,
+                                    transmit.from,
+                                    transmit.to,
+                                ))
+                            }
+                            Ok(Some(InternalHandleStun::Data(transport, from, to, range))) => {
+                                Some(TransmitBuild::new(
+                                    DelayedMessageOrChannelSend::Range(transmit.data, range),
+                                    transport,
+                                    from,
+                                    to,
+                                ))
+                            }
+                            Ok(None) => None,
+                        }
+                    }
+                    Err(_) => {
+                        let Ok(channel) = ChannelData::parse(transmit.data.as_ref()) else {
+                            return None;
+                        };
+                        let ForwardChannelData {
+                            transport,
+                            from,
+                            to,
+                        } = self.handle_channel(
+                            transmit.transport,
+                            transmit.from,
+                            transmit.to,
+                            channel,
+                            now,
+                        )?;
+                        let channel_len = channel.data().len();
+                        Some(TransmitBuild::new(
+                            DelayedMessageOrChannelSend::Range(transmit.data, 4..4 + channel_len),
+                            transport,
+                            from,
+                            to,
+                        ))
+                    }
+                },
             }
         } else {
             None

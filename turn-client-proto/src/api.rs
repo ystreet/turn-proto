@@ -844,6 +844,7 @@ pub(crate) mod tests {
             assert_eq!(transmit.transport, TransportType::Udp);
             assert_eq!(transmit.from, self.turn_alloc_addr);
             assert_eq!(transmit.to, self.peer_addr);
+            assert_eq!(transmit.build().data, data);
 
             // peer to client
             let sent_data = [5; 12];
@@ -910,6 +911,7 @@ pub(crate) mod tests {
             assert_eq!(transmit.transport, TransportType::Udp);
             assert_eq!(transmit.from, self.turn_alloc_addr);
             assert_eq!(transmit.to, self.peer_addr);
+            assert_eq!(transmit.data, to_peer);
 
             // peer to client
             let transmit = self
