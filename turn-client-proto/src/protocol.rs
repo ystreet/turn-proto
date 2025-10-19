@@ -500,6 +500,7 @@ impl TurnClientProtocol {
             pending_events,
             msg,
             credentials,
+            key,
             now
         )
     )]
