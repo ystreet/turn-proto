@@ -2070,6 +2070,7 @@ mod tests {
     ) -> TurnProtocolRecv {
         let transmit = client.poll_transmit(now).unwrap();
         let msg = Message::from_bytes(&transmit.data).unwrap();
+        trace!("received {msg}");
         assert_eq!(msg.method(), method);
         let reply = reply(msg);
         let msg = Message::from_bytes(&reply).unwrap();
