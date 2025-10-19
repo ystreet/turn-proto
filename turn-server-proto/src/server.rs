@@ -1516,7 +1516,9 @@ impl TurnServerApi for TurnServer {
                             }
                             Ok(Some(InternalHandleStun::Data(transport, from, to, range))) => {
                                 Some(TransmitBuild::new(
-                                    DelayedMessageOrChannelSend::Range(transmit.data, range),
+                                    DelayedMessageOrChannelSend::Owned(
+                                        data[range.start..range.end].to_vec(),
+                                    ),
                                     transport,
                                     from,
                                     to,
@@ -3712,5 +3714,67 @@ mod tests {
             icmp_code.0,
             0,
         );
+    }
+
+    #[test]
+    fn test_tcp_server_split_recv_channel() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut server = new_server(TransportType::Tcp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply =
+            authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        channel_bind(&mut server, creds.clone(), &nonce, now);
+        let data = {
+            let channel = ChannelData::new(0x4000, [7; 3].as_slice());
+            let mut out = vec![0; 7];
+            channel.write_into_unchecked(&mut out);
+            out
+        };
+        for i in 1..data.len() - 1 {
+            assert!(server
+                .recv(client_transmit(&data[..i], server.transport()), now)
+                .is_none());
+            let ret = server
+                .recv(client_transmit(&data[i..], server.transport()), now)
+                .unwrap();
+            assert_eq!(ret.transport, TransportType::Udp);
+            assert_eq!(ret.from, relayed_address());
+            assert_eq!(ret.to, peer_address());
+            assert_eq!(&ret.data.build(), &data[4..]);
+        }
+    }
+
+    #[test]
+    fn test_tcp_server_split_recv_indication() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut server = new_server(TransportType::Tcp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply =
+            authenticated_allocate_with_credentials(&mut server, creds.clone(), &nonce, now);
+        validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        create_permission(&mut server, creds.clone(), &nonce, now);
+        let mut msg = Message::builder_indication(SEND, MessageWriteVec::new());
+        msg.add_attribute(&XorPeerAddress::new(peer_address(), msg.transaction_id()))
+            .unwrap();
+        let offset = msg.len() + 4;
+        msg.add_attribute(&AData::new(&[7; 3])).unwrap();
+        let data = msg.clone().build();
+        for i in 1..data.len() - 1 {
+            assert!(server
+                .recv(client_transmit(&data[..i], server.transport()), now)
+                .is_none());
+            let ret = server
+                .recv(client_transmit(&data[i..], server.transport()), now)
+                .unwrap();
+            assert_eq!(ret.transport, TransportType::Udp);
+            assert_eq!(ret.from, relayed_address());
+            assert_eq!(ret.to, peer_address());
+            assert_eq!(&ret.data.build(), &data[offset..data.len() - 1]);
+        }
     }
 }
