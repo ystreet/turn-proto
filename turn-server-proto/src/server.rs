@@ -17,7 +17,7 @@ use byteorder::{BigEndian, ByteOrder};
 use core::net::{IpAddr, SocketAddr};
 use core::time::Duration;
 use pnet_packet::Packet;
-use turn_types::tcp::{IncomingTcp, TurnTcpBuffer};
+use turn_types::tcp::{IncomingTcp, StoredTcp, TurnTcpBuffer};
 use turn_types::transmit::{DelayedChannel, DelayedMessage, TransmitBuild};
 
 use stun_proto::agent::{StunAgent, Transmit};
@@ -65,7 +65,6 @@ static CHANNEL_DURATION: Duration = Duration::from_secs(600);
 pub struct TurnServer {
     realm: String,
     stun: StunAgent,
-    incoming_stun_tcp_buffer: TurnTcpBuffer,
 
     clients: Vec<Client>,
     nonces: Vec<NonceData>,
@@ -97,6 +96,7 @@ struct NonceData {
     transport: TransportType,
     remote_addr: SocketAddr,
     local_addr: SocketAddr,
+    tcp_buffer: TurnTcpBuffer,
 }
 
 #[derive(Debug)]
@@ -124,7 +124,6 @@ impl TurnServer {
         Self {
             realm,
             stun,
-            incoming_stun_tcp_buffer: TurnTcpBuffer::new(),
             clients: vec![],
             nonces: vec![],
             earliest_nonce_expiry: None,
@@ -203,6 +202,7 @@ impl TurnServer {
                 local_addr: to,
                 nonce: nonce_value.clone(),
                 expires_at: now + self.nonce_expiry_duration,
+                tcp_buffer: TurnTcpBuffer::new(),
             });
             self.recalculate_nonce_expiry(now);
             nonce_value
@@ -250,7 +250,6 @@ impl TurnServer {
             builder.add_attribute(&realm).unwrap();
             let error = ErrorCode::builder(ErrorCode::UNAUTHORIZED).build().unwrap();
             builder.add_attribute(&error).unwrap();
-            error!("unauth size {}", builder.len());
             return Err(builder);
         }
 
@@ -1219,6 +1218,34 @@ impl TurnServer {
             to: existing.peer_addr,
         })
     }
+
+    fn handle_listen_tcp_stored_message(
+        &mut self,
+        remote_addr: SocketAddr,
+        data: Vec<u8>,
+        now: Instant,
+    ) -> Option<Transmit<Vec<u8>>> {
+        let listen_addr = self.listen_address();
+        let Ok(msg) = Message::from_bytes(&data) else {
+            return None;
+        };
+        match self.handle_stun(&msg, TransportType::Tcp, remote_addr, listen_addr, now) {
+            Err(builder) => Some(Transmit::new(
+                builder.finish(),
+                TransportType::Tcp,
+                listen_addr,
+                remote_addr,
+            )),
+            Ok(Some(InternalHandleStun::Transmit(transmit))) => Some(transmit),
+            Ok(Some(InternalHandleStun::Data(transport, from, to, range))) => Some(Transmit::new(
+                data[range.start..range.end].to_vec(),
+                transport,
+                from,
+                to,
+            )),
+            Ok(None) => None,
+        }
+    }
 }
 
 impl TurnServerApi for TurnServer {
@@ -1422,134 +1449,126 @@ impl TurnServerApi for TurnServer {
             && transmit.to == self.stun.local_addr()
         {
             match transmit.transport {
-                TransportType::Tcp => match self.incoming_stun_tcp_buffer.incoming_tcp(transmit) {
-                    None => None,
-                    Some(IncomingTcp::CompleteMessage(transmit, range)) => {
-                        let Ok(msg) =
-                            Message::from_bytes(&transmit.data.as_ref()[range.start..range.end])
-                        else {
-                            return None;
-                        };
-                        match self.handle_stun(
-                            &msg,
-                            transmit.transport,
-                            transmit.from,
-                            transmit.to,
-                            now,
-                        ) {
-                            Err(builder) => Some(TransmitBuild::new(
-                                DelayedMessageOrChannelSend::Owned(builder.finish()),
+                TransportType::Tcp => {
+                    let tcp_buffer = if let Some(tcp_buffer) = self
+                        .mut_nonce_from_5tuple(transmit.transport, transmit.to, transmit.from)
+                        .map(|nonce| &mut nonce.tcp_buffer)
+                    {
+                        tcp_buffer
+                    } else {
+                        let nonce_value = Self::generate_nonce();
+                        self.nonces.push(NonceData {
+                            transport: transmit.transport,
+                            remote_addr: transmit.from,
+                            local_addr: transmit.to,
+                            nonce: nonce_value.clone(),
+                            expires_at: now + self.nonce_expiry_duration,
+                            tcp_buffer: TurnTcpBuffer::new(),
+                        });
+                        self.recalculate_nonce_expiry(now);
+                        &mut self.nonces.last_mut().unwrap().tcp_buffer
+                    };
+                    match tcp_buffer.incoming_tcp(transmit) {
+                        None => None,
+                        Some(IncomingTcp::CompleteMessage(transmit, range)) => {
+                            let Ok(msg) = Message::from_bytes(
+                                &transmit.data.as_ref()[range.start..range.end],
+                            ) else {
+                                return None;
+                            };
+                            match self.handle_stun(
+                                &msg,
                                 transmit.transport,
-                                transmit.to,
                                 transmit.from,
-                            )),
-                            Ok(Some(InternalHandleStun::Transmit(transmit))) => {
-                                Some(TransmitBuild::new(
+                                transmit.to,
+                                now,
+                            ) {
+                                Err(builder) => Some(TransmitBuild::new(
+                                    DelayedMessageOrChannelSend::Owned(builder.finish()),
+                                    transmit.transport,
+                                    transmit.to,
+                                    transmit.from,
+                                )),
+                                Ok(Some(InternalHandleStun::Transmit(transmit))) => {
+                                    Some(TransmitBuild::new(
+                                        DelayedMessageOrChannelSend::Owned(transmit.data),
+                                        transmit.transport,
+                                        transmit.from,
+                                        transmit.to,
+                                    ))
+                                }
+                                Ok(Some(InternalHandleStun::Data(transport, from, to, range))) => {
+                                    Some(TransmitBuild::new(
+                                        DelayedMessageOrChannelSend::Range(transmit.data, range),
+                                        transport,
+                                        from,
+                                        to,
+                                    ))
+                                }
+                                Ok(None) => None,
+                            }
+                        }
+                        Some(IncomingTcp::CompleteChannel(transmit, range)) => {
+                            let Ok(channel) =
+                                ChannelData::parse(&transmit.data.as_ref()[range.start..range.end])
+                            else {
+                                return None;
+                            };
+                            let ForwardChannelData {
+                                transport,
+                                from,
+                                to,
+                            } = self.handle_channel(
+                                transmit.transport,
+                                transmit.from,
+                                transmit.to,
+                                channel,
+                                now,
+                            )?;
+                            Some(TransmitBuild::new(
+                                DelayedMessageOrChannelSend::Range(
+                                    transmit.data,
+                                    4 + range.start..range.end,
+                                ),
+                                transport,
+                                from,
+                                to,
+                            ))
+                        }
+                        Some(IncomingTcp::StoredMessage(data, transmit)) => self
+                            .handle_listen_tcp_stored_message(transmit.from, data, now)
+                            .map(|transmit| {
+                                TransmitBuild::new(
                                     DelayedMessageOrChannelSend::Owned(transmit.data),
                                     transmit.transport,
                                     transmit.from,
                                     transmit.to,
-                                ))
-                            }
-                            Ok(Some(InternalHandleStun::Data(transport, from, to, range))) => {
-                                Some(TransmitBuild::new(
-                                    DelayedMessageOrChannelSend::Range(transmit.data, range),
-                                    transport,
-                                    from,
-                                    to,
-                                ))
-                            }
-                            Ok(None) => None,
-                        }
-                    }
-                    Some(IncomingTcp::CompleteChannel(transmit, range)) => {
-                        let Ok(channel) =
-                            ChannelData::parse(&transmit.data.as_ref()[range.start..range.end])
-                        else {
-                            return None;
-                        };
-                        let ForwardChannelData {
-                            transport,
-                            from,
-                            to,
-                        } = self.handle_channel(
-                            transmit.transport,
-                            transmit.from,
-                            transmit.to,
-                            channel,
-                            now,
-                        )?;
-                        Some(TransmitBuild::new(
-                            DelayedMessageOrChannelSend::Range(
-                                transmit.data,
-                                4 + range.start..range.end,
-                            ),
-                            transport,
-                            from,
-                            to,
-                        ))
-                    }
-                    Some(IncomingTcp::StoredMessage(data, transmit)) => {
-                        let Ok(msg) = Message::from_bytes(&data) else {
-                            return None;
-                        };
-                        match self.handle_stun(
-                            &msg,
-                            transmit.transport,
-                            transmit.from,
-                            transmit.to,
-                            now,
-                        ) {
-                            Err(builder) => Some(TransmitBuild::new(
-                                DelayedMessageOrChannelSend::Owned(builder.finish()),
+                                )
+                            }),
+                        Some(IncomingTcp::StoredChannel(data, transmit)) => {
+                            let Ok(channel) = ChannelData::parse(&data) else {
+                                return None;
+                            };
+                            let ForwardChannelData {
+                                transport,
+                                from,
+                                to,
+                            } = self.handle_channel(
                                 transmit.transport,
-                                transmit.to,
                                 transmit.from,
-                            )),
-                            Ok(Some(InternalHandleStun::Transmit(transmit))) => {
-                                Some(TransmitBuild::new(
-                                    DelayedMessageOrChannelSend::Owned(transmit.data),
-                                    transmit.transport,
-                                    transmit.from,
-                                    transmit.to,
-                                ))
-                            }
-                            Ok(Some(InternalHandleStun::Data(transport, from, to, range))) => {
-                                Some(TransmitBuild::new(
-                                    DelayedMessageOrChannelSend::Owned(
-                                        data[range.start..range.end].to_vec(),
-                                    ),
-                                    transport,
-                                    from,
-                                    to,
-                                ))
-                            }
-                            Ok(None) => None,
+                                transmit.to,
+                                channel,
+                                now,
+                            )?;
+                            Some(TransmitBuild::new(
+                                DelayedMessageOrChannelSend::Owned(data[4..].to_vec()),
+                                transport,
+                                from,
+                                to,
+                            ))
                         }
                     }
-                    Some(IncomingTcp::StoredChannel(data, transmit)) => {
-                        let Ok(channel) = ChannelData::parse(&data) else {
-                            return None;
-                        };
-                        let ForwardChannelData {
-                            transport,
-                            from,
-                            to,
-                        } = self.handle_channel(
-                            transmit.transport,
-                            transmit.from,
-                            transmit.to,
-                            channel,
-                            now,
-                        )?;
-                        Some(TransmitBuild::new(
-                            DelayedMessageOrChannelSend::Owned(data[4..].to_vec()),
-                            transport,
-                            from,
-                            to,
-                        ))
-                    }
-                },
+                }
                 TransportType::Udp => match Message::from_bytes(transmit.data.as_ref()) {
                     Ok(msg) => {
                         match self.handle_stun(
@@ -1663,6 +1682,42 @@ impl TurnServerApi for TurnServer {
     fn poll_transmit(&mut self, now: Instant) -> Option<Transmit<Vec<u8>>> {
         if let Some(transmit) = self.pending_transmits.pop_back() {
             return Some(transmit);
+        }
+        if self.stun.transport() != TransportType::Tcp {
+            return None;
+        }
+        let nonce_len = self.nonces.len();
+        for i in 0..nonce_len {
+            let nonce = &mut self.nonces[i];
+            let local_addr = nonce.local_addr;
+            let remote_addr = nonce.remote_addr;
+
+            let ret = match nonce.tcp_buffer.poll_recv() {
+                Some(StoredTcp::Message(msg)) => {
+                    self.handle_listen_tcp_stored_message(remote_addr, msg, now)
+                }
+                Some(StoredTcp::Channel(channel)) => {
+                    let Ok(channel) = ChannelData::parse(&channel) else {
+                        return None;
+                    };
+                    let ForwardChannelData {
+                        transport,
+                        from,
+                        to,
+                    } = self.handle_channel(
+                        TransportType::Tcp,
+                        remote_addr,
+                        local_addr,
+                        channel,
+                        now,
+                    )?;
+                    Some(Transmit::new(channel.data().to_vec(), transport, from, to))
+                }
+                None => continue,
+            };
+            if ret.is_some() {
+                return ret;
+            }
         }
         None
     }
@@ -1935,11 +1990,19 @@ mod tests {
         server
     }
 
+    fn client_transmit_from<T: AsRef<[u8]> + core::fmt::Debug>(
+        data: T,
+        transport: TransportType,
+        from: SocketAddr,
+    ) -> Transmit<T> {
+        Transmit::new(data, transport, from, listen_address())
+    }
+
     fn client_transmit<T: AsRef<[u8]> + core::fmt::Debug>(
         data: T,
         transport: TransportType,
     ) -> Transmit<T> {
-        Transmit::new(data, transport, client_address(), listen_address())
+        client_transmit_from(data, transport, client_address())
     }
 
     #[test]
@@ -2125,51 +2188,41 @@ mod tests {
             .unwrap();
     }
 
-    fn authenticated_allocate_with_credentials_transport_families(
-        server: &mut TurnServer,
+    fn authenticated_allocate_msg(
         credentials: LongTermCredentials,
         nonce: &str,
         transport: u8,
         families: &[(AddressFamily, Result<SocketAddr, SocketAllocateError>)],
+    ) -> Vec<u8> {
+        let mut allocate = Message::builder_request(ALLOCATE, MessageWriteVec::new());
+        add_authenticated_request_required_attributes(&mut allocate, credentials.clone(), nonce);
+        allocate
+            .add_attribute(&RequestedTransport::new(transport))
+            .unwrap();
+        if families.len() > 1 {
+            for (family, _) in families {
+                if *family != AddressFamily::IPV4 {
+                    allocate
+                        .add_attribute(&AdditionalAddressFamily::new(*family))
+                        .unwrap();
+                }
+            }
+        } else if families[0].0 != AddressFamily::IPV4 {
+            allocate
+                .add_attribute(&RequestedAddressFamily::new(families[0].0))
+                .unwrap();
+        }
+        allocate
+            .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+            .unwrap();
+        allocate.finish()
+    }
+
+    fn authenticated_allocate_reply(
+        server: &mut TurnServer,
+        families: &[(AddressFamily, Result<SocketAddr, SocketAllocateError>)],
         now: Instant,
     ) -> Transmit<Vec<u8>> {
-        let ret = server.recv(
-            client_transmit(
-                {
-                    let mut allocate = Message::builder_request(ALLOCATE, MessageWriteVec::new());
-                    add_authenticated_request_required_attributes(
-                        &mut allocate,
-                        credentials.clone(),
-                        nonce,
-                    );
-                    allocate
-                        .add_attribute(&RequestedTransport::new(transport))
-                        .unwrap();
-                    if families.len() > 1 {
-                        for (family, _) in families {
-                            if *family != AddressFamily::IPV4 {
-                                allocate
-                                    .add_attribute(&AdditionalAddressFamily::new(*family))
-                                    .unwrap();
-                            }
-                        }
-                    } else if families[0].0 != AddressFamily::IPV4 {
-                        allocate
-                            .add_attribute(&RequestedAddressFamily::new(families[0].0))
-                            .unwrap();
-                    }
-                    allocate
-                        .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
-                        .unwrap();
-                    allocate.finish()
-                },
-                server.transport(),
-            ),
-            now,
-        );
-        if let Some(transmit) = ret {
-            return transmit.build();
-        }
         for _ in 0..families.len() {
             let TurnServerPollRet::AllocateSocketUdp {
                 transport,
@@ -2202,6 +2255,29 @@ mod tests {
         server.poll_transmit(now).unwrap()
     }
 
+    fn authenticated_allocate_with_credentials_transport_families(
+        server: &mut TurnServer,
+        credentials: LongTermCredentials,
+        nonce: &str,
+        from: SocketAddr,
+        transport: u8,
+        families: &[(AddressFamily, Result<SocketAddr, SocketAllocateError>)],
+        now: Instant,
+    ) -> Transmit<Vec<u8>> {
+        let ret = server.recv(
+            client_transmit_from(
+                authenticated_allocate_msg(credentials.clone(), nonce, transport, families),
+                server.transport(),
+                from,
+            ),
+            now,
+        );
+        if let Some(transmit) = ret {
+            return transmit.build();
+        }
+        authenticated_allocate_reply(server, families, now)
+    }
+
     fn authenticated_allocate_with_credentials_transport(
         server: &mut TurnServer,
         credentials: LongTermCredentials,
@@ -2213,6 +2289,7 @@ mod tests {
             server,
             credentials,
             nonce,
+            client_address(),
             transport,
             &[(AddressFamily::IPV4, Ok(relayed_address()))],
             now,
@@ -2335,6 +2412,7 @@ mod tests {
             &mut server,
             creds.clone(),
             &nonce,
+            client_address(),
             RequestedTransport::UDP,
             &[(AddressFamily::IPV6, Ok(ipv6_relayed_address()))],
             now,
@@ -2353,6 +2431,7 @@ mod tests {
             &mut server,
             creds.clone(),
             &nonce,
+            client_address(),
             RequestedTransport::UDP,
             &[(
                 AddressFamily::IPV6,
@@ -2379,6 +2458,7 @@ mod tests {
             &mut server,
             creds.clone(),
             &nonce,
+            client_address(),
             RequestedTransport::UDP,
             &[
                 (
@@ -2409,6 +2489,7 @@ mod tests {
             &mut server,
             creds.clone(),
             &nonce,
+            client_address(),
             RequestedTransport::UDP,
             &[
                 (AddressFamily::IPV6, Ok(ipv6_relayed_address())),
@@ -2561,6 +2642,7 @@ mod tests {
             &mut server,
             creds.clone(),
             &nonce,
+            client_address(),
             RequestedTransport::UDP,
             &[(AddressFamily::IPV6, Ok(ipv6_relayed_address()))],
             now,
@@ -3072,6 +3154,7 @@ mod tests {
             &mut server,
             creds.clone(),
             &nonce,
+            client_address(),
             RequestedTransport::UDP,
             &[
                 (AddressFamily::IPV4, Ok(relayed_address())),
@@ -3113,6 +3196,7 @@ mod tests {
             &mut server,
             creds.clone(),
             &nonce,
+            client_address(),
             RequestedTransport::UDP,
             &[
                 (AddressFamily::IPV4, Ok(relayed_address())),
@@ -3663,6 +3747,7 @@ mod tests {
             &mut server,
             creds.clone(),
             &nonce,
+            client_address(),
             RequestedTransport::UDP,
             &[(AddressFamily::IPV6, Ok(ipv6_relayed_address()))],
             now,
@@ -3775,6 +3860,156 @@ mod tests {
             assert_eq!(ret.from, relayed_address());
             assert_eq!(ret.to, peer_address());
             assert_eq!(&ret.data.build(), &data[offset..data.len() - 1]);
+        }
+    }
+
+    #[test]
+    fn test_tcp_server_two_interleaved_clients() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+
+        let client_address2 = {
+            let mut addr = client_address();
+            addr.set_port(1001);
+            addr
+        };
+        let relayed_address2 = {
+            let mut addr = relayed_address();
+            addr.set_port(2223);
+            addr
+        };
+        let peer_address2 = {
+            let mut addr = peer_address();
+            addr.set_port(44445);
+            addr
+        };
+
+        for split in [3, 9] {
+            let mut server = new_server(TransportType::Tcp);
+
+            let initial_allocate1 = initial_allocate_msg();
+            let initial_allocate2 = initial_allocate_msg();
+            assert!(server
+                .recv(
+                    client_transmit(&initial_allocate1[..split], TransportType::Tcp,),
+                    now
+                )
+                .is_none());
+
+            assert!(server
+                .recv(
+                    client_transmit_from(
+                        &initial_allocate2[..split],
+                        TransportType::Tcp,
+                        client_address2,
+                    ),
+                    now
+                )
+                .is_none());
+
+            let reply = server
+                .recv(
+                    client_transmit(&initial_allocate1[split..], TransportType::Tcp),
+                    now,
+                )
+                .unwrap();
+            let (realm, nonce) = validate_initial_allocate_reply(&reply.build().data);
+            let creds = credentials().into_long_term_credentials(&realm);
+
+            let reply = server
+                .recv(
+                    client_transmit_from(
+                        &initial_allocate2[split..],
+                        TransportType::Tcp,
+                        client_address2,
+                    ),
+                    now,
+                )
+                .unwrap();
+            let (realm2, nonce2) = validate_initial_allocate_reply(&reply.build().data);
+            let creds2 = credentials().into_long_term_credentials(&realm2);
+
+            let families = [(AddressFamily::IPV4, Ok(relayed_address()))];
+            let auth_alloc = authenticated_allocate_msg(
+                creds.clone(),
+                &nonce,
+                RequestedTransport::UDP,
+                &families,
+            );
+            let families2 = [(AddressFamily::IPV4, Ok(relayed_address2))];
+            let auth_alloc2 = authenticated_allocate_msg(
+                creds2.clone(),
+                &nonce2,
+                RequestedTransport::UDP,
+                &families2,
+            );
+
+            assert!(server
+                .recv(
+                    client_transmit(&auth_alloc[..split], TransportType::Tcp,),
+                    now
+                )
+                .is_none());
+
+            assert!(server
+                .recv(
+                    client_transmit_from(
+                        &auth_alloc2[..split],
+                        TransportType::Tcp,
+                        client_address2,
+                    ),
+                    now
+                )
+                .is_none());
+
+            assert!(server
+                .recv(
+                    client_transmit(&auth_alloc[split..], TransportType::Tcp),
+                    now,
+                )
+                .is_none());
+            let reply = authenticated_allocate_reply(&mut server, &families, now);
+            validate_authenticated_allocate_reply(&reply.data, creds.clone());
+
+            assert!(server
+                .recv(
+                    client_transmit_from(
+                        &auth_alloc2[split..],
+                        TransportType::Tcp,
+                        client_address2
+                    ),
+                    now,
+                )
+                .is_none());
+            let reply = authenticated_allocate_reply(&mut server, &families2, now);
+            validate_authenticated_allocate_reply(&reply.data, creds2.clone());
+
+            let perm = create_permission_request(creds.clone(), &nonce, peer_address());
+            let perm2 = create_permission_request(creds.clone(), &nonce2, peer_address2);
+
+            assert!(server
+                .recv(client_transmit(&perm[..split], TransportType::Tcp,), now)
+                .is_none());
+
+            assert!(server
+                .recv(
+                    client_transmit_from(&perm2[..split], TransportType::Tcp, client_address2,),
+                    now
+                )
+                .is_none());
+
+            let reply = server
+                .recv(client_transmit(&perm[split..], TransportType::Tcp), now)
+                .unwrap();
+            validate_signed_success(&reply.build().data, CREATE_PERMISSION, creds);
+
+            let reply = server
+                .recv(
+                    client_transmit_from(&perm2[split..], TransportType::Tcp, client_address2),
+                    now,
+                )
+                .unwrap();
+            validate_signed_success(&reply.build().data, CREATE_PERMISSION, creds2);
         }
     }
 }
