@@ -4,7 +4,7 @@ default-members = ["turn-types", "turn-client-proto", "turn-server-proto"]
 resolver = "2"
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 repository = "https://github.com/ystreet/turn-proto"
 edition = "2021"
 rust-version = "1.77.0"
