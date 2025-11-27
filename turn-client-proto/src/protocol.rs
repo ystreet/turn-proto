@@ -34,9 +34,11 @@ use turn_types::attribute::{
 use turn_types::attribute::{Data as AData, DontFragment, RequestedTransport};
 use turn_types::channel::ChannelData;
 use turn_types::message::*;
-use turn_types::stun::message::{IntegrityAlgorithm, IntegrityKey, MessageWriteVec};
+use turn_types::stun::message::{
+    IntegrityAlgorithm, IntegrityKey, MessageHeader, MessageType, MessageWriteVec,
+};
 use turn_types::stun::prelude::{
-    Attribute, AttributeFromRaw, AttributeStaticType, MessageWrite, MessageWriteExt,
+    Attribute, AttributeExt, AttributeFromRaw, AttributeStaticType, MessageWrite, MessageWriteExt,
 };
 use turn_types::{AddressFamily, TurnCredentials};
 
@@ -100,12 +102,21 @@ impl TurnClientProtocol {
 
     fn send_initial_request(&mut self, now: Instant) -> (Transmit<Data<'static>>, TransactionId) {
         info!("sending initial ALLOCATE");
-        let mut msg = Message::builder_request(ALLOCATE, MessageWriteVec::new());
         let lifetime = Lifetime::new(1800);
-        msg.add_attribute(&lifetime).unwrap();
         let requested = RequestedTransport::new(RequestedTransport::UDP);
-        msg.add_attribute(&requested).unwrap();
         let dont_fragment = DontFragment::new();
+        let mut msg = Message::builder_request(
+            ALLOCATE,
+            MessageWriteVec::with_capacity(
+                MessageHeader::LENGTH
+                    + lifetime.padded_len()
+                    + requested.padded_len()
+                    + dont_fragment.padded_len()
+                    + 8 * self.families.len(),
+            ),
+        );
+        msg.add_attribute(&lifetime).unwrap();
+        msg.add_attribute(&requested).unwrap();
         msg.add_attribute(&dont_fragment).unwrap();
         if self.families.len() > 1 {
             // This is the RFC 8656 path where a single client transport produces multiple
@@ -145,15 +156,29 @@ impl TurnClientProtocol {
         now: Instant,
     ) -> (Transmit<Data<'static>>, TransactionId) {
         info!("sending authenticated ALLOCATE");
-        let mut builder = Message::builder_request(ALLOCATE, MessageWriteVec::new());
         let requested_transport = RequestedTransport::new(RequestedTransport::UDP);
-        builder.add_attribute(&requested_transport).unwrap();
-        builder.add_attribute(&Lifetime::new(1800)).unwrap();
+        let lifetime = Lifetime::new(1800);
         let username = Username::new(username).unwrap();
-        builder.add_attribute(&username).unwrap();
         let realm = Realm::new(realm).unwrap();
-        builder.add_attribute(&realm).unwrap();
         let nonce = Nonce::new(nonce).unwrap();
+        let mut builder = Message::builder_request(
+            ALLOCATE,
+            MessageWriteVec::with_capacity(
+                MessageHeader::LENGTH
+                    + lifetime.padded_len()
+                    + requested_transport.padded_len()
+                    + username.padded_len()
+                    + realm.padded_len()
+                    + nonce.padded_len()
+                    + 8 * address_families.len()
+                    // message integrity
+                    + 24,
+            ),
+        );
+        builder.add_attribute(&requested_transport).unwrap();
+        builder.add_attribute(&lifetime).unwrap();
+        builder.add_attribute(&username).unwrap();
+        builder.add_attribute(&realm).unwrap();
         builder.add_attribute(&nonce).unwrap();
         if address_families.len() > 1 {
             // This is the RFC 8656 path where a single client transport produces multiple
@@ -748,15 +773,25 @@ impl TurnClientProtocol {
         now: Instant,
     ) -> (Transmit<Data<'static>>, TransactionId, u32) {
         info!(lifetime, "sending REFRESH");
-        let mut refresh = Message::builder_request(REFRESH, MessageWriteVec::new());
-        let transaction_id = refresh.transaction_id();
         let lt = Lifetime::new(lifetime);
-        refresh.add_attribute(&lt).unwrap();
         let username = Username::new(username).unwrap();
-        refresh.add_attribute(&username).unwrap();
         let realm = Realm::new(realm).unwrap();
-        refresh.add_attribute(&realm).unwrap();
         let nonce = Nonce::new(nonce).unwrap();
+        let mut refresh = Message::builder_request(
+            REFRESH,
+            MessageWriteVec::with_capacity(
+                MessageHeader::LENGTH
+                    + lt.padded_len()
+                    + username.padded_len()
+                    + realm.padded_len()
+                    + nonce.padded_len()
+                    + 24,
+            ),
+        );
+        let transaction_id = refresh.transaction_id();
+        refresh.add_attribute(&lt).unwrap();
+        refresh.add_attribute(&username).unwrap();
+        refresh.add_attribute(&realm).unwrap();
         refresh.add_attribute(&nonce).unwrap();
         refresh
             .add_message_integrity_with_key(key, IntegrityAlgorithm::Sha1)
@@ -777,16 +812,27 @@ impl TurnClientProtocol {
         now: Instant,
     ) -> (Transmit<Data<'static>>, TransactionId) {
         info!(peer_addr = ?peer_addr, "sending CREATE_PERMISSION");
-        let mut builder = Message::builder_request(CREATE_PERMISSION, MessageWriteVec::new());
-        let transaction_id = builder.transaction_id();
-
+        let transaction_id = TransactionId::generate();
         let xor_peer_address = XorPeerAddress::new(SocketAddr::new(peer_addr, 0), transaction_id);
-        builder.add_attribute(&xor_peer_address).unwrap();
         let username = Username::new(username).unwrap();
-        builder.add_attribute(&username).unwrap();
         let realm = Realm::new(realm).unwrap();
-        builder.add_attribute(&realm).unwrap();
         let nonce = Nonce::new(nonce).unwrap();
+        let mut builder = Message::builder(
+            MessageType::from_class_method(MessageClass::Request, CREATE_PERMISSION),
+            transaction_id,
+            MessageWriteVec::with_capacity(
+                MessageHeader::LENGTH
+                    + xor_peer_address.padded_len()
+                    + username.padded_len()
+                    + realm.padded_len()
+                    + nonce.padded_len()
+                    + 24,
+            ),
+        );
+
+        builder.add_attribute(&xor_peer_address).unwrap();
+        builder.add_attribute(&username).unwrap();
+        builder.add_attribute(&realm).unwrap();
         builder.add_attribute(&nonce).unwrap();
         builder
             .add_message_integrity_with_key(key, IntegrityAlgorithm::Sha1)
@@ -810,17 +856,30 @@ impl TurnClientProtocol {
         now: Instant,
     ) -> (Transmit<Data<'static>>, TransactionId) {
         info!(peer_addr = ?peer_addr, id, "sending CHANNEL_BIND");
-        let mut builder = Message::builder_request(CHANNEL_BIND, MessageWriteVec::new());
-        let transaction_id = builder.transaction_id();
+        let transaction_id = TransactionId::generate();
         let channel_no = ChannelNumber::new(id);
-        builder.add_attribute(&channel_no).unwrap();
         let xor_peer_address = XorPeerAddress::new(peer_addr, transaction_id);
-        builder.add_attribute(&xor_peer_address).unwrap();
         let username = Username::new(username).unwrap();
-        builder.add_attribute(&username).unwrap();
         let realm = Realm::new(realm).unwrap();
-        builder.add_attribute(&realm).unwrap();
         let nonce = Nonce::new(nonce).unwrap();
+
+        let mut builder = Message::builder(
+            MessageType::from_class_method(MessageClass::Request, CHANNEL_BIND),
+            transaction_id,
+            MessageWriteVec::with_capacity(
+                MessageHeader::LENGTH
+                    + channel_no.padded_len()
+                    + username.padded_len()
+                    + xor_peer_address.padded_len()
+                    + realm.padded_len()
+                    + nonce.padded_len()
+                    + 24,
+            ),
+        );
+        builder.add_attribute(&channel_no).unwrap();
+        builder.add_attribute(&xor_peer_address).unwrap();
+        builder.add_attribute(&username).unwrap();
+        builder.add_attribute(&realm).unwrap();
         builder.add_attribute(&nonce).unwrap();
         builder
             .add_message_integrity_with_key(key, IntegrityAlgorithm::Sha1)
@@ -1565,20 +1624,32 @@ impl TurnClientProtocol {
 
     /// Remove the allocation/s on the server.
     pub(crate) fn delete(&mut self, now: Instant) -> Result<(), DeleteError> {
-        let mut builder = Message::builder_request(REFRESH, MessageWriteVec::new());
-        let transaction_id = builder.transaction_id();
+        let lifetime = Lifetime::new(0);
 
         let AuthState::Authenticated { key, realm, nonce } = &self.state else {
             return Err(DeleteError::NoAllocation);
         };
 
-        let lifetime = Lifetime::new(0);
-        builder.add_attribute(&lifetime).unwrap();
         let username = Username::new(self.credentials.username()).unwrap();
-        builder.add_attribute(&username).unwrap();
         let realm = Realm::new(realm).unwrap();
-        builder.add_attribute(&realm).unwrap();
         let nonce = Nonce::new(nonce).unwrap();
+
+        let mut builder = Message::builder_request(
+            REFRESH,
+            MessageWriteVec::with_capacity(
+                MessageHeader::LENGTH
+                    + lifetime.padded_len()
+                    + username.padded_len()
+                    + realm.padded_len()
+                    + nonce.padded_len()
+                    + 24,
+            ),
+        );
+        let transaction_id = builder.transaction_id();
+
+        builder.add_attribute(&lifetime).unwrap();
+        builder.add_attribute(&username).unwrap();
+        builder.add_attribute(&realm).unwrap();
         builder.add_attribute(&nonce).unwrap();
         builder
             .add_message_integrity_with_key(key, IntegrityAlgorithm::Sha1)
