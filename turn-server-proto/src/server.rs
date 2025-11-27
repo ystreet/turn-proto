@@ -17,6 +17,7 @@ use byteorder::{BigEndian, ByteOrder};
 use core::net::{IpAddr, SocketAddr};
 use core::time::Duration;
 use pnet_packet::Packet;
+use turn_types::stun::prelude::AttributeExt;
 use turn_types::tcp::{IncomingTcp, StoredTcp, TurnTcpBuffer};
 use turn_types::transmit::{DelayedChannel, DelayedMessage, TransmitBuild};
 
@@ -44,7 +45,7 @@ use turn_types::attribute::{
     ChannelNumber, Lifetime, RequestedTransport, XorPeerAddress, XorRelayedAddress,
 };
 use turn_types::message::{ALLOCATE, CHANNEL_BIND, DATA, REFRESH, SEND};
-use turn_types::stun::message::{IntegrityAlgorithm, IntegrityKey};
+use turn_types::stun::message::{IntegrityAlgorithm, IntegrityKey, MessageHeader};
 use turn_types::AddressFamily;
 
 use tracing::{debug, error, info, trace, warn};
@@ -243,12 +244,20 @@ impl TurnServer {
             //      USERNAME or MESSAGE-INTEGRITY attribute.
             let nonce_value = self.validate_nonce(ttype, from, to, now);
             trace!("no message-integrity, returning unauthorized with nonce: {nonce_value}",);
-            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let nonce = Nonce::new(&nonce_value).unwrap();
-            builder.add_attribute(&nonce).unwrap();
             let realm = Realm::new(&self.realm).unwrap();
-            builder.add_attribute(&realm).unwrap();
             let error = ErrorCode::builder(ErrorCode::UNAUTHORIZED).build().unwrap();
+            let mut builder = Message::builder_error(
+                msg,
+                MessageWriteVec::with_capacity(
+                    MessageHeader::LENGTH
+                        + nonce.padded_len()
+                        + realm.padded_len()
+                        + error.padded_len(),
+                ),
+            );
+            builder.add_attribute(&nonce).unwrap();
+            builder.add_attribute(&realm).unwrap();
             builder.add_attribute(&error).unwrap();
             return Err(builder);
         }
@@ -260,18 +269,26 @@ impl TurnServer {
         //      REALM, or MESSAGE-INTEGRITY attribute.
         let Some(((username, _realm), nonce)) = username.zip(realm).zip(nonce) else {
             trace!("bad request due to missing username, realm, nonce");
-            return Err(Self::bad_request(msg));
+            return Err(Self::bad_request(msg, 0));
         };
 
         let nonce_value = self.validate_nonce(ttype, from, to, now);
         if nonce_value != nonce.nonce() {
             trace!("stale nonce");
-            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::STALE_NONCE).build().unwrap();
-            builder.add_attribute(&error).unwrap();
             let realm = Realm::new(&self.realm).unwrap();
-            builder.add_attribute(&realm).unwrap();
             let nonce = Nonce::new(&nonce_value).unwrap();
+            let mut builder = Message::builder_error(
+                msg,
+                MessageWriteVec::with_capacity(
+                    MessageHeader::LENGTH
+                        + nonce.padded_len()
+                        + realm.padded_len()
+                        + error.padded_len(),
+                ),
+            );
+            builder.add_attribute(&error).unwrap();
+            builder.add_attribute(&realm).unwrap();
             builder.add_attribute(&nonce).unwrap();
 
             return Err(builder);
@@ -290,12 +307,20 @@ impl TurnServer {
             msg.validate_integrity_with_key(password_key).is_err()
         }) {
             trace!("integrity failed");
-            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::UNAUTHORIZED).build().unwrap();
-            builder.add_attribute(&error).unwrap();
             let realm = Realm::new(&self.realm).unwrap();
-            builder.add_attribute(&realm).unwrap();
             let nonce = Nonce::new(&nonce_value).unwrap();
+            let mut builder = Message::builder_error(
+                msg,
+                MessageWriteVec::with_capacity(
+                    MessageHeader::LENGTH
+                        + nonce.padded_len()
+                        + realm.padded_len()
+                        + error.padded_len(),
+                ),
+            );
+            builder.add_attribute(&error).unwrap();
+            builder.add_attribute(&realm).unwrap();
             builder.add_attribute(&nonce).unwrap();
             return Err(builder);
         }
@@ -312,10 +337,13 @@ impl TurnServer {
         if let Some(client) = self.client_from_5tuple(ttype, to, from) {
             if client.username != username.username() {
                 trace!("mismatched username");
-                let mut builder = Message::builder_error(msg, MessageWriteVec::new());
                 let error = ErrorCode::builder(ErrorCode::WRONG_CREDENTIALS)
                     .build()
                     .unwrap();
+                let mut builder = Message::builder_error(
+                    msg,
+                    MessageWriteVec::with_capacity(MessageHeader::LENGTH + error.padded_len() + 24),
+                );
                 builder.add_attribute(&error).unwrap();
                 builder
                     .add_message_integrity_with_key(password_key, IntegrityAlgorithm::Sha1)
@@ -328,22 +356,30 @@ impl TurnServer {
     }
 
     fn server_error(msg: &Message<'_>) -> MessageWriteVec {
-        let mut response = Message::builder_error(msg, MessageWriteVec::new());
         let error = ErrorCode::builder(ErrorCode::SERVER_ERROR).build().unwrap();
+        let mut response = Message::builder_error(
+            msg,
+            MessageWriteVec::with_capacity(MessageHeader::LENGTH + error.padded_len() + 8),
+        );
         response.add_attribute(&error).unwrap();
         response.add_fingerprint().unwrap();
         response
     }
 
-    fn bad_request(msg: &Message<'_>) -> MessageWriteVec {
-        let mut builder = Message::builder_error(msg, MessageWriteVec::new());
+    fn bad_request(msg: &Message<'_>, additional_bytes: usize) -> MessageWriteVec {
         let error = ErrorCode::builder(ErrorCode::BAD_REQUEST).build().unwrap();
+        let mut builder = Message::builder_error(
+            msg,
+            MessageWriteVec::with_capacity(
+                MessageHeader::LENGTH + error.padded_len() + additional_bytes,
+            ),
+        );
         builder.add_attribute(&error).unwrap();
         builder
     }
 
     fn bad_request_signed(msg: &Message<'_>, key: &IntegrityKey) -> MessageWriteVec {
-        let mut builder = Self::bad_request(msg);
+        let mut builder = Self::bad_request(msg, 24);
         builder
             .add_message_integrity_with_key(key, IntegrityAlgorithm::Sha1)
             .unwrap();
@@ -351,10 +387,13 @@ impl TurnServer {
     }
 
     fn allocation_mismatch(msg: &Message<'_>, key: &IntegrityKey) -> MessageWriteVec {
-        let mut response = Message::builder_error(msg, MessageWriteVec::new());
         let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
             .build()
             .unwrap();
+        let mut response = Message::builder_error(
+            msg,
+            MessageWriteVec::with_capacity(MessageHeader::LENGTH + error.padded_len() + 24 + 8),
+        );
         response.add_attribute(&error).unwrap();
         response
             .add_message_integrity_with_key(key, IntegrityAlgorithm::Sha1)
@@ -371,13 +410,19 @@ impl TurnServer {
         to: SocketAddr,
         now: Instant,
     ) -> Result<Transmit<Vec<u8>>, MessageWriteVec> {
-        let response = if let Some(error_msg) =
-            Message::check_attribute_types(msg, &[Fingerprint::TYPE], &[], MessageWriteVec::new())
-        {
+        let response = if let Some(error_msg) = Message::check_attribute_types(
+            msg,
+            &[Fingerprint::TYPE],
+            &[],
+            MessageWriteVec::with_capacity(64),
+        ) {
             error_msg
         } else {
-            let mut response = Message::builder_success(msg, MessageWriteVec::new());
             let xor_addr = XorMappedAddress::new(from, msg.transaction_id());
+            let mut response = Message::builder_success(
+                msg,
+                MessageWriteVec::with_capacity(MessageHeader::LENGTH + xor_addr.padded_len() + 8),
+            );
             response.add_attribute(&xor_addr).unwrap();
             response.add_fingerprint().unwrap();
             response
@@ -455,8 +500,11 @@ impl TurnServer {
         }
         if !unknown_attributes.is_empty() {
             trace!("unknown attributes: {unknown_attributes:?}");
-            let mut err =
-                Message::unknown_attributes(msg, &unknown_attributes, MessageWriteVec::new());
+            let mut err = Message::unknown_attributes(
+                msg,
+                &unknown_attributes,
+                MessageWriteVec::with_capacity(64),
+            );
             err.add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
                 .unwrap();
             return Err(err);
@@ -471,10 +519,13 @@ impl TurnServer {
                 "unsupported RequestedTransport {}",
                 requested_transport.protocol()
             );
-            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
             let error = ErrorCode::builder(ErrorCode::UNSUPPORTED_TRANSPORT_PROTOCOL)
                 .build()
                 .unwrap();
+            let mut builder = Message::builder_error(
+                msg,
+                MessageWriteVec::with_capacity(MessageHeader::LENGTH + error.padded_len() + 24),
+            );
             builder.add_attribute(&error).unwrap();
             builder
                 .add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
@@ -611,8 +662,11 @@ impl TurnServer {
         }
         if !unknown_attributes.is_empty() {
             trace!("unknown attributes: {unknown_attributes:?}");
-            let mut err =
-                Message::unknown_attributes(msg, &unknown_attributes, MessageWriteVec::new());
+            let mut err = Message::unknown_attributes(
+                msg,
+                &unknown_attributes,
+                MessageWriteVec::with_capacity(64),
+            );
             err.add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
                 .unwrap();
             return Err(err);
@@ -660,20 +714,23 @@ impl TurnServer {
         }
 
         let mut builder = if modified {
-            let mut builder = Message::builder_success(msg, MessageWriteVec::new());
             let lifetime = Lifetime::new(request_lifetime);
+            let mut builder = Message::builder_success(
+                msg,
+                MessageWriteVec::with_capacity(MessageHeader::LENGTH + lifetime.padded_len() + 24),
+            );
             builder.add_attribute(&lifetime).unwrap();
             builder
         } else {
             trace!("peer address family mismatch");
-            let mut builder = Message::builder_error(msg, MessageWriteVec::new());
-            builder
-                .add_attribute(
-                    &ErrorCode::builder(ErrorCode::PEER_ADDRESS_FAMILY_MISMATCH)
-                        .build()
-                        .unwrap(),
-                )
+            let error = ErrorCode::builder(ErrorCode::PEER_ADDRESS_FAMILY_MISMATCH)
+                .build()
                 .unwrap();
+            let mut builder = Message::builder_error(
+                msg,
+                MessageWriteVec::with_capacity(MessageHeader::LENGTH + error.padded_len() + 24),
+            );
+            builder.add_attribute(&error).unwrap();
             builder
         };
         builder
@@ -726,8 +783,11 @@ impl TurnServer {
         }
         if !unknown_attributes.is_empty() {
             trace!("unknown attributes: {unknown_attributes:?}");
-            let mut err =
-                Message::unknown_attributes(msg, &unknown_attributes, MessageWriteVec::new());
+            let mut err = Message::unknown_attributes(
+                msg,
+                &unknown_attributes,
+                MessageWriteVec::with_capacity(64),
+            );
             err.add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
                 .unwrap();
             return Err(err);
@@ -743,14 +803,16 @@ impl TurnServer {
                 .find(|a| a.addr.is_ipv4() == peer_addr.is_ipv4())
             else {
                 trace!("peer address family mismatch");
-                let mut response = Message::builder_error(msg, MessageWriteVec::new());
-                response
-                    .add_attribute(
-                        &ErrorCode::builder(ErrorCode::PEER_ADDRESS_FAMILY_MISMATCH)
-                            .build()
-                            .unwrap(),
-                    )
+                let error = ErrorCode::builder(ErrorCode::PEER_ADDRESS_FAMILY_MISMATCH)
+                    .build()
                     .unwrap();
+                let mut response = Message::builder_error(
+                    msg,
+                    MessageWriteVec::with_capacity(
+                        MessageHeader::LENGTH + error.padded_len() + 24 + 8,
+                    ),
+                );
+                response.add_attribute(&error).unwrap();
                 response
                     .add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
                     .unwrap();
@@ -780,7 +842,10 @@ impl TurnServer {
             }
         }
 
-        let mut builder = Message::builder_success(msg, MessageWriteVec::new());
+        let mut builder = Message::builder_success(
+            msg,
+            MessageWriteVec::with_capacity(MessageHeader::LENGTH + 24),
+        );
         builder
             .add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
             .unwrap();
@@ -832,8 +897,11 @@ impl TurnServer {
         }
         if !unknown_attributes.is_empty() {
             trace!("unknown attributes: {unknown_attributes:?}");
-            let mut err =
-                Message::unknown_attributes(msg, &unknown_attributes, MessageWriteVec::new());
+            let mut err = Message::unknown_attributes(
+                msg,
+                &unknown_attributes,
+                MessageWriteVec::with_capacity(64),
+            );
             err.add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
                 .unwrap();
             return Err(err);
@@ -853,14 +921,14 @@ impl TurnServer {
             .find(|allocation| allocation.addr.is_ipv4() == peer_addr.is_ipv4())
         else {
             trace!("peer address family mismatch");
-            let mut response = Message::builder_error(msg, MessageWriteVec::new());
-            response
-                .add_attribute(
-                    &ErrorCode::builder(ErrorCode::PEER_ADDRESS_FAMILY_MISMATCH)
-                        .build()
-                        .unwrap(),
-                )
+            let error = ErrorCode::builder(ErrorCode::PEER_ADDRESS_FAMILY_MISMATCH)
+                .build()
                 .unwrap();
+            let mut response = Message::builder_error(
+                msg,
+                MessageWriteVec::with_capacity(MessageHeader::LENGTH + error.padded_len() + 24 + 8),
+            );
+            response.add_attribute(&error).unwrap();
             response
                 .add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
                 .unwrap();
@@ -922,7 +990,10 @@ impl TurnServer {
             });
         }
 
-        let mut builder = Message::builder_success(msg, MessageWriteVec::new());
+        let mut builder = Message::builder_success(
+            msg,
+            MessageWriteVec::with_capacity(MessageHeader::LENGTH + 24),
+        );
         builder
             .add_message_integrity_with_key(&key, IntegrityAlgorithm::Sha1)
             .unwrap();
@@ -1370,15 +1441,18 @@ impl TurnServerApi for TurnServer {
             "sending ICMP (type:{icmp_type}, code:{icmp_code}, data{icmp_data}) DATA indication to client {}",
             client.remote_addr
         );
+        let transaction_id = TransactionId::generate();
+        let xor_addr = XorPeerAddress::new(destination, transaction_id);
+        let icmp = Icmp::new(icmp_type, icmp_code, icmp_data);
         let mut msg = Message::builder(
             MessageType::from_class_method(MessageClass::Indication, DATA),
-            TransactionId::generate(),
-            MessageWriteVec::new(),
+            transaction_id,
+            MessageWriteVec::with_capacity(
+                MessageHeader::LENGTH + xor_addr.padded_len() + icmp.padded_len(),
+            ),
         );
-        msg.add_attribute(&XorPeerAddress::new(destination, msg.transaction_id()))
-            .unwrap();
-        msg.add_attribute(&Icmp::new(icmp_type, icmp_code, icmp_data))
-            .unwrap();
+        msg.add_attribute(&xor_addr).unwrap();
+        msg.add_attribute(&icmp).unwrap();
         self.stun.send(msg.finish(), client.remote_addr, now).ok()
     }
 
@@ -1776,7 +1850,7 @@ impl TurnServerApi for TurnServer {
                 ALLOCATE,
             ),
             transaction_id,
-            MessageWriteVec::new(),
+            MessageWriteVec::with_capacity(80),
         );
 
         if is_all_error && pending.pending_sockets.len() > 1 {
