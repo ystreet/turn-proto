@@ -286,22 +286,36 @@ impl TurnServerApi for RustlsTurnServer {
 
     /// Notify the [`TurnServer`] that a UDP socket has been allocated (or an error) in response to
     /// [TurnServerPollRet::AllocateSocketUdp].
-    fn allocated_udp_socket(
+    fn allocated_socket(
         &mut self,
         transport: TransportType,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
+        allocation_transport: TransportType,
         family: AddressFamily,
         socket_addr: Result<SocketAddr, SocketAllocateError>,
         now: Instant,
     ) {
-        self.server.allocated_udp_socket(
+        self.server.allocated_socket(
             transport,
             local_addr,
             remote_addr,
+            allocation_transport,
             family,
             socket_addr,
             now,
         )
+    }
+
+    fn tcp_connected(
+        &mut self,
+        relayed_addr: SocketAddr,
+        peer_addr: SocketAddr,
+        listen_addr: SocketAddr,
+        client_addr: SocketAddr,
+        socket_addr: Result<SocketAddr, crate::api::TcpConnectError>,
+        now: Instant,
+    ) {
+        self.server.tcp_connected(relayed_addr, peer_addr, listen_addr, client_addr, socket_addr, now)
     }
 }

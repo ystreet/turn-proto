@@ -65,19 +65,21 @@ impl<T: TurnClientApi> TurnTest<T> {
         ));
         let transmit = self.client.poll_transmit(now).unwrap();
         assert!(self.server.recv(transmit, now).is_none());
-        let TurnServerPollRet::AllocateSocketUdp {
+        let TurnServerPollRet::AllocateSocket {
             transport: _,
-            local_addr,
-            remote_addr,
+            listen_addr,
+            client_addr,
+            allocation_transport,
             family,
         } = self.server.poll(now)
         else {
             unreachable!();
         };
-        self.server.allocated_udp_socket(
+        self.server.allocated_socket(
             TransportType::Udp,
-            local_addr,
-            remote_addr,
+            listen_addr,
+            client_addr,
+            allocation_transport,
             family,
             Ok(self.relayed_addr),
             now,
@@ -180,19 +182,21 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
             },
             |(mut test, transmit)| {
                 assert!(test.server.recv(transmit, now).is_none());
-                let TurnServerPollRet::AllocateSocketUdp {
+                let TurnServerPollRet::AllocateSocket {
                     transport: _,
-                    local_addr,
-                    remote_addr,
+                    listen_addr,
+                    client_addr,
+                    allocation_transport,
                     family,
                 } = test.server.poll(now)
                 else {
                     unreachable!();
                 };
-                test.server.allocated_udp_socket(
+                test.server.allocated_socket(
                     TransportType::Udp,
-                    local_addr,
-                    remote_addr,
+                    listen_addr,
+                    client_addr,
+                    allocation_transport,
                     family,
                     Ok(test.relayed_addr),
                     now,
@@ -226,19 +230,21 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
             },
             |(mut test, transmit)| {
                 assert!(test.server.recv(transmit, now).is_none());
-                let TurnServerPollRet::AllocateSocketUdp {
+                let TurnServerPollRet::AllocateSocket {
                     transport: _,
-                    local_addr,
-                    remote_addr,
+                    listen_addr,
+                    client_addr,
+                    allocation_transport,
                     family,
                 } = test.server.poll(now)
                 else {
                     unreachable!();
                 };
-                test.server.allocated_udp_socket(
+                test.server.allocated_socket(
                     TransportType::Udp,
-                    local_addr,
-                    remote_addr,
+                    listen_addr,
+                    client_addr,
+                    allocation_transport,
                     family,
                     Err(turn_server_proto::api::SocketAllocateError::InsufficientCapacity),
                     now,

@@ -260,6 +260,21 @@ impl TurnTcpBuffer {
         self.tcp_buffer = remaining.to_vec();
         Some(StoredTcp::Message(data_binding))
     }
+
+    /// Returns the underlying buffer.
+    pub fn into_inner(self) -> Vec<u8> {
+        self.tcp_buffer
+    }
+
+    /// The number of bytes contained in this buffer.
+    pub fn len(&self) -> usize {
+        self.tcp_buffer.len()
+    }
+
+    /// Whether the buffer currently contains 0 bytes of data.
+    pub fn is_empty(&self) -> bool {
+        self.tcp_buffer.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -318,6 +333,7 @@ mod tests {
         assert!(matches!(ret, IncomingTcp::CompleteMessage(_, _)));
         assert_eq!(ret.data(), &msg);
         assert!(ret.message().is_some());
+        assert!(tcp.into_inner().is_empty());
     }
 
     #[test]
@@ -337,6 +353,7 @@ mod tests {
         assert!(matches!(ret, IncomingTcp::CompleteChannel(_, _)));
         assert_eq!(ret.data(), &msg);
         assert!(ret.channel().is_some());
+        assert!(tcp.into_inner().is_empty());
     }
 
     #[test]
@@ -349,6 +366,17 @@ mod tests {
         for i in 1..msg.len() {
             let ret = tcp.incoming_tcp(Transmit::new(
                 &msg[i - 1..i],
+                TransportType::Tcp,
+                remote_addr,
+                local_addr,
+            ));
+            assert!(ret.is_none());
+
+            let data = tcp.into_inner();
+            assert_eq!(&data, &msg[..i]);
+            tcp = TurnTcpBuffer::new();
+            let ret = tcp.incoming_tcp(Transmit::new(
+                &data,
                 TransportType::Tcp,
                 remote_addr,
                 local_addr,
@@ -369,6 +397,7 @@ mod tests {
             unreachable!();
         };
         assert_eq!(produced, msg);
+        assert!(tcp.into_inner().is_empty());
     }
 
     #[test]
@@ -381,6 +410,17 @@ mod tests {
         for i in 1..channel.len() {
             let ret = tcp.incoming_tcp(Transmit::new(
                 &channel[i - 1..i],
+                TransportType::Tcp,
+                remote_addr,
+                local_addr,
+            ));
+            assert!(ret.is_none());
+
+            let data = tcp.into_inner();
+            assert_eq!(&data, &channel[..i]);
+            tcp = TurnTcpBuffer::new();
+            let ret = tcp.incoming_tcp(Transmit::new(
+                &data,
                 TransportType::Tcp,
                 remote_addr,
                 local_addr,
@@ -401,6 +441,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(produced, channel);
+        assert!(tcp.into_inner().is_empty());
     }
 
     #[test]

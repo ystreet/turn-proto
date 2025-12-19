@@ -17,41 +17,36 @@ use alloc::vec::Vec;
 use core::net::{IpAddr, SocketAddr};
 use core::time::Duration;
 use std::io::{Read, Write};
-use turn_types::stun::message::Message;
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection};
 
-use stun_proto::agent::{StunAgent, Transmit};
+use stun_proto::agent::Transmit;
 use stun_proto::types::data::Data;
 use stun_proto::Instant;
 
 use stun_proto::types::TransportType;
 
-use turn_types::channel::ChannelData;
 use turn_types::AddressFamily;
 use turn_types::TurnCredentials;
 
 use tracing::{debug, trace, warn};
 
 use crate::api::{
-    DataRangeOrOwned, DelayedMessageOrChannelSend, TransmitBuild, TurnClientApi, TurnPeerData,
+    DelayedMessageOrChannelSend, Socket5Tuple, TcpAllocateError, TcpConnectError, TransmitBuild, TurnClientApi, TurnPeerData
 };
-use crate::protocol::{TurnClientProtocol, TurnProtocolChannelRecv, TurnProtocolRecv};
 
 pub use crate::api::{
     BindChannelError, CreatePermissionError, DeleteError, SendError, TurnEvent, TurnPollRet,
     TurnRecvRet,
 };
-use crate::tcp::ensure_data_owned;
-use turn_types::tcp::{IncomingTcp, StoredTcp, TurnTcpBuffer};
+use crate::tcp::TurnClientTcp;
 
 /// A TURN client that communicates over TLS.
 #[derive(Debug)]
 pub struct TurnClientRustls {
-    protocol: TurnClientProtocol,
+    protocol: TurnClientTcp,
     conn: Box<ClientConnection>,
-    incoming_tcp_buffer: TurnTcpBuffer,
     closing: bool,
 }
 
@@ -61,82 +56,21 @@ impl TurnClientRustls {
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         credentials: TurnCredentials,
+        allocation_transport: TransportType,
         allocation_families: &[AddressFamily],
         server_name: ServerName<'static>,
         config: Arc<ClientConfig>,
     ) -> Self {
-        let stun_agent = StunAgent::builder(TransportType::Tcp, local_addr)
-            .remote_addr(remote_addr)
-            .build();
         Self {
-            protocol: TurnClientProtocol::new(stun_agent, credentials, allocation_families),
+            protocol: TurnClientTcp::allocate(
+                local_addr,
+                remote_addr,
+                credentials,
+                allocation_transport,
+                allocation_families,
+            ),
             conn: Box::new(ClientConnection::new(config, server_name).unwrap()),
-            incoming_tcp_buffer: TurnTcpBuffer::new(),
             closing: false,
-        }
-    }
-
-    fn handle_incoming_plaintext<T: AsRef<[u8]> + core::fmt::Debug>(
-        &mut self,
-        transmit: Transmit<Vec<u8>>,
-        now: Instant,
-    ) -> TurnRecvRet<T> {
-        match self.incoming_tcp_buffer.incoming_tcp(transmit) {
-            None => TurnRecvRet::Handled,
-            Some(IncomingTcp::CompleteMessage(transmit, msg_range)) => {
-                let Ok(msg) =
-                    Message::from_bytes(&transmit.data.as_slice()[msg_range.start..msg_range.end])
-                else {
-                    return TurnRecvRet::Handled;
-                };
-                TurnRecvRet::from_protocol_recv_stored_ignored(
-                    self.protocol.handle_message(msg, now),
-                    transmit.data,
-                )
-            }
-            Some(IncomingTcp::CompleteChannel(transmit, msg_range)) => {
-                let channel =
-                    ChannelData::parse(&transmit.data.as_slice()[msg_range.start..msg_range.end])
-                        .unwrap();
-                match self.protocol.handle_channel(channel, now) {
-                    TurnProtocolChannelRecv::Ignored => TurnRecvRet::Handled,
-                    TurnProtocolChannelRecv::PeerData {
-                        range,
-                        transport,
-                        peer,
-                    } => TurnRecvRet::PeerData(TurnPeerData {
-                        data: DataRangeOrOwned::Owned(ensure_data_owned(transmit.data, range)),
-                        transport,
-                        peer,
-                    }),
-                }
-            }
-            Some(IncomingTcp::StoredMessage(data, transmit)) => {
-                let Ok(msg) = Message::from_bytes(&data) else {
-                    return TurnRecvRet::Handled;
-                };
-                TurnRecvRet::from_protocol_recv_stored_ignored(
-                    self.protocol.handle_message(msg, now),
-                    transmit.data,
-                )
-            }
-            Some(IncomingTcp::StoredChannel(data, transmit)) => {
-                let channel = ChannelData::parse(&data).unwrap();
-                match self.protocol.handle_channel(channel, now) {
-                    TurnProtocolChannelRecv::Ignored => TurnRecvRet::Handled,
-                    TurnProtocolChannelRecv::PeerData {
-                        range,
-                        transport,
-                        peer,
-                    } => TurnRecvRet::PeerData(TurnPeerData {
-                        data: DataRangeOrOwned::Owned(
-                            transmit.data[range.start..range.end].to_vec(),
-                        ),
-                        transport,
-                        peer,
-                    }),
-                }
-            }
         }
     }
 }
@@ -158,7 +92,7 @@ impl TurnClientApi for TurnClientRustls {
         let io_state = match self.conn.process_new_packets() {
             Ok(io_state) => io_state,
             Err(e) => {
-                self.protocol.error();
+                self.protocol.protocol_error();
                 warn!("Error processing TLS: {e:?}");
                 return TurnPollRet::Closed;
             }
@@ -208,7 +142,7 @@ impl TurnClientApi for TurnClientRustls {
                     }
                     Err(e) => {
                         warn!("error during handshake: {e:?}");
-                        self.protocol.error();
+                        self.protocol.protocol_error();
                         return None;
                     }
                 }
@@ -236,7 +170,7 @@ impl TurnClientApi for TurnClientRustls {
                 }
                 Err(e) => {
                     warn!("error writing TLS: {e:?}");
-                    self.protocol.error();
+                    self.protocol.protocol_error();
                 }
             }
         }
@@ -291,6 +225,41 @@ impl TurnClientApi for TurnClientRustls {
         Ok(())
     }
 
+    fn tcp_connect(
+        &mut self,
+        peer_addr: SocketAddr,
+        now: Instant,
+    ) -> Result<(), TcpConnectError> {
+        self.protocol.tcp_connect(peer_addr, now)?;
+
+        while let Some(transmit) = self.protocol.poll_transmit(now) {
+            self.conn.writer().write_all(&transmit.data).unwrap();
+        }
+
+        Ok(())
+    }
+
+    fn allocated_tcp_socket(
+        &mut self,
+        id: u32,
+        five_tuple: Socket5Tuple,
+        peer_addr: SocketAddr,
+        local_addr: Option<SocketAddr>,
+        now: Instant,
+    ) -> Result<(), TcpAllocateError> {
+        self.protocol.allocated_tcp_socket(id, five_tuple, peer_addr, local_addr, now)?;
+
+        while let Some(transmit) = self.protocol.poll_transmit(now) {
+            self.conn.writer().write_all(&transmit.data).unwrap();
+        }
+        Ok(())
+    }
+
+    fn tcp_closed(&mut self, local_addr: SocketAddr, remote_addr: SocketAddr, now: Instant) {
+        self.protocol.tcp_closed(local_addr, remote_addr, now);
+        self.conn.send_close_notify();
+    }
+
     fn send_to<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         transport: TransportType,
@@ -298,12 +267,13 @@ impl TurnClientApi for TurnClientRustls {
         data: T,
         now: Instant,
     ) -> Result<Option<TransmitBuild<DelayedMessageOrChannelSend<T>>>, SendError> {
-        let transmit = self.protocol.send_to(transport, to, data, now)?;
-        let transmit = transmit.build();
-        if let Err(e) = self.conn.writer().write_all(&transmit.data) {
-            self.protocol.error();
-            warn!("Error when writing plaintext: {e:?}");
-            return Err(SendError::NoAllocation);
+        if let Some(transmit) = self.protocol.send_to(transport, to, data, now)? {
+            let transmit = transmit.build();
+            if let Err(e) = self.conn.writer().write_all(&transmit.data) {
+                self.protocol.protocol_error();
+                warn!("Error when writing plaintext: {e:?}");
+                return Err(SendError::NoAllocation);
+            }
         }
 
         if self.conn.wants_write() {
@@ -311,14 +281,14 @@ impl TurnClientApi for TurnClientRustls {
             match self.conn.write_tls(&mut out) {
                 Ok(_n) => {
                     return Ok(Some(TransmitBuild::new(
-                        DelayedMessageOrChannelSend::Data(out),
+                        DelayedMessageOrChannelSend::OwnedData(out),
                         self.transport(),
                         self.local_addr(),
                         self.remote_addr(),
                     )))
                 }
                 Err(e) => {
-                    self.protocol.error();
+                    self.protocol.protocol_error();
                     warn!("Error when writing TLS records: {e:?}");
                     return Err(SendError::NoAllocation);
                 }
@@ -359,14 +329,14 @@ impl TurnClientApi for TurnClientRustls {
             Ok(_written) => match self.conn.process_new_packets() {
                 Ok(io_state) => io_state,
                 Err(e) => {
-                    self.protocol.error();
+                    self.protocol.protocol_error();
                     warn!("Error processing TLS: {e:?}");
                     return TurnRecvRet::Ignored(transmit);
                 }
             },
             Err(e) => {
                 warn!("Error receiving data: {e:?}");
-                self.protocol.error();
+                self.protocol.protocol_error();
                 return TurnRecvRet::Ignored(transmit);
             }
         };
@@ -376,62 +346,42 @@ impl TurnClientApi for TurnClientRustls {
                 Ok(n) => n,
                 Err(e) => {
                     warn!("Error receiving data: {e:?}");
-                    self.protocol.error();
+                    self.protocol.protocol_error();
                     return TurnRecvRet::Ignored(transmit);
                 }
             };
             out.resize(n, 0);
             let transmit = Transmit::new(out, transmit.transport, transmit.from, transmit.to);
 
-            return self.handle_incoming_plaintext(transmit, now);
+            return match self.protocol.recv(transmit, now) {
+                TurnRecvRet::Ignored(_) => unreachable!(),
+                TurnRecvRet::PeerData(peer_data) => TurnRecvRet::PeerData(peer_data.into_owned()),
+                TurnRecvRet::Handled => TurnRecvRet::Handled,
+                TurnRecvRet::PeerIcmp {
+                    transport,
+                    peer,
+                    icmp_type,
+                    icmp_code,
+                    icmp_data,
+                } => TurnRecvRet::PeerIcmp {
+                    transport,
+                    peer,
+                    icmp_type,
+                    icmp_code,
+                    icmp_data,
+                },
+            }
         }
 
         TurnRecvRet::Handled
     }
 
     fn poll_recv(&mut self, now: Instant) -> Option<TurnPeerData<Vec<u8>>> {
-        while let Some(recv) = self.incoming_tcp_buffer.poll_recv() {
-            match recv {
-                StoredTcp::Message(msg_data) => {
-                    let Ok(msg) = Message::from_bytes(&msg_data) else {
-                        continue;
-                    };
-                    if let TurnProtocolRecv::PeerData {
-                        range,
-                        transport,
-                        peer,
-                    } = self.protocol.handle_message(msg, now)
-                    {
-                        return Some(TurnPeerData {
-                            data: DataRangeOrOwned::Range {
-                                data: msg_data,
-                                range,
-                            },
-                            transport,
-                            peer,
-                        });
-                    }
-                }
-                StoredTcp::Channel(data) => {
-                    let Ok(channel) = ChannelData::parse(&data) else {
-                        continue;
-                    };
-                    if let TurnProtocolChannelRecv::PeerData {
-                        range,
-                        transport,
-                        peer,
-                    } = self.protocol.handle_channel(channel, now)
-                    {
-                        return Some(TurnPeerData {
-                            data: DataRangeOrOwned::Range { data, range },
-                            transport,
-                            peer,
-                        });
-                    }
-                }
-            }
-        }
-        None
+        self.protocol.poll_recv(now)
+    }
+
+    fn protocol_error(&mut self) {
+        self.protocol.protocol_error()
     }
 }
 
@@ -554,6 +504,7 @@ mod tests {
             local_addr,
             remote_addr,
             credentials,
+            TransportType::Udp,
             &[AddressFamily::IPV4],
             remote_addr.ip().into(),
             client_config(),
@@ -597,10 +548,11 @@ mod tests {
 
     fn allocate_udp<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
         complete_io(test, now);
-        test.server.allocated_udp_socket(
+        test.server.allocated_socket(
             TransportType::Tcp,
             test.client.remote_addr(),
             test.client.local_addr(),
+            TransportType::Udp,
             AddressFamily::IPV4,
             Ok(test.turn_alloc_addr),
             now,
@@ -663,7 +615,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             transmit.data,
-            DelayedMessageOrChannelSend::Data(_)
+            DelayedMessageOrChannelSend::OwnedData(_)
         ));
         let transmit = transmit_send_build(transmit);
         assert_eq!(transmit.transport, test.client.transport());

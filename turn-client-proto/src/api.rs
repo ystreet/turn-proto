@@ -68,6 +68,36 @@ pub trait TurnClientApi: core::fmt::Debug + Send {
         now: Instant,
     ) -> Result<(), BindChannelError>;
 
+    /// Attempt to connect to a peer from the TURN server using TCP.
+    ///
+    /// Requires that a TCP allocation has been allocated on the TURN server.
+    fn tcp_connect(
+        &mut self,
+        peer_addr: SocketAddr,
+        now: Instant,
+    ) -> Result<(), TcpConnectError>;
+
+    /// Indicate success (or failure) to create a socket for the specified server and peer address.
+    ///
+    /// The values @id, @five_tuple, and @peer_addr must match the values provided in matching the
+    /// [`TurnPollRet::AllocateTcpSocket`].
+    fn allocated_tcp_socket(
+        &mut self,
+        id: u32,
+        five_tuple: Socket5Tuple,
+        peer_addr: SocketAddr,
+        local_addr: Option<SocketAddr>,
+        now: Instant,
+    ) -> Result<(), TcpAllocateError>;
+
+    /// Indicate that the TCP connection has been closed.
+    fn tcp_closed(
+        &mut self,
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        now: Instant,
+    );
+
     /// Send data to a peer through the TURN server.
     ///
     /// The provided transport, address and data are the data to send to the peer.
@@ -101,6 +131,9 @@ pub trait TurnClientApi: core::fmt::Debug + Send {
 
     /// Poll for an event that has occurred.
     fn poll_event(&mut self) -> Option<TurnEvent>;
+
+    /// A higher layer has encountered an error and this client is no longer usable.
+    fn protocol_error(&mut self);
 }
 
 /// Return value from calling [poll](TurnClientApi::poll)().
@@ -109,8 +142,29 @@ pub enum TurnPollRet {
     /// The caller should wait until the provided time. Other events may cause this value to
     /// modified and poll() should be rechecked.
     WaitUntil(Instant),
+    /// The caller should initiate a connection using the provided remote address based on the
+    /// provided local address.
+    AllocateTcpSocket {
+        /// The server-unique identifier for this connection.
+        id: u32,
+        /// The client-server network 5-tuple.
+        socket: Socket5Tuple,
+        /// The address of the peer to connect to.
+        peer_addr: SocketAddr,
+    },
     /// The connection is closed and no further progress will be made.
     Closed,
+}
+
+/// A socket with the specified network 5-tuple.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Socket5Tuple {
+    /// The transport for the socket.
+    pub transport: TransportType,
+    /// The local address for the socket.
+    pub from: SocketAddr,
+    /// The remote address for the socket.
+    pub to: SocketAddr,
 }
 
 /// Return value from call [recv](TurnClientApi::recv).
@@ -149,6 +203,13 @@ pub struct TurnPeerData<T: AsRef<[u8]> + core::fmt::Debug> {
 }
 
 impl<T: AsRef<[u8]> + core::fmt::Debug> TurnPeerData<T> {
+    /// Produce an owned variant of [`TurnPeerData`], copying only if necessary.
+    pub fn into_owned<R: AsRef<[u8]> + core::fmt::Debug>(self) -> TurnPeerData<R> {
+        TurnPeerData { data: self.data.into_owned(), transport: self.transport, peer: self.peer }
+    }
+}
+
+impl<T: AsRef<[u8]> + core::fmt::Debug> TurnPeerData<T> {
     /// The data slice of this [`TurnPeerData`]
     pub fn data(&self) -> &[u8] {
         self.data.as_ref()
@@ -177,6 +238,10 @@ pub enum TurnEvent {
     ChannelCreated(TransportType, SocketAddr),
     /// A channel could not be installed for the provided transport and IP address.
     ChannelCreateFailed(TransportType, SocketAddr),
+    /// A TCP connection was created for the provided peer IP address.
+    TcpConnected(SocketAddr),
+    /// A TCP connection could not be installed for the provided peer IP address.
+    TcpConnectFailed(SocketAddr),
 }
 
 /// Errors produced when attempting to bind a channel.
@@ -222,6 +287,36 @@ pub enum SendError {
     /// There is no permission installed for the requested peer.
     #[error("There is no permission installed for the requested peer")]
     NoPermission,
+    /// There is no local TCP socket for the requested peer.
+    #[error("There is no local TCP socket for the requested peer")]
+    NoTcpSocket,
+}
+
+/// Errors produced when attempting to connect to a peer over TCP.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum TcpConnectError {
+    /// The TCP connection already exists and cannot be recreated.
+    #[error("The TCP connection already exists and cannot be recreated.")]
+    AlreadyExists,
+    /// There is no connection to the TURN server that can handle this TCP socket.
+    #[error("There is no connection to the TURN server that can handle this TCP socket.")]
+    NoAllocation,
+    /// There is no permission installed for the requested peer.
+    #[error("There is no permission installed for the requested peer")]
+    NoPermission,
+}
+
+/// Errors produced when attempting to connect to a peer over TCP.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum TcpAllocateError {
+    /// The TCP connection already exists and cannot be recreated.
+    #[error("The TCP connection already exists and cannot be recreated.")]
+    AlreadyExists,
+    /// There is no connection to the TURN server that can handle this TCP socket.
+    #[error("There is no connection to the TURN server that can handle this TCP socket.")]
+    NoAllocation,
 }
 
 /// A slice range or an owned piece of data.
@@ -291,8 +386,10 @@ pub enum DelayedMessageOrChannelSend<T: AsRef<[u8]> + core::fmt::Debug> {
     Channel(DelayedChannel<T>),
     /// A [`DelayedMessage`].
     Message(DelayedMessage<T>),
+    /// Passthrough of a piece of data.
+    Data(T),
     /// An already constructed piece of data.
-    Data(Vec<u8>),
+    OwnedData(Vec<u8>),
 }
 
 impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedMessageOrChannelSend<T> {
@@ -310,7 +407,8 @@ impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedTransmitBuild for DelayedMessageO
         match self {
             Self::Channel(channel) => channel.len(),
             Self::Message(msg) => msg.len(),
-            Self::Data(owned) => owned.len(),
+            Self::Data(data) => data.as_ref().len(),
+            Self::OwnedData(owned) => owned.len(),
         }
     }
 
@@ -318,7 +416,8 @@ impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedTransmitBuild for DelayedMessageO
         match self {
             Self::Channel(channel) => channel.build(),
             Self::Message(msg) => msg.build(),
-            Self::Data(owned) => owned,
+            Self::Data(data) => data.as_ref().to_vec(),
+            Self::OwnedData(owned) => owned,
         }
     }
 
@@ -326,7 +425,11 @@ impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedTransmitBuild for DelayedMessageO
         match self {
             Self::Channel(channel) => channel.write_into(data),
             Self::Message(msg) => msg.write_into(data),
-            Self::Data(owned) => {
+            Self::Data(slice) => {
+                data.copy_from_slice(slice.as_ref());
+                slice.as_ref().len()
+            }
+            Self::OwnedData(owned) => {
                 data.copy_from_slice(&owned);
                 owned.len()
             }
@@ -614,10 +717,11 @@ pub(crate) mod tests {
             assert!(msg.has_attribute(Username::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
             assert!(self.server.recv(transmit, now).is_none());
-            let TurnServerPollRet::AllocateSocketUdp {
+            let TurnServerPollRet::AllocateSocket {
                 transport,
-                local_addr: alloc_local_addr,
-                remote_addr: alloc_remote_addr,
+                listen_addr: alloc_local_addr,
+                client_addr: alloc_remote_addr,
+                allocation_transport,
                 family,
             } = self.server.poll(now)
             else {
@@ -626,10 +730,12 @@ pub(crate) mod tests {
             assert_eq!(transport, self.client.transport());
             assert_eq!(alloc_local_addr, self.server.listen_address());
             assert_eq!(alloc_remote_addr, self.client.local_addr());
-            self.server.allocated_udp_socket(
+            assert_eq!(allocation_transport, TransportType::Udp);
+            self.server.allocated_socket(
                 transport,
                 alloc_local_addr,
                 alloc_remote_addr,
+                allocation_transport,
                 family,
                 Ok(self.turn_alloc_addr),
                 now,
