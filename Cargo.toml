@@ -7,12 +7,12 @@ resolver = "2"
 version = "0.4.1"
 repository = "https://github.com/ystreet/turn-proto"
 edition = "2021"
-rust-version = "1.77.0"
+rust-version = "1.80.0"
 
 [workspace.dependencies]
 byteorder = { version = "1", default-features = false }
-stun-proto = { version = "1.0.0", default-features = false }
-stun-types = { version = "1.0.0", default-features = false }
+stun-proto = { version = "1.0.2", default-features = false }
+stun-types = { version = "1.0.2", default-features = false }
 turn-types = { path = "turn-types", version = "0.4.0", default-features = false }
 thiserror = { version = "2", default-features = false }
 tracing = { version = "0.1", default-features = false, features = ["attributes"] }

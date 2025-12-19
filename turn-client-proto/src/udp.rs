@@ -27,7 +27,8 @@ use turn_types::TurnCredentials;
 use tracing::{trace, warn};
 
 use crate::api::{
-    DataRangeOrOwned, DelayedMessageOrChannelSend, TransmitBuild, TurnClientApi, TurnPeerData,
+    DataRangeOrOwned, DelayedMessageOrChannelSend, Socket5Tuple, TcpAllocateError, TcpConnectError,
+    TransmitBuild, TurnClientApi, TurnPeerData,
 };
 use crate::protocol::{TurnClientProtocol, TurnProtocolChannelRecv};
 
@@ -80,7 +81,12 @@ impl TurnClientUdp {
             .build();
 
         Self {
-            protocol: TurnClientProtocol::new(stun_agent, credentials, allocation_families),
+            protocol: TurnClientProtocol::new(
+                stun_agent,
+                credentials,
+                TransportType::Udp,
+                allocation_families,
+            ),
         }
     }
 }
@@ -148,6 +154,26 @@ impl TurnClientApi for TurnClientUdp {
         self.protocol.bind_channel(transport, peer_addr, now)
     }
 
+    fn tcp_connect(&mut self, peer_addr: SocketAddr, now: Instant) -> Result<(), TcpConnectError> {
+        self.protocol.tcp_connect(peer_addr, now)
+    }
+
+    fn allocated_tcp_socket(
+        &mut self,
+        id: u32,
+        five_tuple: Socket5Tuple,
+        peer_addr: SocketAddr,
+        local_addr: Option<SocketAddr>,
+        now: Instant,
+    ) -> Result<(), TcpAllocateError> {
+        self.protocol
+            .allocated_tcp_socket(id, five_tuple, peer_addr, local_addr, now)
+    }
+
+    fn tcp_closed(&mut self, local_addr: SocketAddr, remote_addr: SocketAddr, now: Instant) {
+        self.protocol.tcp_closed(local_addr, remote_addr, now)
+    }
+
     fn send_to<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         transport: TransportType,
@@ -200,11 +226,17 @@ impl TurnClientApi for TurnClientUdp {
                 }
             }
         };
-        TurnRecvRet::from_protocol_recv(self.protocol.handle_message(msg, now), transmit)
+
+        let msg_transmit = Transmit::new(msg, transmit.transport, transmit.from, transmit.to);
+        TurnRecvRet::from_protocol_recv(self.protocol.handle_message(msg_transmit, now), transmit)
     }
 
     fn poll_recv(&mut self, _now: Instant) -> Option<TurnPeerData<Vec<u8>>> {
         None
+    }
+
+    fn protocol_error(&mut self) {
+        self.protocol.protocol_error()
     }
 }
 
@@ -230,7 +262,9 @@ pub(crate) mod tests {
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         credentials: TurnCredentials,
+        allocation_transport: TransportType,
     ) -> TurnClient {
+        assert_eq!(allocation_transport, TransportType::Udp);
         TurnClientUdp::allocate(local_addr, remote_addr, credentials, &[AddressFamily::IPV4]).into()
     }
 

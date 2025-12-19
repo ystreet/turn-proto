@@ -52,14 +52,27 @@ pub trait TurnServerApi: Send + core::fmt::Debug {
     /// Poll for a new Transmit to send over a socket.
     fn poll_transmit(&mut self, now: Instant) -> Option<Transmit<Vec<u8>>>;
     /// Notify the [`TurnServerApi`] that a UDP socket has been allocated (or an error) in response to
-    /// [TurnServerPollRet::AllocateSocketUdp].
-    fn allocated_udp_socket(
+    /// [TurnServerPollRet::AllocateSocket].
+    #[allow(clippy::too_many_arguments)]
+    fn allocated_socket(
         &mut self,
         transport: TransportType,
-        local_addr: SocketAddr,
-        remote_addr: SocketAddr,
+        listen_addr: SocketAddr,
+        client_addr: SocketAddr,
+        allocation_transport: TransportType,
         family: AddressFamily,
         socket_addr: Result<SocketAddr, SocketAllocateError>,
+        now: Instant,
+    );
+    /// Indicate that a TCP connection has been configured (or an error) for a client to
+    /// connect over TCP with a peer.
+    fn tcp_connected(
+        &mut self,
+        relayed_addr: SocketAddr,
+        peer_addr: SocketAddr,
+        listen_addr: SocketAddr,
+        client_addr: SocketAddr,
+        socket_addr: Result<SocketAddr, TcpConnectError>,
         now: Instant,
     );
 }
@@ -69,16 +82,47 @@ pub trait TurnServerApi: Send + core::fmt::Debug {
 pub enum TurnServerPollRet {
     /// Wait until the specified time before calling poll() again.
     WaitUntil(Instant),
-    /// Allocate a UDP socket for a client specified by the client's network 5-tuple.
-    AllocateSocketUdp {
+    /// Allocate a listening socket for a client specified by the client's network 5-tuple.
+    AllocateSocket {
         /// The transport of the client asking for an allocation.
         transport: TransportType,
         /// The TURN server address of the client asking for an allocation.
-        local_addr: SocketAddr,
+        listen_addr: SocketAddr,
         /// The client local address of the client asking for an allocation.
-        remote_addr: SocketAddr,
+        client_addr: SocketAddr,
+        /// The requested allocation transport.
+        allocation_transport: TransportType,
         /// The address family of the request for an allocation.
         family: AddressFamily,
+    },
+    /// Connect to a peer over TCP.
+    TcpConnect {
+        /// The relayed address to connect from.
+        relayed_addr: SocketAddr,
+        /// The peer to connect to.
+        peer_addr: SocketAddr,
+        /// The TURN server address of the client asking for an allocation.
+        listen_addr: SocketAddr,
+        /// The client's local address (TURN server remote) of the client asking for an allocation.
+        client_addr: SocketAddr,
+    },
+    /// Close a TCP connection between the TURN server and a peer/client.
+    ///
+    /// The connection can be in progress of being setup.
+    ///
+    /// Connections to both TURN clients and peers can be signalled through this variant.
+    TcpClose {
+        /// The socket address local to the TURN server.
+        local_addr: SocketAddr,
+        /// The socket address of the remote peer.
+        remote_addr: SocketAddr,
+    },
+    /// Stop listening on a socket.
+    SocketClose {
+        /// The transport of the socket.
+        transport: TransportType,
+        /// The listening socket address.
+        listen_addr: SocketAddr,
     },
 }
 
@@ -99,6 +143,34 @@ impl SocketAllocateError {
         match self {
             Self::AddressFamilyNotSupported => ErrorCode::ADDRESS_FAMILY_NOT_SUPPORTED,
             Self::InsufficientCapacity => ErrorCode::INSUFFICIENT_CAPACITY,
+        }
+    }
+}
+
+/// Errors that can be conveyed when allocating a socket for a client.
+#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
+pub enum TcpConnectError {
+    /// The server does not have the capacity to handle this request.
+    #[error("The server does not have the capacity to handle this request.")]
+    InsufficientCapacity,
+    /// Connection is forbidden by local policy.
+    #[error("Connection is forbidden by local policy.")]
+    Forbidden,
+    /// Timed Out attempting to connect to the specified peer.
+    #[error("Timed out attempting to connect to the specifid peer.")]
+    TimedOut,
+    /// Faild for any other unspecified reason.
+    #[error("Failed for any other unspecified reason.")]
+    Failure,
+}
+
+impl TcpConnectError {
+    /// Convert this error into an error code for the `ErrorCode` or `AddressErrorCode` attributes.
+    pub fn into_error_code(self) -> u16 {
+        match self {
+            Self::InsufficientCapacity => ErrorCode::INSUFFICIENT_CAPACITY,
+            Self::Forbidden => ErrorCode::FORBIDDEN,
+            Self::TimedOut | Self::Failure => ErrorCode::CONNECTION_TIMEOUT_OR_FAILURE,
         }
     }
 }
