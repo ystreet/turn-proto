@@ -28,8 +28,8 @@ use stun_proto::types::TransportType;
 use stun_proto::Instant;
 use tracing::{debug, info, trace, warn};
 use turn_types::attribute::{
-    AdditionalAddressFamily, ChannelNumber, Icmp, Lifetime, RequestedAddressFamily, XorPeerAddress,
-    XorRelayedAddress,
+    AdditionalAddressFamily, ChannelNumber, ConnectionId, Icmp, Lifetime, RequestedAddressFamily,
+    XorPeerAddress, XorRelayedAddress,
 };
 use turn_types::attribute::{Data as AData, DontFragment, RequestedTransport};
 use turn_types::channel::ChannelData;
@@ -44,7 +44,8 @@ use turn_types::{AddressFamily, TurnCredentials};
 
 use crate::api::{
     BindChannelError, CreatePermissionError, DataRangeOrOwned, DelayedMessageOrChannelSend,
-    DeleteError, SendError, TransmitBuild, TurnEvent, TurnPeerData, TurnPollRet, TurnRecvRet,
+    DeleteError, SendError, Socket5Tuple, TcpAllocateError, TcpConnectError, TransmitBuild,
+    TurnEvent, TurnPeerData, TurnPollRet, TurnRecvRet,
 };
 use crate::tcp::ensure_data_owned;
 
@@ -56,9 +57,12 @@ pub(crate) static PERMISSION_DURATION: Duration = Duration::from_secs(300);
 pub(crate) static CHANNEL_DURATION: Duration = Duration::from_secs(600);
 /// Lifetime of a removed channel before the channel can be reused
 pub(crate) static CHANNEL_REMOVE_DURATION: Duration = Duration::from_secs(300);
+/// Timeout for a TCP STUN request to expire.
+pub(crate) static TCP_STUN_REQUEST_TIMEOUT: Duration = Duration::from_millis(39500);
 
 #[derive(Debug)]
 pub(crate) struct TurnClientProtocol {
+    allocation_transport: TransportType,
     families: smallvec::SmallVec<[AddressFamily; 2]>,
     stun_agent: StunAgent,
     credentials: TurnCredentials,
@@ -68,12 +72,14 @@ pub(crate) struct TurnClientProtocol {
     pending_transmits: VecDeque<Transmit<Data<'static>>>,
 
     pending_events: VecDeque<TurnEvent>,
+    pending_socket_removal: VecDeque<Socket5Tuple>,
 }
 
 impl TurnClientProtocol {
     pub(crate) fn new(
         stun_agent: StunAgent,
         credentials: TurnCredentials,
+        allocation_transport: TransportType,
         address_families: &[AddressFamily],
     ) -> Self {
         turn_types::debug_init();
@@ -89,7 +95,13 @@ impl TurnClientProtocol {
         if families.is_empty() {
             panic!("Incorrect number of address families");
         }
+        if allocation_transport == TransportType::Tcp
+            && stun_agent.transport() != TransportType::Tcp
+        {
+            panic!("Cannot create TCP allocation without a TCP client connection");
+        }
         Self {
+            allocation_transport,
             families,
             stun_agent,
             credentials,
@@ -97,13 +109,17 @@ impl TurnClientProtocol {
             allocations: vec![],
             pending_transmits: VecDeque::default(),
             pending_events: VecDeque::default(),
+            pending_socket_removal: VecDeque::default(),
         }
     }
 
     fn send_initial_request(&mut self, now: Instant) -> (Transmit<Data<'static>>, TransactionId) {
         info!("sending initial ALLOCATE");
         let lifetime = Lifetime::new(1800);
-        let requested = RequestedTransport::new(RequestedTransport::UDP);
+        let requested = match self.allocation_transport {
+            TransportType::Udp => RequestedTransport::new(RequestedTransport::UDP),
+            TransportType::Tcp => RequestedTransport::new(RequestedTransport::TCP),
+        };
         let dont_fragment = DontFragment::new();
         let mut msg = Message::builder_request(
             ALLOCATE,
@@ -146,17 +162,22 @@ impl TurnClientProtocol {
         (transmit.into_owned(), transaction_id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn send_authenticating_request(
         stun_agent: &mut StunAgent,
         username: &str,
         realm: &str,
         key: &IntegrityKey,
         nonce: &str,
+        allocation_transport: TransportType,
         address_families: &[AddressFamily],
         now: Instant,
     ) -> (Transmit<Data<'static>>, TransactionId) {
         info!("sending authenticated ALLOCATE");
-        let requested_transport = RequestedTransport::new(RequestedTransport::UDP);
+        let requested_transport = match allocation_transport {
+            TransportType::Udp => RequestedTransport::new(RequestedTransport::UDP),
+            TransportType::Tcp => RequestedTransport::new(RequestedTransport::TCP),
+        };
         let lifetime = Lifetime::new(1800);
         let username = Username::new(username).unwrap();
         let realm = Realm::new(realm).unwrap();
@@ -210,6 +231,8 @@ impl TurnClientProtocol {
         (transmit.into_owned(), transaction_id)
     }
 
+    /// Update permission state on a success response for anything the resets the permission expiry
+    /// time (CREATE_PERMISSION, CHANNEL_BIND, etc).
     fn update_permission_state(
         allocations: &mut [Allocation],
         pending_events: &mut VecDeque<TurnEvent>,
@@ -299,6 +322,7 @@ impl TurnClientProtocol {
         }
     }
 
+    /// Validates an unauthenticated stale-nonce error response.
     fn validate_stale_nonce(msg: &Message<'_>) -> Option<(String, String)> {
         if !msg.has_class(MessageClass::Error) {
             return None;
@@ -642,7 +666,6 @@ impl TurnClientProtocol {
                                 allocations[alloc_idx].transport,
                                 channel.peer_addr,
                             ));
-                            channel.expires_at = now;
                             return TurnProtocolRecv::Handled;
                         }
                         info!("Succesfully created/refreshed {channel:?}");
@@ -696,6 +719,33 @@ impl TurnClientProtocol {
                     }
                     TurnProtocolRecv::Ignored
                 }
+                CONNECT => {
+                    if let Some((allocation, existing_idx)) =
+                        allocations.iter_mut().find_map(|allocation| {
+                            allocation
+                                .pending_tcp_turn
+                                .iter()
+                                .position(|pending| pending.transaction_id == msg.transaction_id())
+                                .map(|channel_idx| (allocation, channel_idx))
+                        })
+                    {
+                        let pending = allocation.pending_tcp_turn.swap_remove(existing_idx);
+                        let Ok(connection_id) = msg.attribute::<ConnectionId>() else {
+                            pending_events
+                                .push_front(TurnEvent::TcpConnectFailed(pending.peer_addr));
+                            return TurnProtocolRecv::Handled;
+                        };
+                        let connection_id = connection_id.id();
+                        allocation.pending_tcp_allocate.push(PendingTcpAllocate {
+                            connection_id,
+                            peer_addr: pending.peer_addr,
+                            initiation_time: None,
+                            request_transaction_id: None,
+                        });
+                        return TurnProtocolRecv::Handled;
+                    }
+                    TurnProtocolRecv::Ignored
+                }
                 _ => TurnProtocolRecv::Ignored, // Other responses are not expected
             }
         } else if msg.has_class(stun_proto::types::message::MessageClass::Request) {
@@ -703,6 +753,73 @@ impl TurnClientProtocol {
                 trace!("incoming message failed integrity check");
                 return TurnProtocolRecv::Ignored;
             };
+
+            if msg.has_method(CONNECTION_ATTEMPT) {
+                let Ok(connection_id) = msg.attribute::<ConnectionId>() else {
+                    let msg = Self::bad_request_signed(&msg, key).finish();
+                    let transmit = stun_agent
+                        .send(Data::from(msg.into_boxed_slice()), from, now)
+                        .unwrap();
+                    pending_transmits.push_back(transmit);
+                    return TurnProtocolRecv::Handled;
+                };
+                let connection_id = connection_id.id();
+
+                let Ok(xor_peer_addr) = msg.attribute::<XorPeerAddress>() else {
+                    let msg = Self::bad_request_signed(&msg, key).finish();
+                    let transmit = stun_agent
+                        .send(Data::from(msg.into_boxed_slice()), from, now)
+                        .unwrap();
+                    pending_transmits.push_back(transmit);
+                    return TurnProtocolRecv::Handled;
+                };
+                let peer_addr = xor_peer_addr.addr(msg.transaction_id());
+                let Some(allocation) = allocations.iter_mut().find(|alloc| {
+                    alloc.transport == transport
+                        && alloc.relayed_address.is_ipv4() == peer_addr.is_ipv4()
+                }) else {
+                    let msg = Self::bad_request_signed(&msg, key).finish();
+                    let transmit = stun_agent
+                        .send(Data::from(msg.into_boxed_slice()), from, now)
+                        .unwrap();
+                    pending_transmits.push_back(transmit);
+                    return TurnProtocolRecv::Handled;
+                };
+                if allocation
+                    .tcp_data
+                    .iter()
+                    .any(|tcp| tcp.peer_addr == peer_addr)
+                    || allocation
+                        .pending_tcp_allocate
+                        .iter()
+                        .any(|tcp| tcp.peer_addr == peer_addr)
+                {
+                    warn!("TURN-TCP connection already configured (or pending) for {peer_addr}");
+                    let mut msg = Message::builder_error(&msg, MessageWriteVec::new());
+                    msg.add_attribute(
+                        &ErrorCode::builder(ErrorCode::CONNECTION_ALREADY_EXISTS)
+                            .build()
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    msg.add_message_integrity_with_key(key, IntegrityAlgorithm::Sha1)
+                        .unwrap();
+                    let transmit = stun_agent
+                        .send(Data::from(msg.finish().into_boxed_slice()), from, now)
+                        .unwrap();
+                    pending_transmits.push_back(transmit);
+                    return TurnProtocolRecv::Handled;
+                }
+
+                allocation.pending_tcp_allocate.push(PendingTcpAllocate {
+                    connection_id,
+                    peer_addr,
+                    initiation_time: None,
+                    request_transaction_id: Some(msg.transaction_id()),
+                });
+
+                return TurnProtocolRecv::Handled;
+            }
 
             // TODO: reply with an error?
             TurnProtocolRecv::Ignored
@@ -761,6 +878,26 @@ impl TurnClientProtocol {
                 _ => TurnProtocolRecv::Ignored, // All other indications should be ignored
             }
         }
+    }
+
+    fn bad_request(msg: &Message<'_>, additional_bytes: usize) -> MessageWriteVec {
+        let error = ErrorCode::builder(ErrorCode::BAD_REQUEST).build().unwrap();
+        let mut builder = Message::builder_error(
+            msg,
+            MessageWriteVec::with_capacity(
+                MessageHeader::LENGTH + error.padded_len() + additional_bytes,
+            ),
+        );
+        builder.add_attribute(&error).unwrap();
+        builder
+    }
+
+    fn bad_request_signed(msg: &Message<'_>, key: &IntegrityKey) -> MessageWriteVec {
+        let mut builder = Self::bad_request(msg, 24);
+        builder
+            .add_message_integrity_with_key(key, IntegrityAlgorithm::Sha1)
+            .unwrap();
+        builder
     }
 
     fn send_refresh(
@@ -892,6 +1029,153 @@ impl TurnClientProtocol {
         (transmit.into_owned(), transaction_id)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn send_connection_bind_request(
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        connection_id: u32,
+        username: &str,
+        realm: &str,
+        key: &IntegrityKey,
+        nonce: &str,
+    ) -> (Transmit<Data<'static>>, TransactionId) {
+        info!(?local_addr, ?remote_addr, "sending CONNECTION BIND");
+        let transaction_id = TransactionId::generate();
+        let connection_id = ConnectionId::new(connection_id);
+        let username = Username::new(username).unwrap();
+        let realm = Realm::new(realm).unwrap();
+        let nonce = Nonce::new(nonce).unwrap();
+
+        let mut builder = Message::builder(
+            MessageType::from_class_method(MessageClass::Request, CONNECTION_BIND),
+            transaction_id,
+            MessageWriteVec::with_capacity(
+                MessageHeader::LENGTH
+                    + connection_id.padded_len()
+                    + username.padded_len()
+                    + realm.padded_len()
+                    + nonce.padded_len()
+                    + 24,
+            ),
+        );
+        builder.add_attribute(&connection_id).unwrap();
+        builder.add_attribute(&username).unwrap();
+        builder.add_attribute(&realm).unwrap();
+        builder.add_attribute(&nonce).unwrap();
+        builder
+            .add_message_integrity_with_key(key, IntegrityAlgorithm::Sha1)
+            .unwrap();
+        let msg = builder.finish();
+
+        let transmit = Transmit::new(
+            Data::from(msg.into_boxed_slice()),
+            TransportType::Tcp,
+            local_addr,
+            remote_addr,
+        );
+
+        (transmit, transaction_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_connect_request(
+        stun_agent: &mut StunAgent,
+        username: &str,
+        realm: &str,
+        key: &IntegrityKey,
+        nonce: &str,
+        peer_addr: SocketAddr,
+        now: Instant,
+    ) -> (Transmit<Data<'static>>, TransactionId) {
+        info!(peer_addr = ?peer_addr, "sending CONNECTION BIND");
+        let transaction_id = TransactionId::generate();
+        let xor_peer_address = XorPeerAddress::new(peer_addr, transaction_id);
+        let username = Username::new(username).unwrap();
+        let realm = Realm::new(realm).unwrap();
+        let nonce = Nonce::new(nonce).unwrap();
+
+        let mut builder = Message::builder(
+            MessageType::from_class_method(MessageClass::Request, CONNECT),
+            transaction_id,
+            MessageWriteVec::with_capacity(
+                MessageHeader::LENGTH
+                    + username.padded_len()
+                    + xor_peer_address.padded_len()
+                    + realm.padded_len()
+                    + nonce.padded_len()
+                    + 24,
+            ),
+        );
+        builder.add_attribute(&xor_peer_address).unwrap();
+        builder.add_attribute(&username).unwrap();
+        builder.add_attribute(&realm).unwrap();
+        builder.add_attribute(&nonce).unwrap();
+        builder
+            .add_message_integrity_with_key(key, IntegrityAlgorithm::Sha1)
+            .unwrap();
+        let msg = builder.finish();
+
+        let transmit = stun_agent
+            .send_request(&msg, stun_agent.remote_addr().unwrap(), now)
+            .unwrap();
+        (transmit.into_owned(), transaction_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_connection_attempt_response(
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        transaction_id: TransactionId,
+        username: &str,
+        realm: &str,
+        key: &IntegrityKey,
+        nonce: &str,
+        peer_addr: SocketAddr,
+        error_code: Option<u16>,
+    ) -> Transmit<Data<'static>> {
+        info!(peer_addr = ?peer_addr, "sending CONNECTION ATTEMPT response");
+        let username = Username::new(username).unwrap();
+        let realm = Realm::new(realm).unwrap();
+        let nonce = Nonce::new(nonce).unwrap();
+        let error_code = error_code.map(|code| ErrorCode::builder(code).build().unwrap());
+        let mut additional_bytes = 24;
+
+        let cls = if let Some(code) = error_code.as_ref() {
+            additional_bytes += code.padded_len();
+            MessageClass::Error
+        } else {
+            MessageClass::Success
+        };
+        let mut builder = Message::builder(
+            MessageType::from_class_method(cls, CONNECTION_ATTEMPT),
+            transaction_id,
+            MessageWriteVec::with_capacity(
+                MessageHeader::LENGTH
+                    + username.padded_len()
+                    + realm.padded_len()
+                    + nonce.padded_len()
+                    + additional_bytes,
+            ),
+        );
+        builder.add_attribute(&username).unwrap();
+        builder.add_attribute(&realm).unwrap();
+        builder.add_attribute(&nonce).unwrap();
+        if let Some(code) = error_code {
+            builder.add_attribute(&code).unwrap();
+        }
+        builder
+            .add_message_integrity_with_key(key, IntegrityAlgorithm::Sha1)
+            .unwrap();
+        let msg = builder.finish();
+
+        Transmit::new(
+            Data::from(msg.into_boxed_slice()),
+            TransportType::Tcp,
+            local_addr,
+            remote_addr,
+        )
+    }
+
     pub(crate) fn have_permission(&self, transport: TransportType, to: IpAddr) -> bool {
         self.allocations.iter().any(|allocation| {
             allocation.transport == transport
@@ -944,14 +1228,17 @@ impl TurnClientProtocol {
         TurnProtocolChannelRecv::Ignored
     }
 
-    #[tracing::instrument(name = "turn_client_handle_message", skip(self, msg))]
-    pub(crate) fn handle_message(&mut self, msg: Message<'_>, now: Instant) -> TurnProtocolRecv {
-        let remote_addr = self.remote_addr();
+    #[tracing::instrument(name = "turn_client_handle_message", skip(self, transmit))]
+    pub(crate) fn handle_message(
+        &mut self,
+        transmit: Transmit<Message<'_>>,
+        now: Instant,
+    ) -> TurnProtocolRecv {
         let (key, realm, _nonce) = match &mut self.state {
             AuthState::Error | AuthState::Initial => return TurnProtocolRecv::Ignored,
             AuthState::InitialSent(transaction_id) => {
-                trace!("received STUN message {msg}");
-                let msg = match self.stun_agent.handle_stun(msg, remote_addr) {
+                trace!("received STUN message {}", transmit.data);
+                let msg = match self.stun_agent.handle_stun(transmit.data, transmit.from) {
                     HandleStunReply::Drop(_) => return TurnProtocolRecv::Handled,
                     HandleStunReply::IncomingStun(_) => return TurnProtocolRecv::Ignored,
                     HandleStunReply::ValidatedStunResponse(msg) => msg,
@@ -1000,6 +1287,7 @@ impl TurnClientProtocol {
                             realm.realm(),
                             &key,
                             nonce.nonce(),
+                            self.allocation_transport,
                             &self.families,
                             now,
                         );
@@ -1031,9 +1319,9 @@ impl TurnClientProtocol {
                 nonce,
                 transaction_id,
             } => {
-                trace!("received STUN message {msg}");
+                trace!("received STUN message {}", transmit.data);
                 let stun_agent = &mut self.stun_agent;
-                let msg = match stun_agent.handle_stun(msg, remote_addr) {
+                let msg = match stun_agent.handle_stun(transmit.data, transmit.from) {
                     HandleStunReply::Drop(_) => return TurnProtocolRecv::Handled,
                     HandleStunReply::IncomingStun(_) => return TurnProtocolRecv::Ignored,
                     HandleStunReply::ValidatedStunResponse(msg) => msg,
@@ -1048,6 +1336,7 @@ impl TurnClientProtocol {
                             &realm,
                             key,
                             &new_nonce,
+                            self.allocation_transport,
                             &self.families,
                             now,
                         );
@@ -1096,6 +1385,7 @@ impl TurnClientProtocol {
                                     realm,
                                     key,
                                     nonce,
+                                    self.allocation_transport,
                                     &self.families,
                                     now,
                                 );
@@ -1152,23 +1442,25 @@ impl TurnClientProtocol {
                             };
 
                             if unseen_families.contains(&relayed_family) {
-                                info!(relayed = ?relayed_address, transport = ?TransportType::Udp, "New allocation expiring in {}s", lifetime.as_secs());
+                                info!(relayed = ?relayed_address, transport = ?self.allocation_transport, "New allocation expiring in {}s at {expires_at}", lifetime.as_secs());
                                 self.allocations.push(Allocation {
                                     relayed_address,
-                                    // TODO support TCP
-                                    transport: TransportType::Udp,
+                                    transport: self.allocation_transport,
                                     expired: false,
                                     lifetime,
                                     expires_at,
                                     permissions: vec![],
                                     channels: vec![],
+                                    pending_tcp_turn: Vec::default(),
+                                    tcp_data: Vec::default(),
                                     pending_permissions: VecDeque::default(),
                                     pending_channels: VecDeque::default(),
                                     pending_refresh: None,
                                     expired_channels: vec![],
+                                    pending_tcp_allocate: vec![],
                                 });
                                 self.pending_events.push_front(TurnEvent::AllocationCreated(
-                                    TransportType::Udp,
+                                    self.allocation_transport,
                                     relayed_address,
                                 ));
                                 any_relayed = true;
@@ -1201,30 +1493,99 @@ impl TurnClientProtocol {
             }
         };
 
-        // FIXME: TCP allocations
-        let Some(transport) = self
-            .allocations
-            .iter()
-            .map(|allocation| allocation.transport)
-            .next()
-        else {
-            return TurnProtocolRecv::Ignored;
-        };
+        if self.local_addr() == transmit.to {
+            Self::handle_stun(
+                &mut self.stun_agent,
+                &mut self.state,
+                &mut self.allocations,
+                &mut self.pending_transmits,
+                &mut self.pending_events,
+                transmit.data,
+                transmit.transport,
+                transmit.from,
+                &self.credentials,
+                &realm,
+                &key,
+                now,
+            )
+        } else if self.allocation_transport == TransportType::Tcp {
+            if transmit.data.method() != CONNECTION_BIND {
+                return TurnProtocolRecv::Ignored;
+            }
 
-        Self::handle_stun(
-            &mut self.stun_agent,
-            &mut self.state,
-            &mut self.allocations,
-            &mut self.pending_transmits,
-            &mut self.pending_events,
-            msg,
-            transport,
-            remote_addr,
-            &self.credentials,
-            &realm,
-            &key,
-            now,
-        )
+            for alloc in self.allocations.iter_mut() {
+                let Some((tcp_idx, tcp)) = alloc
+                    .tcp_data
+                    .iter_mut()
+                    .enumerate()
+                    .find(|(_idx, tcp)| tcp.local_addr == transmit.to)
+                else {
+                    continue;
+                };
+                if let Some((_transaction, _expiry, connection_id)) = tcp
+                    .pending_transaction_id
+                    .take_if(|(id, _, _)| id == &transmit.data.transaction_id())
+                {
+                    if let Some((nonce, realm)) = Self::validate_stale_nonce(&transmit.data) {
+                        let (transmit, transaction_id) = Self::send_connection_bind_request(
+                            transmit.to,
+                            transmit.from,
+                            connection_id,
+                            self.credentials.username(),
+                            &realm,
+                            &key,
+                            &nonce,
+                        );
+                        tcp.pending_transaction_id = Some((transaction_id, now, connection_id));
+                        self.pending_transmits.push_back(transmit);
+                        return TurnProtocolRecv::Handled;
+                    }
+                    if let Err(e) = transmit.data.validate_integrity_with_key(&key) {
+                        warn!("message failed integrity check: {e:?}");
+                        self.pending_events
+                            .push_front(TurnEvent::TcpConnectFailed(tcp.peer_addr));
+                        let tcp_data = alloc.tcp_data.swap_remove(tcp_idx);
+                        self.pending_socket_removal.push_back(Socket5Tuple {
+                            transport: TransportType::Tcp,
+                            from: tcp_data.local_addr,
+                            to: self.remote_addr(),
+                        });
+                        return TurnProtocolRecv::Handled;
+                    }
+                    if !transmit.data.has_class(MessageClass::Success) {
+                        warn!("CONNECTION_BIND reply is not a success");
+                        self.pending_events
+                            .push_front(TurnEvent::TcpConnectFailed(tcp.peer_addr));
+                        let tcp_data = alloc.tcp_data.swap_remove(tcp_idx);
+                        self.pending_socket_removal.push_back(Socket5Tuple {
+                            transport: TransportType::Tcp,
+                            from: tcp_data.local_addr,
+                            to: self.remote_addr(),
+                        });
+                        return TurnProtocolRecv::Handled;
+                    }
+                    self.pending_events
+                        .push_front(TurnEvent::TcpConnected(tcp.peer_addr));
+                    return TurnProtocolRecv::TcpConnectionBound {
+                        peer_addr: tcp.peer_addr,
+                    };
+                } else {
+                    // Protocol violation
+                    self.pending_events
+                        .push_front(TurnEvent::TcpConnectFailed(tcp.peer_addr));
+                    let tcp_data = alloc.tcp_data.swap_remove(tcp_idx);
+                    self.pending_socket_removal.push_back(Socket5Tuple {
+                        transport: TransportType::Tcp,
+                        from: tcp_data.local_addr,
+                        to: self.remote_addr(),
+                    });
+                    return TurnProtocolRecv::Handled;
+                }
+            }
+            TurnProtocolRecv::Ignored
+        } else {
+            TurnProtocolRecv::Ignored
+        }
     }
 
     pub(crate) fn send_to<T: AsRef<[u8]> + core::fmt::Debug>(
@@ -1236,6 +1597,36 @@ impl TurnClientProtocol {
     ) -> Result<TransmitBuild<DelayedMessageOrChannelSend<T>>, SendError> {
         if !self.have_permission(transport, to.ip()) {
             return Err(SendError::NoPermission);
+        }
+
+        if self.allocation_transport == TransportType::Tcp {
+            // find any allocated TCP connection for this peer
+            for alloc in self.allocations.iter() {
+                if alloc.transport != transport {
+                    continue;
+                }
+                let Some(local_addr) = alloc.tcp_data.iter().find_map(|tcp| {
+                    if tcp.pending_transaction_id.is_none() && tcp.peer_addr == to {
+                        Some(tcp.local_addr)
+                    } else {
+                        None
+                    }
+                }) else {
+                    continue;
+                };
+                trace!(
+                    "sending {} bytes from {local_addr} to {} over TCP for TCP peer",
+                    data.as_ref().len(),
+                    self.remote_addr()
+                );
+                return Ok(TransmitBuild::new(
+                    DelayedMessageOrChannelSend::Data(data),
+                    self.allocation_transport,
+                    local_addr,
+                    self.remote_addr(),
+                ));
+            }
+            return Err(SendError::NoTcpSocket);
         }
 
         if let Some(channel) = self.channel(transport, to) {
@@ -1303,6 +1694,7 @@ impl TurnClientProtocol {
         if !self.pending_events.is_empty() || !self.pending_transmits.is_empty() {
             return TurnPollRet::WaitUntil(now);
         }
+        let remote_addr = self.remote_addr();
         let mut earliest_wait = now + Duration::from_secs(9999);
         let cancelled_transaction = match self.stun_agent.poll(now) {
             StunAgentPollRet::WaitUntil(wait) => {
@@ -1315,11 +1707,9 @@ impl TurnClientProtocol {
         if let Some(transaction) = cancelled_transaction {
             trace!("STUN transaction {transaction} was cancelled/timed out");
         }
-        match &mut self.state {
+        let ret = match &mut self.state {
             AuthState::Error => return TurnPollRet::Closed,
-            AuthState::Initial => {
-                return TurnPollRet::WaitUntil(now);
-            }
+            AuthState::Initial => TurnPollRet::WaitUntil(now),
             AuthState::InitialSent(transaction_id) => {
                 if cancelled_transaction.is_some_and(|cancelled| &cancelled == transaction_id) {
                     info!("Initial transaction timed out or was cancelled");
@@ -1330,7 +1720,7 @@ impl TurnClientProtocol {
                     self.state = AuthState::Error;
                     return TurnPollRet::Closed;
                 }
-                return TurnPollRet::WaitUntil(earliest_wait);
+                TurnPollRet::WaitUntil(earliest_wait)
             }
             AuthState::Authenticating {
                 key: _,
@@ -1342,7 +1732,7 @@ impl TurnClientProtocol {
                     info!("Authenticating transaction timed out or was cancelled");
                     self.state = AuthState::Error;
                 }
-                return TurnPollRet::WaitUntil(earliest_wait);
+                TurnPollRet::WaitUntil(earliest_wait)
             }
             AuthState::Authenticated {
                 key: _,
@@ -1351,6 +1741,23 @@ impl TurnClientProtocol {
             } => {
                 let mut remove_allocation_indices = vec![];
                 for (idx, alloc) in self.allocations.iter_mut().enumerate() {
+                    // TCP socket creation from the user.
+                    for pending in alloc.pending_tcp_allocate.iter_mut() {
+                        if pending.initiation_time.is_none() {
+                            pending.initiation_time = Some(now);
+                            let connection_id = pending.connection_id;
+                            let peer_addr = pending.peer_addr;
+                            return TurnPollRet::AllocateTcpSocket {
+                                id: connection_id,
+                                socket: Socket5Tuple {
+                                    transport: self.transport(),
+                                    from: self.local_addr(),
+                                    to: self.remote_addr(),
+                                },
+                                peer_addr,
+                            };
+                        }
+                    }
                     let mut expires_at;
 
                     trace!(
@@ -1359,6 +1766,7 @@ impl TurnClientProtocol {
                         alloc.relayed_address,
                         alloc.refresh_time() - now
                     );
+                    // Refresh the allocation if necessary.
                     if let Some((pending, _lifetime)) = alloc.pending_refresh {
                         if cancelled_transaction.is_some_and(|cancelled| cancelled == pending) {
                             warn!("Refresh timed out or was cancelled");
@@ -1370,7 +1778,7 @@ impl TurnClientProtocol {
                             }
                         } else if alloc.expires_at > now {
                             expires_at = alloc.expires_at;
-                        } else {
+                        } else if !alloc.expired {
                             warn!(
                                 "Allocation {} {} timed out",
                                 alloc.transport, alloc.relayed_address
@@ -1378,6 +1786,8 @@ impl TurnClientProtocol {
                             self.stun_agent.remove_outstanding_request(pending);
                             remove_allocation_indices.push(idx);
                             continue;
+                        } else {
+                            expires_at = now;
                         }
                     } else if alloc.expires_at > now {
                         expires_at = alloc.refresh_time().max(now);
@@ -1427,6 +1837,7 @@ impl TurnClientProtocol {
                         }
                     }
 
+                    // refresh TURN channel allocation
                     for channel in alloc.channels.iter_mut() {
                         trace!(
                             "channel {} {} {} refresh time in {:?}",
@@ -1466,7 +1877,7 @@ impl TurnClientProtocol {
                         }
                     }
 
-                    // refresh permission if necessary
+                    // refresh TURN permission if necessary
                     for permission in alloc.permissions.iter_mut() {
                         trace!(
                             "permission {} {} refresh time in {:?}",
@@ -1499,17 +1910,91 @@ impl TurnClientProtocol {
                             expires_at = expires_at.min(permission.refresh_time().max(now));
                         }
                     }
+
+                    // check for any cancelled tcp CONNECT
+                    for (idx, tcp) in alloc.pending_tcp_turn.iter_mut().enumerate() {
+                        if cancelled_transaction
+                            .is_some_and(|cancelled| cancelled == tcp.transaction_id)
+                        {
+                            warn!(
+                                "TCP CONNECT from relayed {} to peer {} timed out or was cancelled",
+                                alloc.relayed_address, tcp.peer_addr,
+                            );
+                            self.pending_events
+                                .push_back(TurnEvent::TcpConnectFailed(tcp.peer_addr));
+                            alloc.pending_tcp_turn.swap_remove(idx);
+                            expires_at = now;
+                            break;
+                        }
+                    }
+
+                    // check for any cancelled tcp CONNECTION_BIND
+                    let mut remove_tcp_data_indices = vec![];
+                    for (idx, tcp) in alloc.tcp_data.iter_mut().enumerate() {
+                        if let Some((transaction_id, expiry, _connection_id)) =
+                            tcp.pending_transaction_id
+                        {
+                            if cancelled_transaction
+                                .is_some_and(|cancelled| cancelled == transaction_id)
+                                || expiry < now
+                            {
+                                warn!(
+                                    "TCP CONNECTION_BIND from local {} relayed {} to peer {} timed out or was cancelled",
+                                    tcp.local_addr, alloc.relayed_address, tcp.peer_addr,
+                                );
+                                self.pending_events
+                                    .push_back(TurnEvent::TcpConnectFailed(tcp.peer_addr));
+                                remove_tcp_data_indices.push(idx);
+                                expires_at = now;
+                            } else {
+                                expires_at = expires_at.min(expiry);
+                            }
+                        }
+                    }
+                    for (i, idx) in remove_tcp_data_indices.into_iter().enumerate() {
+                        let tcp_data = alloc.tcp_data.remove(idx - i);
+                        self.pending_socket_removal.push_back(Socket5Tuple {
+                            transport: TransportType::Tcp,
+                            from: tcp_data.local_addr,
+                            to: remote_addr,
+                        });
+                    }
+
+                    // check for any cancelled tcp CONNECTION_BIND
+                    for (idx, tcp) in alloc.pending_tcp_allocate.iter_mut().enumerate() {
+                        if cancelled_transaction == tcp.request_transaction_id {
+                            self.pending_events
+                                .push_back(TurnEvent::TcpConnectFailed(tcp.peer_addr));
+                            alloc.pending_tcp_allocate.swap_remove(idx);
+                            expires_at = now;
+                            break;
+                        }
+                    }
+
                     earliest_wait = expires_at.min(earliest_wait)
                 }
                 for (i, idx) in remove_allocation_indices.into_iter().enumerate() {
                     self.allocations.remove(idx - i);
                 }
                 if self.allocations.is_empty() {
-                    return TurnPollRet::Closed;
+                    TurnPollRet::Closed
+                } else {
+                    TurnPollRet::WaitUntil(earliest_wait.max(now))
                 }
-                return TurnPollRet::WaitUntil(earliest_wait.max(now));
+            }
+        };
+        if let Some(socket) = self.pending_socket_removal.pop_front() {
+            match socket.transport {
+                TransportType::Tcp => {
+                    return TurnPollRet::TcpClose {
+                        local_addr: socket.from,
+                        remote_addr: socket.to,
+                    };
+                }
+                TransportType::Udp => unreachable!(),
             }
         }
+        ret
     }
 
     #[tracing::instrument(
@@ -1623,6 +2108,7 @@ impl TurnClientProtocol {
     }
 
     /// Remove the allocation/s on the server.
+    #[tracing::instrument(name = "turn_client_delete", ret, skip(self))]
     pub(crate) fn delete(&mut self, now: Instant) -> Result<(), DeleteError> {
         let lifetime = Lifetime::new(0);
 
@@ -1735,6 +2221,222 @@ impl TurnClientProtocol {
         Ok(())
     }
 
+    #[tracing::instrument(name = "turn_client_tcp_connect", skip(self, now), err)]
+    pub(crate) fn tcp_connect(
+        &mut self,
+        peer_addr: SocketAddr,
+        now: Instant,
+    ) -> Result<(), TcpConnectError> {
+        let Some(allocation) = self.allocations.iter_mut().find(|allocation| {
+            allocation.transport == TransportType::Tcp
+                && allocation.relayed_address.is_ipv4() == peer_addr.is_ipv4()
+        }) else {
+            warn!("No allocation available to connect to this peer");
+            return Err(TcpConnectError::NoAllocation);
+        };
+
+        if now >= allocation.expires_at {
+            allocation.expired = true;
+            return Err(TcpConnectError::NoAllocation);
+        }
+
+        let AuthState::Authenticated { key, realm, nonce } = &self.state else {
+            return Err(TcpConnectError::NoAllocation);
+        };
+
+        if !allocation.have_permission(peer_addr.ip()) {
+            return Err(TcpConnectError::NoPermission);
+        }
+
+        if allocation
+            .tcp_data
+            .iter()
+            .map(|tcp| tcp.peer_addr)
+            .chain(allocation.pending_tcp_turn.iter().map(|tcp| tcp.peer_addr))
+            .chain(
+                allocation
+                    .pending_tcp_allocate
+                    .iter()
+                    .map(|tcp| tcp.peer_addr),
+            )
+            .any(|addr| addr == peer_addr)
+        {
+            return Err(TcpConnectError::AlreadyExists);
+        }
+
+        let (transmit, transaction_id) = Self::send_connect_request(
+            &mut self.stun_agent,
+            self.credentials.username(),
+            realm,
+            key,
+            nonce,
+            peer_addr,
+            now,
+        );
+        allocation.pending_tcp_turn.push(PendingTurnTcp {
+            transaction_id,
+            peer_addr,
+        });
+        self.pending_transmits.push_back(transmit.into_owned());
+        Ok(())
+    }
+
+    pub(crate) fn allocated_tcp_socket(
+        &mut self,
+        id: u32,
+        five_tuple: Socket5Tuple,
+        peer_addr: SocketAddr,
+        local_addr: Option<SocketAddr>,
+        now: Instant,
+    ) -> Result<(), TcpAllocateError> {
+        if self.allocation_transport != TransportType::Tcp
+            || five_tuple.transport != self.transport()
+            || five_tuple.from != self.local_addr()
+            || five_tuple.to != self.remote_addr()
+        {
+            return Err(TcpAllocateError::NoAllocation);
+        }
+        let Some((alloc_idx, pending_idx)) =
+            self.allocations
+                .iter()
+                .enumerate()
+                .find_map(|(idx, alloc)| {
+                    alloc
+                        .pending_tcp_allocate
+                        .iter()
+                        .enumerate()
+                        .find_map(|(pending_idx, pending)| {
+                            if pending.connection_id == id && pending.peer_addr == peer_addr {
+                                Some(pending_idx)
+                            } else {
+                                None
+                            }
+                        })
+                        .map(|pending_idx| (idx, pending_idx))
+                })
+        else {
+            return Err(TcpAllocateError::NoAllocation);
+        };
+        let alloc = &mut self.allocations[alloc_idx];
+        let pending = alloc.pending_tcp_allocate.swap_remove(pending_idx);
+
+        let AuthState::Authenticated { key, realm, nonce } = &self.state else {
+            return Err(TcpAllocateError::NoAllocation);
+        };
+
+        let Some(local_addr) = local_addr else {
+            if let Some(request_id) = pending.request_transaction_id {
+                let transmit = Self::send_connection_attempt_response(
+                    self.local_addr(),
+                    self.remote_addr(),
+                    request_id,
+                    self.credentials.username(),
+                    realm,
+                    key,
+                    nonce,
+                    peer_addr,
+                    Some(ErrorCode::CONNECTION_TIMEOUT_OR_FAILURE),
+                );
+                self.pending_transmits.push_back(transmit);
+            }
+            return Ok(());
+        };
+        if self.allocations.iter().any(|alloc| {
+            alloc
+                .tcp_data
+                .iter()
+                .any(|tcp| tcp.local_addr == local_addr)
+        }) {
+            return Err(TcpAllocateError::AlreadyExists);
+        }
+
+        debug!(
+            "TCP socket allocate took {:?}",
+            pending.initiation_time.map(|s| now - s)
+        );
+
+        if let Some(request_id) = pending.request_transaction_id {
+            let transmit = Self::send_connection_attempt_response(
+                self.local_addr(),
+                self.remote_addr(),
+                request_id,
+                self.credentials.username(),
+                realm,
+                key,
+                nonce,
+                peer_addr,
+                None,
+            );
+            self.pending_transmits.push_back(transmit);
+        }
+        let connection_id = pending.connection_id;
+
+        let (transmit, transaction_id) = Self::send_connection_bind_request(
+            local_addr,
+            self.remote_addr(),
+            connection_id,
+            self.credentials.username(),
+            realm,
+            key,
+            nonce,
+        );
+
+        let alloc = &mut self.allocations[alloc_idx];
+        alloc.tcp_data.push(TcpDataChannel {
+            pending_transaction_id: Some((
+                transaction_id,
+                now + TCP_STUN_REQUEST_TIMEOUT,
+                connection_id,
+            )),
+            local_addr,
+            peer_addr,
+        });
+
+        self.pending_transmits.push_back(transmit);
+
+        Ok(())
+    }
+
+    pub(crate) fn tcp_closed(
+        &mut self,
+        local_addr: SocketAddr,
+        remote_addr: SocketAddr,
+        _now: Instant,
+    ) {
+        if remote_addr != self.remote_addr() || self.transport() != TransportType::Tcp {
+            return;
+        }
+        if let Some((alloc_idx, tcp_idx)) =
+            self.allocations
+                .iter()
+                .enumerate()
+                .find_map(|(idx, alloc)| {
+                    alloc
+                        .tcp_data
+                        .iter()
+                        .enumerate()
+                        .find_map(|(tcp_idx, tcp)| {
+                            if tcp.local_addr == local_addr {
+                                Some((idx, tcp_idx))
+                            } else {
+                                None
+                            }
+                        })
+                })
+        {
+            let tcp = self.allocations[alloc_idx].tcp_data.swap_remove(tcp_idx);
+            info!(
+                "Removed tcp socket with local: {}, peer: {}",
+                tcp.local_addr, tcp.peer_addr
+            );
+            self.pending_socket_removal.push_front(Socket5Tuple {
+                transport: TransportType::Tcp,
+                from: tcp.local_addr,
+                to: remote_addr,
+            });
+        }
+    }
+
     #[tracing::instrument(name = "turn_client_bind_channel", skip(self, now), err)]
     pub(crate) fn bind_channel(
         &mut self,
@@ -1827,8 +2529,8 @@ impl TurnClientProtocol {
         Ok(())
     }
 
-    pub(crate) fn error(&mut self) {
-        warn!("user produced an error");
+    pub(crate) fn protocol_error(&mut self) {
+        warn!("protocol produced an error");
         self.state = AuthState::Error;
         for &family in self.families.iter() {
             self.pending_events
@@ -1865,6 +2567,10 @@ struct Allocation {
     permissions: Vec<Permission>,
     channels: Vec<Channel>,
 
+    pending_tcp_turn: Vec<PendingTurnTcp>,
+    pending_tcp_allocate: Vec<PendingTcpAllocate>,
+    tcp_data: Vec<TcpDataChannel>,
+
     pending_permissions: VecDeque<(Permission, TransactionId)>,
     pending_channels: VecDeque<(Channel, TransactionId)>,
     pending_refresh: Option<(TransactionId, u32)>,
@@ -1893,6 +2599,32 @@ impl Allocation {
             .iter()
             .any(|(permission, _transaction_id)| !permission.expired && permission.ip == peer_addr)
     }
+}
+
+/// Waiting for the TURN server to reply to a TCP CONNECT request.
+#[derive(Debug)]
+struct PendingTurnTcp {
+    transaction_id: TransactionId,
+    peer_addr: SocketAddr,
+}
+
+/// Waiting for the caller to allocate a TCP socket.
+#[derive(Debug)]
+struct PendingTcpAllocate {
+    connection_id: u32,
+    peer_addr: SocketAddr,
+    initiation_time: Option<Instant>,
+    /// Whether the server initiated the TCP connection and the corresponding STUN transaction ID.
+    request_transaction_id: Option<TransactionId>,
+}
+
+/// An allocated TCP data connection with the TURN server for a specific peer address.
+#[derive(Debug)]
+struct TcpDataChannel {
+    /// The initial CONNECTION_BIND request. `None` means data can flow.
+    pending_transaction_id: Option<(TransactionId, Instant, u32)>,
+    local_addr: SocketAddr,
+    peer_addr: SocketAddr,
 }
 
 #[derive(Debug)]
@@ -1939,6 +2671,9 @@ pub(crate) enum TurnProtocolRecv {
         icmp_code: u8,
         icmp_data: u32,
     },
+    TcpConnectionBound {
+        peer_addr: SocketAddr,
+    },
 }
 
 impl<T: AsRef<[u8]> + core::fmt::Debug> TurnRecvRet<T> {
@@ -1971,6 +2706,7 @@ impl<T: AsRef<[u8]> + core::fmt::Debug> TurnRecvRet<T> {
                 icmp_code,
                 icmp_data,
             },
+            TurnProtocolRecv::TcpConnectionBound { peer_addr: _ } => TurnRecvRet::Handled,
         }
     }
 
@@ -2007,6 +2743,7 @@ impl<T: AsRef<[u8]> + core::fmt::Debug> TurnRecvRet<T> {
                 icmp_code,
                 icmp_data,
             },
+            TurnProtocolRecv::TcpConnectionBound { peer_addr: _ } => TurnRecvRet::Handled,
         }
     }
 
@@ -2040,38 +2777,7 @@ impl<T: AsRef<[u8]> + core::fmt::Debug> TurnRecvRet<T> {
                 icmp_code,
                 icmp_data,
             },
-        }
-    }
-
-    pub(crate) fn from_protocol_recv_stored_ignored(
-        proto: TurnProtocolRecv,
-        msg_data: Vec<u8>,
-    ) -> Self {
-        match proto {
-            TurnProtocolRecv::Handled => TurnRecvRet::Handled,
-            TurnProtocolRecv::Ignored => TurnRecvRet::Handled,
-            TurnProtocolRecv::PeerData {
-                range,
-                transport,
-                peer,
-            } => TurnRecvRet::PeerData(TurnPeerData {
-                data: DataRangeOrOwned::Owned(ensure_data_owned(msg_data, range)),
-                transport,
-                peer,
-            }),
-            TurnProtocolRecv::PeerIcmp {
-                transport,
-                peer,
-                icmp_type,
-                icmp_code,
-                icmp_data,
-            } => TurnRecvRet::PeerIcmp {
-                transport,
-                peer,
-                icmp_type,
-                icmp_code,
-                icmp_data,
-            },
+            TurnProtocolRecv::TcpConnectionBound { peer_addr: _ } => TurnRecvRet::Handled,
         }
     }
 }
@@ -2089,6 +2795,8 @@ pub(crate) enum TurnProtocolChannelRecv {
 #[cfg(test)]
 mod tests {
     use turn_server_proto::api::TurnServerApi;
+    use turn_types::attribute::ConnectionId;
+    use turn_types::prelude::DelayedTransmitBuild;
     use turn_types::stun::attribute::UnknownAttributes;
     use turn_types::stun::message::{IntegrityAlgorithm, MessageHeader, Method};
     use turn_types::stun::prelude::AttributeStaticType;
@@ -2100,18 +2808,27 @@ mod tests {
     use super::*;
 
     fn new_protocol() -> TurnClientProtocol {
-        new_protocol_with_families(&[AddressFamily::IPV4])
+        new_protocol_with_families(
+            TransportType::Udp,
+            TransportType::Udp,
+            &[AddressFamily::IPV4],
+        )
     }
 
-    fn new_protocol_with_families(families: &[AddressFamily]) -> TurnClientProtocol {
+    fn new_protocol_with_families(
+        client_transport: TransportType,
+        allocation_transport: TransportType,
+        families: &[AddressFamily],
+    ) -> TurnClientProtocol {
         let (local_addr, remote_addr) = generate_addresses();
         let credentials = TurnCredentials::new("tuser", "tpass");
 
-        let stun_agent = StunAgent::builder(TransportType::Udp, local_addr)
+        let stun_agent = StunAgent::builder(client_transport, local_addr)
             .remote_addr(remote_addr)
             .build();
-        let client = TurnClientProtocol::new(stun_agent, credentials, families);
-        assert_eq!(client.transport(), TransportType::Udp);
+        let client =
+            TurnClientProtocol::new(stun_agent, credentials, allocation_transport, families);
+        assert_eq!(client.transport(), client_transport);
         assert_eq!(client.local_addr(), local_addr);
         assert_eq!(client.remote_addr(), remote_addr);
 
@@ -2141,11 +2858,25 @@ mod tests {
     ) -> TurnProtocolRecv {
         let transmit = client.poll_transmit(now).unwrap();
         let msg = Message::from_bytes(&transmit.data).unwrap();
-        trace!("received {msg}");
+        trace!(
+            "client sending from {} to {} over {} {msg}",
+            transmit.from,
+            transmit.to,
+            transmit.transport
+        );
         assert_eq!(msg.method(), method);
         let reply = reply(msg);
         let msg = Message::from_bytes(&reply).unwrap();
-        client.handle_message(msg, now)
+        trace!(
+            "client receiving from {} to {} over {} {msg}",
+            transmit.to,
+            transmit.from,
+            transmit.transport
+        );
+        client.handle_message(
+            Transmit::new(msg, transmit.transport, transmit.to, transmit.from),
+            now,
+        )
     }
 
     fn allocate_response<F: FnOnce(Message<'_>) -> Vec<u8>>(
@@ -2481,7 +3212,7 @@ mod tests {
             else {
                 unreachable!();
             };
-            assert_eq!(transport, TransportType::Udp);
+            assert_eq!(transport, client.allocation_transport);
             assert!(relayed.contains(&allocation));
         }
         assert_eq!(client.relayed_addresses().count(), relayed.len());
@@ -2587,7 +3318,11 @@ mod tests {
     fn test_turn_client_protocol_ipv6_allocation_unknown_requested_address_family() {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
-        let mut client = new_protocol_with_families(&[AddressFamily::IPV6]);
+        let mut client = new_protocol_with_families(
+            TransportType::Udp,
+            TransportType::Udp,
+            &[AddressFamily::IPV6],
+        );
         initial_allocate(&mut client, now);
         let credentials = client_credentials(&client);
         let ret = allocate_response(
@@ -2626,7 +3361,11 @@ mod tests {
     fn test_turn_client_protocol_unsupported_address_family() {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
-        let mut client = new_protocol_with_families(&[AddressFamily::IPV4, AddressFamily::IPV6]);
+        let mut client = new_protocol_with_families(
+            TransportType::Udp,
+            TransportType::Udp,
+            &[AddressFamily::IPV4, AddressFamily::IPV6],
+        );
         initial_allocate(&mut client, now);
         let credentials = client_credentials(&client);
         let ret = allocate_response(
@@ -2664,7 +3403,11 @@ mod tests {
     fn test_turn_client_protocol_dual_allocation() {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
-        let mut client = new_protocol_with_families(&[AddressFamily::IPV4, AddressFamily::IPV6]);
+        let mut client = new_protocol_with_families(
+            TransportType::Udp,
+            TransportType::Udp,
+            &[AddressFamily::IPV4, AddressFamily::IPV6],
+        );
         initial_allocate(&mut client, now);
         authenticated_allocate_with_address(
             &mut client,
@@ -3060,7 +3803,11 @@ mod tests {
     fn test_turn_client_protocol_dual_allocation_channel_bind() {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
-        let mut client = new_protocol_with_families(&[AddressFamily::IPV4, AddressFamily::IPV6]);
+        let mut client = new_protocol_with_families(
+            TransportType::Udp,
+            TransportType::Udp,
+            &[AddressFamily::IPV4, AddressFamily::IPV6],
+        );
         initial_allocate(&mut client, now);
         authenticated_allocate_with_address(
             &mut client,
@@ -3078,7 +3825,11 @@ mod tests {
     fn test_turn_client_protocol_channel_bind_wrong_address_family() {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
-        let mut client = new_protocol_with_families(&[AddressFamily::IPV4, AddressFamily::IPV6]);
+        let mut client = new_protocol_with_families(
+            TransportType::Udp,
+            TransportType::Udp,
+            &[AddressFamily::IPV4, AddressFamily::IPV6],
+        );
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
         assert!(matches!(
@@ -3177,7 +3928,7 @@ mod tests {
         now: Instant,
     ) {
         client
-            .create_permission(TransportType::Udp, peer.ip(), now)
+            .create_permission(client.allocation_transport, peer.ip(), now)
             .unwrap();
         create_permission_success_response(client, now);
         let (transport, _relayed) = client.relayed_addresses().next().unwrap();
@@ -3244,7 +3995,11 @@ mod tests {
     fn test_turn_client_protocol_dual_allocation_create_permission() {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
-        let mut client = new_protocol_with_families(&[AddressFamily::IPV4, AddressFamily::IPV6]);
+        let mut client = new_protocol_with_families(
+            TransportType::Udp,
+            TransportType::Udp,
+            &[AddressFamily::IPV4, AddressFamily::IPV6],
+        );
         initial_allocate(&mut client, now);
         authenticated_allocate_with_address(
             &mut client,
@@ -3262,7 +4017,11 @@ mod tests {
     fn test_turn_client_protocol_create_permission_wrong_address_family() {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
-        let mut client = new_protocol_with_families(&[AddressFamily::IPV4, AddressFamily::IPV6]);
+        let mut client = new_protocol_with_families(
+            TransportType::Udp,
+            TransportType::Udp,
+            &[AddressFamily::IPV4, AddressFamily::IPV6],
+        );
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
         assert!(matches!(
@@ -3287,14 +4046,26 @@ mod tests {
     fn test_turn_client_protocol_icmp_without_permission() {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
-        let mut client = new_protocol_with_families(&[AddressFamily::IPV4]);
+        let mut client = new_protocol_with_families(
+            TransportType::Udp,
+            TransportType::Udp,
+            &[AddressFamily::IPV4],
+        );
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
 
         let msg = generate_icmp_message(generate_xor_peer_address());
         let msg = Message::from_bytes(&msg).unwrap();
         assert!(matches!(
-            client.handle_message(msg, now),
+            client.handle_message(
+                Transmit::new(
+                    msg,
+                    client.transport(),
+                    client.remote_addr(),
+                    client.local_addr()
+                ),
+                now
+            ),
             TurnProtocolRecv::Ignored
         ));
     }
@@ -3303,7 +4074,11 @@ mod tests {
     fn test_turn_client_protocol_icmp() {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
-        let mut client = new_protocol_with_families(&[AddressFamily::IPV4]);
+        let mut client = new_protocol_with_families(
+            TransportType::Udp,
+            TransportType::Udp,
+            &[AddressFamily::IPV4],
+        );
         initial_allocate(&mut client, now);
         authenticated_allocate(&mut client, now);
         create_permission(&mut client, now);
@@ -3315,7 +4090,15 @@ mod tests {
             icmp_type,
             icmp_code,
             icmp_data,
-        } = client.handle_message(msg, now)
+        } = client.handle_message(
+            Transmit::new(
+                msg,
+                client.transport(),
+                client.remote_addr(),
+                client.local_addr(),
+            ),
+            now,
+        )
         else {
             unreachable!();
         };
@@ -3324,6 +4107,487 @@ mod tests {
         assert_eq!(icmp_type, 0x1);
         assert_eq!(icmp_code, 0x2);
         assert_eq!(icmp_data, 0x3);
+    }
+
+    fn connect_response<F: FnOnce(Message<'_>) -> Vec<u8>>(
+        client: &mut TurnClientProtocol,
+        reply: F,
+        now: Instant,
+    ) -> TurnProtocolRecv {
+        response(client, CONNECT, reply, now)
+    }
+
+    fn connect_success_response(client: &mut TurnClientProtocol, id: u32, now: Instant) {
+        let credentials = client_credentials(client);
+        assert!(matches!(
+            connect_response(
+                client,
+                |msg| {
+                    let mut reply = Message::builder_success(&msg, MessageWriteVec::new());
+                    reply.add_attribute(&ConnectionId::new(id)).unwrap();
+                    reply
+                        .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                        .unwrap();
+                    reply.finish()
+                },
+                now,
+            ),
+            TurnProtocolRecv::Handled
+        ));
+        let TurnPollRet::AllocateTcpSocket {
+            id: connection_id,
+            socket,
+            peer_addr,
+        } = client.poll(now)
+        else {
+            unreachable!();
+        };
+        assert_eq!(id, connection_id);
+        assert_eq!(
+            socket,
+            Socket5Tuple {
+                transport: TransportType::Tcp,
+                from: client.local_addr(),
+                to: client.remote_addr(),
+            }
+        );
+        assert_eq!(peer_addr, generate_xor_peer_address());
+    }
+
+    fn connection_bind_response<F: FnOnce(Message<'_>) -> Vec<u8>>(
+        client: &mut TurnClientProtocol,
+        reply: F,
+        now: Instant,
+    ) -> TurnProtocolRecv {
+        response(client, CONNECTION_BIND, reply, now)
+    }
+
+    fn connection_bind_success_response(
+        client: &mut TurnClientProtocol,
+        peer_addr: SocketAddr,
+        now: Instant,
+    ) {
+        let credentials = client_credentials(client);
+        assert!(matches!(
+            connection_bind_response(
+                client,
+                |msg| {
+                    let mut reply = Message::builder_success(&msg, MessageWriteVec::new());
+                    reply
+                        .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                        .unwrap();
+                    reply.finish()
+                },
+                now,
+            ),
+            TurnProtocolRecv::TcpConnectionBound {
+                peer_addr: tcp_peer_addr
+            } if tcp_peer_addr == peer_addr
+        ));
+    }
+
+    fn generate_tcp_local_address() -> SocketAddr {
+        "192.168.0.1:4000".parse().unwrap()
+    }
+
+    #[test]
+    fn test_turn_client_protocol_tcp_connection_bind_without_client_permission() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(
+            TransportType::Tcp,
+            TransportType::Tcp,
+            &[AddressFamily::IPV4],
+        );
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        assert!(matches!(
+            client.tcp_connect(generate_xor_peer_address(), now),
+            Err(TcpConnectError::NoPermission)
+        ));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_tcp_connection_bind_pending_already_exists_on_client() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(
+            TransportType::Tcp,
+            TransportType::Tcp,
+            &[AddressFamily::IPV4],
+        );
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        create_permission(&mut client, now);
+        client
+            .tcp_connect(generate_xor_peer_address(), now)
+            .unwrap();
+        assert!(matches!(
+            client.tcp_connect(generate_xor_peer_address(), now),
+            Err(TcpConnectError::AlreadyExists)
+        ));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_tcp_connection_bind_pending_already_exists_on_client_after_connect(
+    ) {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(
+            TransportType::Tcp,
+            TransportType::Tcp,
+            &[AddressFamily::IPV4],
+        );
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        create_permission(&mut client, now);
+        client
+            .tcp_connect(generate_xor_peer_address(), now)
+            .unwrap();
+        connect_success_response(&mut client, 1, now);
+        assert!(matches!(
+            client.tcp_connect(generate_xor_peer_address(), now),
+            Err(TcpConnectError::AlreadyExists)
+        ));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_tcp_connection_bind_already_exists_on_client_after_tcp_allocate() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(
+            TransportType::Tcp,
+            TransportType::Tcp,
+            &[AddressFamily::IPV4],
+        );
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        create_permission(&mut client, now);
+        client
+            .tcp_connect(generate_xor_peer_address(), now)
+            .unwrap();
+        connect_success_response(&mut client, 1, now);
+        client
+            .allocated_tcp_socket(
+                1,
+                Socket5Tuple {
+                    transport: TransportType::Tcp,
+                    from: client.local_addr(),
+                    to: client.remote_addr(),
+                },
+                generate_xor_peer_address(),
+                Some(generate_tcp_local_address()),
+                now,
+            )
+            .unwrap();
+        assert!(matches!(
+            client.tcp_connect(generate_xor_peer_address(), now),
+            Err(TcpConnectError::AlreadyExists)
+        ));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_tcp_connect_timeout() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(
+            TransportType::Tcp,
+            TransportType::Tcp,
+            &[AddressFamily::IPV4],
+        );
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        create_permission(&mut client, now);
+        client
+            .tcp_connect(generate_xor_peer_address(), now)
+            .unwrap();
+
+        let transmit = client.poll_transmit(now).unwrap();
+        let msg = Message::from_bytes(&transmit.data).unwrap();
+        assert!(msg.has_method(CONNECT));
+        let now = wait_advance(&mut client, now);
+        let TurnPollRet::WaitUntil(new_now) = client.poll(now) else {
+            unreachable!();
+        };
+        assert_eq!(new_now, now);
+        assert!(
+            matches!(client.poll_event(), Some(TurnEvent::TcpConnectFailed(addr)) if addr == generate_xor_peer_address())
+        );
+    }
+
+    #[test]
+    fn test_turn_client_protocol_tcp_connection_bind_timeout() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(
+            TransportType::Tcp,
+            TransportType::Tcp,
+            &[AddressFamily::IPV4],
+        );
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        create_permission(&mut client, now);
+        client
+            .tcp_connect(generate_xor_peer_address(), now)
+            .unwrap();
+        connect_success_response(&mut client, 1, now);
+        client
+            .allocated_tcp_socket(
+                1,
+                Socket5Tuple {
+                    transport: TransportType::Tcp,
+                    from: client.local_addr(),
+                    to: client.remote_addr(),
+                },
+                generate_xor_peer_address(),
+                Some(generate_tcp_local_address()),
+                now,
+            )
+            .unwrap();
+
+        let transmit = client.poll_transmit(now).unwrap();
+        let msg = Message::from_bytes(&transmit.data).unwrap();
+        assert!(msg.has_method(CONNECTION_BIND));
+        let now = wait_advance(&mut client, now) + Duration::from_nanos(1);
+        let TurnPollRet::TcpClose {
+            local_addr,
+            remote_addr,
+        } = client.poll(now)
+        else {
+            unreachable!();
+        };
+        assert_eq!(local_addr, generate_tcp_local_address());
+        assert_eq!(remote_addr, client.remote_addr());
+        let TurnPollRet::WaitUntil(new_now) = client.poll(now) else {
+            unreachable!();
+        };
+        assert_eq!(new_now, now);
+        assert!(
+            matches!(client.poll_event(), Some(TurnEvent::TcpConnectFailed(addr)) if addr == generate_xor_peer_address())
+        );
+    }
+
+    #[test]
+    fn test_turn_client_protocol_tcp_connection_bind_stale_nonce() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(
+            TransportType::Tcp,
+            TransportType::Tcp,
+            &[AddressFamily::IPV4],
+        );
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        create_permission(&mut client, now);
+        client
+            .tcp_connect(generate_xor_peer_address(), now)
+            .unwrap();
+        connect_success_response(&mut client, 1, now);
+        client
+            .allocated_tcp_socket(
+                1,
+                Socket5Tuple {
+                    transport: TransportType::Tcp,
+                    from: client.local_addr(),
+                    to: client.remote_addr(),
+                },
+                generate_xor_peer_address(),
+                Some(generate_tcp_local_address()),
+                now,
+            )
+            .unwrap();
+        assert!(matches!(
+            connection_bind_response(&mut client, |msg| generate_stale_nonce(&msg), now,),
+            TurnProtocolRecv::Handled
+        ));
+
+        connection_bind_success_response(&mut client, generate_xor_peer_address(), now);
+        let data = [4; 9];
+        let transmit = client
+            .send_to(TransportType::Tcp, generate_xor_peer_address(), data, now)
+            .unwrap();
+        assert_eq!(transmit.transport, TransportType::Tcp);
+        assert_eq!(transmit.from, generate_tcp_local_address());
+        assert_eq!(transmit.to, client.remote_addr());
+        assert_eq!(&transmit.data.build(), data.as_slice());
+    }
+
+    #[test]
+    fn test_turn_client_protocol_tcp_connection_bind_success() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(
+            TransportType::Tcp,
+            TransportType::Tcp,
+            &[AddressFamily::IPV4],
+        );
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        create_permission(&mut client, now);
+        client
+            .tcp_connect(generate_xor_peer_address(), now)
+            .unwrap();
+        connect_success_response(&mut client, 1, now);
+        client
+            .allocated_tcp_socket(
+                1,
+                Socket5Tuple {
+                    transport: TransportType::Tcp,
+                    from: client.local_addr(),
+                    to: client.remote_addr(),
+                },
+                generate_xor_peer_address(),
+                Some(generate_tcp_local_address()),
+                now,
+            )
+            .unwrap();
+        connection_bind_success_response(&mut client, generate_xor_peer_address(), now);
+        let data = [4; 9];
+        let transmit = client
+            .send_to(TransportType::Tcp, generate_xor_peer_address(), data, now)
+            .unwrap();
+        assert_eq!(transmit.transport, TransportType::Tcp);
+        assert_eq!(transmit.from, generate_tcp_local_address());
+        assert_eq!(transmit.to, client.remote_addr());
+        assert_eq!(&transmit.data.build(), data.as_slice());
+    }
+
+    fn server_connection_attempt_message(
+        connection_id: u32,
+        credentials: LongTermCredentials,
+        peer_addr: SocketAddr,
+    ) -> MessageWriteVec {
+        let mut request = Message::builder_request(CONNECTION_ATTEMPT, MessageWriteVec::new());
+        request
+            .add_attribute(&ConnectionId::new(connection_id))
+            .unwrap();
+        request
+            .add_attribute(&XorPeerAddress::new(peer_addr, request.transaction_id()))
+            .unwrap();
+        request
+            .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+            .unwrap();
+        request
+    }
+
+    fn server_connection_attempt_success(
+        client: &mut TurnClientProtocol,
+        connection_id: u32,
+        credentials: LongTermCredentials,
+        peer_addr: SocketAddr,
+        local_tcp_addr: Option<SocketAddr>,
+        now: Instant,
+    ) {
+        let request =
+            server_connection_attempt_message(connection_id, credentials.clone(), peer_addr)
+                .finish();
+        let msg_transmit = Transmit::new(
+            Message::from_bytes(&request).unwrap(),
+            client.transport(),
+            client.remote_addr(),
+            client.local_addr(),
+        );
+        assert!(matches!(
+            client.handle_message(msg_transmit, now),
+            TurnProtocolRecv::Handled
+        ));
+        let TurnPollRet::AllocateTcpSocket {
+            id,
+            socket,
+            peer_addr: allocate_peer_addr,
+        } = client.poll(now)
+        else {
+            unreachable!();
+        };
+        assert_eq!(id, connection_id);
+        assert_eq!(allocate_peer_addr, peer_addr);
+        assert_eq!(socket.transport, TransportType::Tcp);
+        assert_eq!(socket.from, client.local_addr());
+        assert_eq!(socket.to, client.remote_addr());
+        client
+            .allocated_tcp_socket(id, socket, peer_addr, local_tcp_addr, now)
+            .unwrap();
+
+        let transmit = client.poll_transmit(now).unwrap();
+        assert_eq!(transmit.transport, TransportType::Tcp);
+        assert_eq!(transmit.from, client.local_addr());
+        assert_eq!(transmit.to, client.remote_addr());
+        let msg = Message::from_bytes(&transmit.data).unwrap();
+        if local_tcp_addr.is_some() {
+            assert!(msg.has_class(MessageClass::Success));
+        } else {
+            assert!(msg.has_class(MessageClass::Error));
+        }
+        assert!(msg.has_method(CONNECTION_ATTEMPT));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_tcp_connection_attempt() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(
+            TransportType::Tcp,
+            TransportType::Tcp,
+            &[AddressFamily::IPV4],
+        );
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        create_permission(&mut client, now);
+
+        let credentials = client_credentials(&client);
+        server_connection_attempt_success(
+            &mut client,
+            1,
+            credentials,
+            generate_xor_peer_address(),
+            Some(generate_tcp_local_address()),
+            now,
+        );
+
+        let data = [4; 9];
+        assert!(matches!(
+            client.send_to(TransportType::Tcp, generate_xor_peer_address(), data, now),
+            Err(SendError::NoTcpSocket)
+        ));
+        connection_bind_success_response(&mut client, generate_xor_peer_address(), now);
+
+        let transmit = client
+            .send_to(TransportType::Tcp, generate_xor_peer_address(), data, now)
+            .unwrap();
+        assert_eq!(transmit.transport, TransportType::Tcp);
+        assert_eq!(transmit.from, generate_tcp_local_address());
+        assert_eq!(transmit.to, client.remote_addr());
+        assert_eq!(&transmit.data.build(), data.as_slice());
+    }
+
+    #[test]
+    fn test_turn_client_protocol_tcp_connection_attempt_socket_allocate_failure() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(
+            TransportType::Tcp,
+            TransportType::Tcp,
+            &[AddressFamily::IPV4],
+        );
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        create_permission(&mut client, now);
+
+        let credentials = client_credentials(&client);
+        server_connection_attempt_success(
+            &mut client,
+            1,
+            credentials,
+            generate_xor_peer_address(),
+            None,
+            now,
+        );
+
+        let data = [4; 9];
+        assert!(matches!(
+            client.send_to(TransportType::Tcp, generate_xor_peer_address(), data, now),
+            Err(SendError::NoTcpSocket)
+        ));
     }
 
     #[test]

@@ -10,49 +10,55 @@
 //!
 //! An implementation of a TURN client suitable for TLS over TCP connections.
 
-use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::net::{IpAddr, SocketAddr};
 use core::time::Duration;
 use std::io::{Read, Write};
-use turn_types::stun::message::Message;
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection};
 
-use stun_proto::agent::{StunAgent, Transmit};
+use stun_proto::agent::Transmit;
 use stun_proto::types::data::Data;
 use stun_proto::Instant;
 
 use stun_proto::types::TransportType;
 
-use turn_types::channel::ChannelData;
 use turn_types::AddressFamily;
 use turn_types::TurnCredentials;
 
 use tracing::{debug, trace, warn};
 
 use crate::api::{
-    DataRangeOrOwned, DelayedMessageOrChannelSend, TransmitBuild, TurnClientApi, TurnPeerData,
+    DelayedMessageOrChannelSend, Socket5Tuple, TcpAllocateError, TcpConnectError, TransmitBuild,
+    TurnClientApi, TurnPeerData,
 };
-use crate::protocol::{TurnClientProtocol, TurnProtocolChannelRecv, TurnProtocolRecv};
 
 pub use crate::api::{
     BindChannelError, CreatePermissionError, DeleteError, SendError, TurnEvent, TurnPollRet,
     TurnRecvRet,
 };
-use crate::tcp::ensure_data_owned;
-use turn_types::tcp::{IncomingTcp, StoredTcp, TurnTcpBuffer};
+use crate::tcp::TurnClientTcp;
 
 /// A TURN client that communicates over TLS.
 #[derive(Debug)]
 pub struct TurnClientRustls {
-    protocol: TurnClientProtocol,
-    conn: Box<ClientConnection>,
-    incoming_tcp_buffer: TurnTcpBuffer,
-    closing: bool,
+    protocol: TurnClientTcp,
+    config: Arc<ClientConfig>,
+    server_name: ServerName<'static>,
+    pending_allocates: Vec<(u32, Socket5Tuple, SocketAddr)>,
+    sockets: Vec<Socket>,
+}
+
+#[derive(Debug)]
+struct Socket {
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+    tls: ClientConnection,
+    peer_closed: bool,
+    local_closed: bool,
 }
 
 impl TurnClientRustls {
@@ -61,82 +67,44 @@ impl TurnClientRustls {
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         credentials: TurnCredentials,
+        allocation_transport: TransportType,
         allocation_families: &[AddressFamily],
         server_name: ServerName<'static>,
         config: Arc<ClientConfig>,
     ) -> Self {
-        let stun_agent = StunAgent::builder(TransportType::Tcp, local_addr)
-            .remote_addr(remote_addr)
-            .build();
         Self {
-            protocol: TurnClientProtocol::new(stun_agent, credentials, allocation_families),
-            conn: Box::new(ClientConnection::new(config, server_name).unwrap()),
-            incoming_tcp_buffer: TurnTcpBuffer::new(),
-            closing: false,
+            protocol: TurnClientTcp::allocate(
+                local_addr,
+                remote_addr,
+                credentials,
+                allocation_transport,
+                allocation_families,
+            ),
+            sockets: vec![Socket {
+                local_addr,
+                remote_addr,
+                tls: ClientConnection::new(config.clone(), server_name.clone()).unwrap(),
+                local_closed: false,
+                peer_closed: false,
+            }],
+            config,
+            server_name,
+            pending_allocates: vec![],
         }
     }
 
-    fn handle_incoming_plaintext<T: AsRef<[u8]> + core::fmt::Debug>(
-        &mut self,
-        transmit: Transmit<Vec<u8>>,
-        now: Instant,
-    ) -> TurnRecvRet<T> {
-        match self.incoming_tcp_buffer.incoming_tcp(transmit) {
-            None => TurnRecvRet::Handled,
-            Some(IncomingTcp::CompleteMessage(transmit, msg_range)) => {
-                let Ok(msg) =
-                    Message::from_bytes(&transmit.data.as_slice()[msg_range.start..msg_range.end])
-                else {
-                    return TurnRecvRet::Handled;
-                };
-                TurnRecvRet::from_protocol_recv_stored_ignored(
-                    self.protocol.handle_message(msg, now),
-                    transmit.data,
-                )
-            }
-            Some(IncomingTcp::CompleteChannel(transmit, msg_range)) => {
-                let channel =
-                    ChannelData::parse(&transmit.data.as_slice()[msg_range.start..msg_range.end])
-                        .unwrap();
-                match self.protocol.handle_channel(channel, now) {
-                    TurnProtocolChannelRecv::Ignored => TurnRecvRet::Handled,
-                    TurnProtocolChannelRecv::PeerData {
-                        range,
-                        transport,
-                        peer,
-                    } => TurnRecvRet::PeerData(TurnPeerData {
-                        data: DataRangeOrOwned::Owned(ensure_data_owned(transmit.data, range)),
-                        transport,
-                        peer,
-                    }),
-                }
-            }
-            Some(IncomingTcp::StoredMessage(data, transmit)) => {
-                let Ok(msg) = Message::from_bytes(&data) else {
-                    return TurnRecvRet::Handled;
-                };
-                TurnRecvRet::from_protocol_recv_stored_ignored(
-                    self.protocol.handle_message(msg, now),
-                    transmit.data,
-                )
-            }
-            Some(IncomingTcp::StoredChannel(data, transmit)) => {
-                let channel = ChannelData::parse(&data).unwrap();
-                match self.protocol.handle_channel(channel, now) {
-                    TurnProtocolChannelRecv::Ignored => TurnRecvRet::Handled,
-                    TurnProtocolChannelRecv::PeerData {
-                        range,
-                        transport,
-                        peer,
-                    } => TurnRecvRet::PeerData(TurnPeerData {
-                        data: DataRangeOrOwned::Owned(
-                            transmit.data[range.start..range.end].to_vec(),
-                        ),
-                        transport,
-                        peer,
-                    }),
-                }
-            }
+    fn empty_transmit_queue(&mut self, now: Instant) {
+        while let Some(transmit) = self.protocol.poll_transmit(now) {
+            let Some(socket) = self.sockets.iter_mut().find(|socket| {
+                socket.local_addr == transmit.from && socket.remote_addr == transmit.to
+            }) else {
+                warn!(
+                    "no socket for transmit from {} to {}",
+                    transmit.from, transmit.to
+                );
+                continue;
+            };
+            socket.tls.writer().write_all(&transmit.data).unwrap();
         }
     }
 }
@@ -155,25 +123,67 @@ impl TurnClientApi for TurnClientRustls {
     }
 
     fn poll(&mut self, now: Instant) -> TurnPollRet {
-        let io_state = match self.conn.process_new_packets() {
-            Ok(io_state) => io_state,
-            Err(e) => {
-                self.protocol.error();
-                warn!("Error processing TLS: {e:?}");
-                return TurnPollRet::Closed;
+        let mut is_handshaking = false;
+        let mut protocol_ret = TurnPollRet::Closed;
+        for (idx, socket) in self.sockets.iter_mut().enumerate() {
+            let io_state = match socket.tls.process_new_packets() {
+                Ok(io_state) => io_state,
+                Err(e) => {
+                    warn!("Error processing TLS: {e:?}");
+                    if socket.local_addr == self.protocol.local_addr()
+                        && socket.remote_addr == self.protocol.remote_addr()
+                    {
+                        self.protocol.protocol_error();
+                        return TurnPollRet::Closed;
+                    } else {
+                        // TODO: remove socket?
+                        continue;
+                    }
+                }
+            };
+            if io_state.peer_has_closed() {
+                socket.peer_closed = true;
+                if !socket.local_closed {
+                    socket.tls.send_close_notify();
+                    socket.local_closed = true;
+                    trace!("sending close notify");
+                    return TurnPollRet::WaitUntil(now);
+                }
             }
-        };
-        let tls_write_bytes = io_state.tls_bytes_to_write();
-        if tls_write_bytes > 0 {
-            trace!("have {tls_write_bytes} bytes to write");
-            return TurnPollRet::WaitUntil(now);
+            let tls_write_bytes = io_state.tls_bytes_to_write();
+            if tls_write_bytes > 0 {
+                trace!("have {tls_write_bytes} bytes to write");
+                return TurnPollRet::WaitUntil(now);
+            }
+            if socket.peer_closed && socket.local_closed && !socket.tls.wants_write() {
+                let socket = self.sockets.remove(idx);
+                return TurnPollRet::TcpClose {
+                    local_addr: socket.local_addr,
+                    remote_addr: socket.remote_addr,
+                };
+            }
+            if socket.local_addr == self.protocol.local_addr()
+                && socket.remote_addr == self.protocol.remote_addr()
+            {
+                protocol_ret = self.protocol.poll(now);
+            }
+            is_handshaking |= socket.tls.is_handshaking();
         }
-        let protocol_ret = self.protocol.poll(now);
-        if matches!(protocol_ret, TurnPollRet::Closed) {
-            debug!("Closed");
-            return protocol_ret;
+        match protocol_ret {
+            TurnPollRet::Closed => {
+                debug!("Closed");
+                return protocol_ret;
+            }
+            TurnPollRet::AllocateTcpSocket {
+                id,
+                socket,
+                peer_addr,
+            } => {
+                self.pending_allocates.push((id, socket, peer_addr));
+            }
+            _ => (),
         }
-        if self.conn.is_handshaking() {
+        if is_handshaking {
             debug!("Currently handshaking, waiting for reply");
             return TurnPollRet::WaitUntil(now + Duration::from_secs(60));
         }
@@ -193,50 +203,68 @@ impl TurnClientApi for TurnClientRustls {
     }
 
     fn poll_transmit(&mut self, now: Instant) -> Option<Transmit<Data<'static>>> {
-        if self.conn.is_handshaking() {
-            if self.conn.wants_write() {
+        let client_transport = self.transport();
+        for socket in self.sockets.iter_mut() {
+            if socket.tls.is_handshaking() {
+                if socket.tls.wants_write() {
+                    // TODO: avoid this allocation
+                    let mut out = vec![];
+                    match socket.tls.write_tls(&mut out) {
+                        Ok(_written) => {
+                            return Some(Transmit::new(
+                                Data::from(out.into_boxed_slice()),
+                                client_transport,
+                                socket.local_addr,
+                                socket.remote_addr,
+                            ))
+                        }
+                        Err(e) => {
+                            warn!("error during handshake: {e:?}");
+                            if socket.local_addr == self.protocol.local_addr()
+                                && socket.remote_addr == self.protocol.remote_addr()
+                            {
+                                self.protocol.protocol_error();
+                                return None;
+                            } else {
+                                // TODO: remove socket?
+                                continue;
+                            }
+                        }
+                    }
+                }
+                if socket.local_addr == self.protocol.local_addr()
+                    && socket.remote_addr == self.protocol.remote_addr()
+                {
+                    return None;
+                }
+            }
+        }
+        self.empty_transmit_queue(now);
+
+        for socket in self.sockets.iter_mut() {
+            if socket.tls.wants_write() {
                 // TODO: avoid this allocation
                 let mut out = vec![];
-                match self.conn.write_tls(&mut out) {
+                match socket.tls.write_tls(&mut out) {
                     Ok(_written) => {
                         return Some(Transmit::new(
                             Data::from(out.into_boxed_slice()),
-                            self.transport(),
-                            self.local_addr(),
-                            self.remote_addr(),
+                            client_transport,
+                            socket.local_addr,
+                            socket.remote_addr,
                         ))
                     }
                     Err(e) => {
-                        warn!("error during handshake: {e:?}");
-                        self.protocol.error();
-                        return None;
+                        warn!("error writing TLS: {e:?}");
+                        if socket.local_addr == self.protocol.local_addr()
+                            && socket.remote_addr == self.protocol.remote_addr()
+                        {
+                            self.protocol.protocol_error();
+                        } else {
+                            // TODO: remove socket?
+                            continue;
+                        }
                     }
-                }
-            }
-            return None;
-        }
-
-        if !self.conn.wants_write() {
-            if let Some(transmit) = self.protocol.poll_transmit(now) {
-                self.conn.writer().write_all(&transmit.data).unwrap();
-            }
-        }
-
-        if self.conn.wants_write() {
-            // TODO: avoid this allocation
-            let mut out = vec![];
-            match self.conn.write_tls(&mut out) {
-                Ok(_written) => {
-                    return Some(Transmit::new(
-                        Data::from(out.into_boxed_slice()),
-                        self.transport(),
-                        self.local_addr(),
-                        self.remote_addr(),
-                    ))
-                }
-                Err(e) => {
-                    warn!("error writing TLS: {e:?}");
-                    self.protocol.error();
                 }
             }
         }
@@ -244,16 +272,17 @@ impl TurnClientApi for TurnClientRustls {
     }
 
     fn poll_event(&mut self) -> Option<TurnEvent> {
-        self.protocol.poll_event()
+        match self.protocol.poll_event()? {
+            TurnEvent::TcpConnected(peer_addr) => Some(TurnEvent::TcpConnected(peer_addr)),
+            TurnEvent::TcpConnectFailed(peer_addr) => Some(TurnEvent::TcpConnectFailed(peer_addr)),
+            event => Some(event),
+        }
     }
 
     fn delete(&mut self, now: Instant) -> Result<(), DeleteError> {
         self.protocol.delete(now)?;
-        self.closing = true;
 
-        while let Some(transmit) = self.protocol.poll_transmit(now) {
-            self.conn.writer().write_all(&transmit.data).unwrap();
-        }
+        self.empty_transmit_queue(now);
         Ok(())
     }
 
@@ -265,9 +294,7 @@ impl TurnClientApi for TurnClientRustls {
     ) -> Result<(), CreatePermissionError> {
         self.protocol.create_permission(transport, peer_addr, now)?;
 
-        while let Some(transmit) = self.protocol.poll_transmit(now) {
-            self.conn.writer().write_all(&transmit.data).unwrap();
-        }
+        self.empty_transmit_queue(now);
 
         Ok(())
     }
@@ -284,11 +311,67 @@ impl TurnClientApi for TurnClientRustls {
     ) -> Result<(), BindChannelError> {
         self.protocol.bind_channel(transport, peer_addr, now)?;
 
-        while let Some(transmit) = self.protocol.poll_transmit(now) {
-            self.conn.writer().write_all(&transmit.data).unwrap();
-        }
+        self.empty_transmit_queue(now);
 
         Ok(())
+    }
+
+    fn tcp_connect(&mut self, peer_addr: SocketAddr, now: Instant) -> Result<(), TcpConnectError> {
+        self.protocol.tcp_connect(peer_addr, now)?;
+
+        self.empty_transmit_queue(now);
+
+        Ok(())
+    }
+
+    fn allocated_tcp_socket(
+        &mut self,
+        id: u32,
+        five_tuple: Socket5Tuple,
+        peer_addr: SocketAddr,
+        local_addr: Option<SocketAddr>,
+        now: Instant,
+    ) -> Result<(), TcpAllocateError> {
+        self.protocol
+            .allocated_tcp_socket(id, five_tuple, peer_addr, local_addr, now)?;
+
+        if let Some(local_addr) = local_addr {
+            if let Some(idx) = self
+                .pending_allocates
+                .iter()
+                .position(|pending| pending.1 == five_tuple)
+            {
+                self.pending_allocates.swap_remove(idx);
+                self.sockets.push(Socket {
+                    local_addr,
+                    remote_addr: self.remote_addr(),
+                    tls: ClientConnection::new(self.config.clone(), self.server_name.clone())
+                        .unwrap(),
+                    local_closed: false,
+                    peer_closed: false,
+                });
+            }
+        }
+
+        self.empty_transmit_queue(now);
+        Ok(())
+    }
+
+    fn tcp_closed(&mut self, local_addr: SocketAddr, remote_addr: SocketAddr, now: Instant) {
+        let Some(socket) = self
+            .sockets
+            .iter_mut()
+            .find(|socket| socket.local_addr == local_addr && socket.remote_addr == remote_addr)
+        else {
+            warn!(
+                "Unknown socket local:{}, remote:{}",
+                local_addr, remote_addr
+            );
+            return;
+        };
+        self.protocol.tcp_closed(local_addr, remote_addr, now);
+        socket.tls.send_close_notify();
+        socket.local_closed = true;
     }
 
     fn send_to<T: AsRef<[u8]> + core::fmt::Debug>(
@@ -298,29 +381,54 @@ impl TurnClientApi for TurnClientRustls {
         data: T,
         now: Instant,
     ) -> Result<Option<TransmitBuild<DelayedMessageOrChannelSend<T>>>, SendError> {
-        let transmit = self.protocol.send_to(transport, to, data, now)?;
-        let transmit = transmit.build();
-        if let Err(e) = self.conn.writer().write_all(&transmit.data) {
-            self.protocol.error();
-            warn!("Error when writing plaintext: {e:?}");
-            return Err(SendError::NoAllocation);
-        }
-
-        if self.conn.wants_write() {
-            let mut out = vec![];
-            match self.conn.write_tls(&mut out) {
-                Ok(_n) => {
-                    return Ok(Some(TransmitBuild::new(
-                        DelayedMessageOrChannelSend::Data(out),
-                        self.transport(),
-                        self.local_addr(),
-                        self.remote_addr(),
-                    )))
-                }
-                Err(e) => {
-                    self.protocol.error();
-                    warn!("Error when writing TLS records: {e:?}");
+        if let Some(transmit) = self.protocol.send_to(transport, to, data, now)? {
+            let client_transport = self.transport();
+            let transmit = transmit.build();
+            let Some(socket) = self.sockets.iter_mut().find(|socket| {
+                socket.local_addr == transmit.from
+                    && socket.remote_addr == transmit.to
+                    && !socket.local_closed
+            }) else {
+                warn!(
+                    "no socket for transmit from {} to {}",
+                    transmit.from, transmit.to
+                );
+                return Err(SendError::NoTcpSocket);
+            };
+            if let Err(e) = socket.tls.writer().write_all(&transmit.data) {
+                warn!("Error when writing plaintext: {e:?}");
+                if socket.local_addr == self.protocol.local_addr()
+                    && socket.remote_addr == self.protocol.remote_addr()
+                {
+                    self.protocol.protocol_error();
                     return Err(SendError::NoAllocation);
+                } else {
+                    return Err(SendError::NoTcpSocket);
+                }
+            }
+
+            if socket.tls.wants_write() {
+                let mut out = vec![];
+                match socket.tls.write_tls(&mut out) {
+                    Ok(_n) => {
+                        return Ok(Some(TransmitBuild::new(
+                            DelayedMessageOrChannelSend::OwnedData(out),
+                            client_transport,
+                            socket.local_addr,
+                            socket.remote_addr,
+                        )))
+                    }
+                    Err(e) => {
+                        warn!("Error when writing TLS records: {e:?}");
+                        if socket.local_addr == self.protocol.local_addr()
+                            && socket.remote_addr == self.protocol.remote_addr()
+                        {
+                            self.protocol.protocol_error();
+                            return Err(SendError::NoAllocation);
+                        } else {
+                            return Err(SendError::NoTcpSocket);
+                        }
+                    }
                 }
             }
         }
@@ -342,96 +450,80 @@ impl TurnClientApi for TurnClientRustls {
         now: Instant,
     ) -> TurnRecvRet<T> {
         /* is this data for our client? */
-        if transmit.to != self.local_addr()
-            || self.transport() != transmit.transport
-            || transmit.from != self.remote_addr()
-        {
+        if self.transport() != transmit.transport {
+            return TurnRecvRet::Ignored(transmit);
+        }
+        let Some(socket) = self
+            .sockets
+            .iter_mut()
+            .find(|socket| socket.local_addr == transmit.to && socket.remote_addr == transmit.from)
+        else {
             trace!(
                 "received data not directed at us ({:?}) but for {:?}!",
                 self.local_addr(),
                 transmit.to
             );
             return TurnRecvRet::Ignored(transmit);
-        }
+        };
         let mut data = std::io::Cursor::new(transmit.data.as_ref());
 
-        let io_state = match self.conn.read_tls(&mut data) {
-            Ok(_written) => match self.conn.process_new_packets() {
+        let io_state = match socket.tls.read_tls(&mut data) {
+            Ok(_written) => match socket.tls.process_new_packets() {
                 Ok(io_state) => io_state,
                 Err(e) => {
-                    self.protocol.error();
+                    self.protocol.protocol_error();
                     warn!("Error processing TLS: {e:?}");
                     return TurnRecvRet::Ignored(transmit);
                 }
             },
             Err(e) => {
                 warn!("Error receiving data: {e:?}");
-                self.protocol.error();
+                self.protocol.protocol_error();
                 return TurnRecvRet::Ignored(transmit);
             }
         };
         if io_state.plaintext_bytes_to_read() > 0 {
             let mut out = vec![0; 2048];
-            let n = match self.conn.reader().read(&mut out) {
+            let n = match socket.tls.reader().read(&mut out) {
                 Ok(n) => n,
                 Err(e) => {
                     warn!("Error receiving data: {e:?}");
-                    self.protocol.error();
+                    self.protocol.protocol_error();
                     return TurnRecvRet::Ignored(transmit);
                 }
             };
             out.resize(n, 0);
             let transmit = Transmit::new(out, transmit.transport, transmit.from, transmit.to);
 
-            return self.handle_incoming_plaintext(transmit, now);
+            return match self.protocol.recv(transmit, now) {
+                TurnRecvRet::Ignored(_) => unreachable!(),
+                TurnRecvRet::PeerData(peer_data) => TurnRecvRet::PeerData(peer_data.into_owned()),
+                TurnRecvRet::Handled => TurnRecvRet::Handled,
+                TurnRecvRet::PeerIcmp {
+                    transport,
+                    peer,
+                    icmp_type,
+                    icmp_code,
+                    icmp_data,
+                } => TurnRecvRet::PeerIcmp {
+                    transport,
+                    peer,
+                    icmp_type,
+                    icmp_code,
+                    icmp_data,
+                },
+            };
         }
 
         TurnRecvRet::Handled
     }
 
     fn poll_recv(&mut self, now: Instant) -> Option<TurnPeerData<Vec<u8>>> {
-        while let Some(recv) = self.incoming_tcp_buffer.poll_recv() {
-            match recv {
-                StoredTcp::Message(msg_data) => {
-                    let Ok(msg) = Message::from_bytes(&msg_data) else {
-                        continue;
-                    };
-                    if let TurnProtocolRecv::PeerData {
-                        range,
-                        transport,
-                        peer,
-                    } = self.protocol.handle_message(msg, now)
-                    {
-                        return Some(TurnPeerData {
-                            data: DataRangeOrOwned::Range {
-                                data: msg_data,
-                                range,
-                            },
-                            transport,
-                            peer,
-                        });
-                    }
-                }
-                StoredTcp::Channel(data) => {
-                    let Ok(channel) = ChannelData::parse(&data) else {
-                        continue;
-                    };
-                    if let TurnProtocolChannelRecv::PeerData {
-                        range,
-                        transport,
-                        peer,
-                    } = self.protocol.handle_channel(channel, now)
-                    {
-                        return Some(TurnPeerData {
-                            data: DataRangeOrOwned::Range { data, range },
-                            transport,
-                            peer,
-                        });
-                    }
-                }
-            }
-        }
-        None
+        self.protocol.poll_recv(now)
+    }
+
+    fn protocol_error(&mut self) {
+        self.protocol.protocol_error()
     }
 }
 
@@ -453,7 +545,7 @@ mod tests {
     use rustls::crypto::aws_lc_rs as crypto_provider;
     use rustls::pki_types::PrivateKeyDer;
     use rustls::ServerConfig;
-    use turn_server_proto::api::TurnServerApi;
+    use turn_server_proto::api::{TurnServerApi, TurnServerPollRet};
     use turn_server_proto::rustls::RustlsTurnServer;
     mod danger {
         use rustls::client::danger::HandshakeSignatureValid;
@@ -549,11 +641,13 @@ mod tests {
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         credentials: TurnCredentials,
+        allocation_transport: TransportType,
     ) -> TurnClient {
         TurnClientRustls::allocate(
             local_addr,
             remote_addr,
             credentials,
+            allocation_transport,
             &[AddressFamily::IPV4],
             remote_addr.ip().into(),
             client_config(),
@@ -595,12 +689,13 @@ mod tests {
         }
     }
 
-    fn allocate_udp<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
+    fn allocate<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
         complete_io(test, now);
-        test.server.allocated_udp_socket(
+        test.server.allocated_socket(
             TransportType::Tcp,
             test.client.remote_addr(),
             test.client.local_addr(),
+            test.allocation_transport,
             AddressFamily::IPV4,
             Ok(test.turn_alloc_addr),
             now,
@@ -610,13 +705,16 @@ mod tests {
         assert!(matches!(event, TurnEvent::AllocationCreated(_, _)));
         assert_eq!(
             test.client.relayed_addresses().next(),
-            Some((TransportType::Udp, test.turn_alloc_addr))
+            Some((test.allocation_transport, test.turn_alloc_addr))
         );
     }
 
-    fn udp_permission<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
+    fn create_permission<A: TurnClientApi, S: TurnServerApi>(
+        test: &mut TurnTest<A, S>,
+        now: Instant,
+    ) {
         test.client
-            .create_permission(TransportType::Udp, test.peer_addr.ip(), now)
+            .create_permission(test.allocation_transport, test.peer_addr.ip(), now)
             .unwrap();
         complete_io(test, now);
 
@@ -630,15 +728,19 @@ mod tests {
         assert!(test.client.have_permission(transport, test.peer_addr.ip()));
     }
 
-    fn delete_udp<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
+    fn delete<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
         test.client.delete(now).unwrap();
         complete_io(test, now);
         assert_eq!(test.client.relayed_addresses().count(), 0);
     }
 
-    fn channel_bind<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
+    fn channel_bind<A: TurnClientApi, S: TurnServerApi>(
+        test: &mut TurnTest<A, S>,
+        allocation_transport: TransportType,
+        now: Instant,
+    ) {
         test.client
-            .bind_channel(TransportType::Udp, test.peer_addr, now)
+            .bind_channel(allocation_transport, test.peer_addr, now)
             .unwrap();
         complete_io(test, now);
 
@@ -653,7 +755,10 @@ mod tests {
         assert!(test.client.have_permission(transport, test.peer_addr.ip()));
     }
 
-    fn sendrecv_data<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
+    fn udp_sendrecv_data<A: TurnClientApi, S: TurnServerApi>(
+        test: &mut TurnTest<A, S>,
+        now: Instant,
+    ) {
         // client to peer
         let data = [4; 8];
         let transmit = test
@@ -663,7 +768,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             transmit.data,
-            DelayedMessageOrChannelSend::Data(_)
+            DelayedMessageOrChannelSend::OwnedData(_)
         ));
         let transmit = transmit_send_build(transmit);
         assert_eq!(transmit.transport, test.client.transport());
@@ -703,9 +808,9 @@ mod tests {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
         let mut test = create_test();
-        allocate_udp(&mut test, now);
-        udp_permission(&mut test, now);
-        sendrecv_data(&mut test, now);
+        allocate(&mut test, now);
+        create_permission(&mut test, now);
+        udp_sendrecv_data(&mut test, now);
     }
 
     #[test]
@@ -713,7 +818,7 @@ mod tests {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
         let mut test = create_test();
-        allocate_udp(&mut test, now);
+        allocate(&mut test, now);
         let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
             unreachable!();
         };
@@ -721,8 +826,8 @@ mod tests {
         // TODO: removing this (REFRESH handling) produces multiple messages in a single TCP
         // transmit which the server currently does not like.
         complete_io(&mut test, expiry);
-        udp_permission(&mut test, expiry);
-        sendrecv_data(&mut test, expiry);
+        create_permission(&mut test, expiry);
+        udp_sendrecv_data(&mut test, expiry);
     }
 
     #[test]
@@ -730,8 +835,8 @@ mod tests {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
         let mut test = create_test();
-        allocate_udp(&mut test, now);
-        delete_udp(&mut test, now);
+        allocate(&mut test, now);
+        delete(&mut test, now);
     }
 
     #[test]
@@ -739,9 +844,9 @@ mod tests {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
         let mut test = create_test();
-        allocate_udp(&mut test, now);
-        channel_bind(&mut test, now);
-        sendrecv_data(&mut test, now);
+        allocate(&mut test, now);
+        channel_bind(&mut test, TransportType::Udp, now);
+        udp_sendrecv_data(&mut test, now);
     }
 
     #[test]
@@ -749,8 +854,8 @@ mod tests {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
         let mut test = create_test();
-        allocate_udp(&mut test, now);
-        udp_permission(&mut test, now);
+        allocate(&mut test, now);
+        create_permission(&mut test, now);
         let data = Message::builder(
             MessageType::from_class_method(
                 turn_types::stun::message::MessageClass::Error,
@@ -769,6 +874,222 @@ mod tests {
         assert!(matches!(
             test.client.recv(transmit, now),
             TurnRecvRet::Ignored(_)
+        ));
+    }
+
+    fn create_test_tcp_allocation() -> TurnTest<TurnClient, RustlsTurnServer> {
+        TurnTest::<TurnClient, RustlsTurnServer>::builder()
+            .allocation_transport(TransportType::Tcp)
+            .build(turn_rustls_new, turn_server_rustls_new)
+    }
+
+    fn tcp_connect<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
+        test.client.tcp_connect(test.peer_addr, now).unwrap();
+        let transmit = test.client.poll_transmit(now).unwrap();
+        assert_eq!(transmit.transport, test.client.transport());
+        assert_eq!(transmit.from, test.client.local_addr());
+        assert_eq!(transmit.to, test.server.listen_address());
+        assert!(test.server.recv(transmit, now).is_none());
+        let TurnServerPollRet::TcpConnect {
+            relayed_addr,
+            peer_addr,
+            listen_addr,
+            client_addr,
+        } = test.server.poll(now)
+        else {
+            unreachable!();
+        };
+        assert_eq!(peer_addr, test.peer_addr);
+        assert_eq!(listen_addr, test.server.listen_address());
+        assert_eq!(client_addr, test.client.local_addr());
+        test.server.tcp_connected(
+            relayed_addr,
+            peer_addr,
+            listen_addr,
+            client_addr,
+            Ok(relayed_addr),
+            now,
+        );
+        let transmit = test.server.poll_transmit(now).unwrap();
+        assert_eq!(transmit.from, test.server.listen_address());
+        assert_eq!(transmit.to, test.client.local_addr());
+        assert_eq!(transmit.transport, test.client.transport());
+        assert!(matches!(
+            test.client.recv(transmit, now),
+            TurnRecvRet::Handled
+        ));
+        let TurnPollRet::AllocateTcpSocket {
+            id,
+            socket,
+            peer_addr,
+        } = test.client.poll(now)
+        else {
+            unreachable!();
+        };
+        assert_eq!(socket.transport, TransportType::Tcp);
+        assert_eq!(socket.from, test.client.local_addr());
+        assert_eq!(socket.to, test.server.listen_address());
+        assert_eq!(peer_addr, test.peer_addr);
+        test.client
+            .allocated_tcp_socket(id, socket, peer_addr, Some(test.local_tcp_socket), now)
+            .unwrap();
+        complete_io(test, now);
+
+        assert!(matches!(
+            test.client.poll_event().unwrap(),
+            TurnEvent::TcpConnected(_peer_addr)
+        ));
+    }
+
+    fn tcp_sendrecv_data<A: TurnClientApi, S: TurnServerApi>(
+        test: &mut TurnTest<A, S>,
+        now: Instant,
+    ) {
+        // client to peer
+        let data = [4; 8];
+        let transmit = test
+            .client
+            .send_to(TransportType::Tcp, test.peer_addr, data, now)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            transmit.data,
+            DelayedMessageOrChannelSend::OwnedData(_)
+        ));
+        let transmit = transmit_send_build(transmit);
+        assert_eq!(transmit.transport, test.client.transport());
+        assert_eq!(transmit.from, test.local_tcp_socket);
+        assert_eq!(transmit.to, test.server.listen_address());
+        let transmit = test.server.recv(transmit, now).unwrap();
+        let transmit = transmit_send_build(transmit);
+        assert_eq!(transmit.transport, TransportType::Tcp);
+        assert_eq!(transmit.from, test.turn_alloc_addr);
+        assert_eq!(transmit.to, test.peer_addr);
+        assert_eq!(transmit.data.as_ref(), data.as_slice());
+
+        // peer to client
+        let sent_data = [5; 12];
+        let transmit = test
+            .server
+            .recv(
+                Transmit::new(
+                    sent_data,
+                    TransportType::Tcp,
+                    test.peer_addr,
+                    test.turn_alloc_addr,
+                ),
+                now,
+            )
+            .unwrap();
+        assert_eq!(transmit.transport, test.client.transport());
+        assert_eq!(transmit.from, test.server.listen_address());
+        assert_eq!(transmit.to, test.local_tcp_socket);
+        let TurnRecvRet::PeerData(peer_data) = test.client.recv(transmit.build(), now) else {
+            unreachable!();
+        };
+        assert_eq!(peer_data.peer, test.peer_addr);
+        assert_eq!(peer_data.data(), sent_data);
+    }
+
+    #[test]
+    fn test_turn_rustls_tcp_allocation_send_recv_client_close() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut test = create_test_tcp_allocation();
+        allocate(&mut test, now);
+        create_permission(&mut test, now);
+        tcp_connect(&mut test, now);
+        tcp_sendrecv_data(&mut test, now);
+        assert!(test.client.poll_transmit(now).is_none());
+        assert!(test.client.poll_event().is_none());
+        test.client
+            .tcp_closed(test.local_tcp_socket, test.client.remote_addr(), now);
+        let transmit = test.client.poll_transmit(now).unwrap();
+        debug!("client transmit {transmit:x?}");
+        let transmit = test.server.recv(transmit, now).unwrap().build();
+        debug!("server transmit {transmit:x?}");
+        assert!(matches!(
+            test.client.recv(transmit, now),
+            TurnRecvRet::Handled
+        ));
+        let TurnServerPollRet::TcpClose {
+            local_addr,
+            remote_addr,
+        } = test.server.poll(now)
+        else {
+            unreachable!();
+        };
+        assert!(test
+            .server
+            .recv(
+                Transmit::new(
+                    [],
+                    TransportType::Tcp,
+                    test.local_tcp_socket,
+                    test.server.listen_address()
+                ),
+                now
+            )
+            .is_none());
+        assert_eq!(local_addr, test.server.listen_address());
+        assert_eq!(remote_addr, test.local_tcp_socket);
+        test.client.poll(now);
+        assert!(matches!(
+            test.client
+                .send_to(TransportType::Tcp, test.peer_addr, [0, 1, 2], now),
+            Err(SendError::NoTcpSocket)
+        ));
+    }
+
+    #[test]
+    fn test_turn_rustls_tcp_allocation_send_recv_peer_close() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut test = create_test_tcp_allocation();
+        allocate(&mut test, now);
+        create_permission(&mut test, now);
+        tcp_connect(&mut test, now);
+        tcp_sendrecv_data(&mut test, now);
+        assert!(test.client.poll_transmit(now).is_none());
+        assert!(test.client.poll_event().is_none());
+        assert!(test
+            .server
+            .recv(
+                Transmit::new(
+                    vec![],
+                    TransportType::Tcp,
+                    test.peer_addr,
+                    test.turn_alloc_addr,
+                ),
+                now,
+            )
+            .is_none());
+        let TurnServerPollRet::WaitUntil(_) = test.server.poll(now) else {
+            unreachable!();
+        };
+        let transmit = test.server.poll_transmit(now).unwrap();
+        assert!(matches!(
+            test.client.recv(transmit, now),
+            TurnRecvRet::Handled
+        ));
+        test.client.poll(now);
+        let transmit = test.client.poll_transmit(now).unwrap();
+        debug!("client transmit {transmit:x?}");
+        test.client.poll(now);
+        assert!(test.server.recv(transmit, now).is_none());
+        let TurnServerPollRet::TcpClose {
+            local_addr,
+            remote_addr,
+        } = test.server.poll(now)
+        else {
+            unreachable!();
+        };
+        assert_eq!(local_addr, test.server.listen_address());
+        assert_eq!(remote_addr, test.local_tcp_socket);
+        assert!(matches!(
+            test.client
+                .send_to(TransportType::Tcp, test.peer_addr, [0, 1, 2], now),
+            Err(SendError::NoTcpSocket)
         ));
     }
 }

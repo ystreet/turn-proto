@@ -35,7 +35,15 @@ use crate::server::TurnServer;
 pub struct RustlsTurnServer {
     server: TurnServer,
     config: Arc<ServerConfig>,
-    connections: Vec<(SocketAddr, ServerConnection)>,
+    clients: Vec<Client>,
+}
+
+#[derive(Debug)]
+struct Client {
+    client_addr: SocketAddr,
+    tls: ServerConnection,
+    local_closed: bool,
+    peer_closed: bool,
 }
 
 impl RustlsTurnServer {
@@ -44,7 +52,7 @@ impl RustlsTurnServer {
         Self {
             server: TurnServer::new(TransportType::Tcp, listen_addr, realm),
             config,
-            connections: vec![],
+            clients: vec![],
         }
     }
 }
@@ -86,26 +94,30 @@ impl TurnServerApi for RustlsTurnServer {
         if transmit.transport == TransportType::Tcp && transmit.to == listen_address {
             trace!("receiving TLS data: {:x?}", transmit.data.as_ref());
             // incoming client
-            let (client_addr, conn) = match self
-                .connections
+            let client = match self
+                .clients
                 .iter_mut()
-                .find(|(client_addr, _conn)| *client_addr == transmit.from)
+                .find(|client| client.client_addr == transmit.from)
             {
-                Some((client_addr, conn)) => (*client_addr, conn),
+                Some(client) => client,
                 None => {
-                    let len = self.connections.len();
-                    self.connections.push((
-                        transmit.from,
-                        ServerConnection::new(self.config.clone()).unwrap(),
-                    ));
+                    if transmit.data.as_ref().is_empty() {
+                        return None;
+                    }
+                    let len = self.clients.len();
+                    self.clients.push(Client {
+                        client_addr: transmit.from,
+                        tls: ServerConnection::new(self.config.clone()).unwrap(),
+                        local_closed: false,
+                        peer_closed: false,
+                    });
                     info!("new connection from {}", transmit.from);
-                    let ret = &mut self.connections[len];
-                    (ret.0, &mut ret.1)
+                    &mut self.clients[len]
                 }
             };
             let mut input = std::io::Cursor::new(transmit.data.as_ref());
-            let io_state = match conn.read_tls(&mut input) {
-                Ok(_written) => match conn.process_new_packets() {
+            let io_state = match client.tls.read_tls(&mut input) {
+                Ok(_written) => match client.tls.process_new_packets() {
                     Ok(io_state) => io_state,
                     Err(e) => {
                         warn!("Error processing incoming TLS: {e:?}");
@@ -117,11 +129,30 @@ impl TurnServerApi for RustlsTurnServer {
                     return None;
                 }
             };
+            if io_state.peer_has_closed() {
+                client.peer_closed = true;
+                if !client.local_closed {
+                    client.tls.send_close_notify();
+                    client.local_closed = true;
+                    let mut out = vec![];
+                    client.tls.write_tls(&mut out).unwrap();
+                    let client_addr = client.client_addr;
+                    info!("client {client_addr} TLS closed");
+                    return Some(TransmitBuild::new(
+                        DelayedMessageOrChannelSend::Owned(out),
+                        TransportType::Tcp,
+                        listen_address,
+                        client_addr,
+                    ));
+                } else {
+                    return None;
+                }
+            }
             if io_state.plaintext_bytes_to_read() == 0 {
                 return None;
             }
             let mut vec = vec![0; 2048];
-            let n = match conn.reader().read(&mut vec) {
+            let n = match client.tls.reader().read(&mut vec) {
                 Ok(n) => n,
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::WouldBlock {
@@ -132,7 +163,7 @@ impl TurnServerApi for RustlsTurnServer {
                     }
                 }
             };
-            tracing::error!("io_state: {io_state:?}, n: {n}");
+            trace!("io_state: {io_state:?}, n: {n}");
             vec.resize(n, 0);
             let transmit = self.server.recv(
                 Transmit::new(vec, transmit.transport, transmit.from, transmit.to),
@@ -140,17 +171,17 @@ impl TurnServerApi for RustlsTurnServer {
             )?;
             if transmit.transport == TransportType::Tcp
                 && transmit.from == listen_address
-                && transmit.to == client_addr
+                && transmit.to == client.client_addr
             {
                 let plaintext = transmit.data.build();
-                conn.writer().write_all(&plaintext).unwrap();
+                client.tls.writer().write_all(&plaintext).unwrap();
                 let mut out = vec![];
-                conn.write_tls(&mut out).unwrap();
+                client.tls.write_tls(&mut out).unwrap();
                 Some(TransmitBuild::new(
                     DelayedMessageOrChannelSend::Owned(out),
                     TransportType::Tcp,
                     listen_address,
-                    client_addr,
+                    client.client_addr,
                 ))
             } else {
                 let transmit = transmit.build();
@@ -164,22 +195,22 @@ impl TurnServerApi for RustlsTurnServer {
         } else if let Some(transmit) = self.server.recv(transmit, now) {
             // incoming allocated address
             if transmit.transport == TransportType::Tcp && transmit.from == listen_address {
-                let Some((client_addr, conn)) = self
-                    .connections
+                let Some(client) = self
+                    .clients
                     .iter_mut()
-                    .find(|(client_addr, _conn)| transmit.to == *client_addr)
+                    .find(|client| transmit.to == client.client_addr)
                 else {
                     return Some(transmit);
                 };
                 let plaintext = transmit.data.build();
-                conn.writer().write_all(&plaintext).unwrap();
+                client.tls.writer().write_all(&plaintext).unwrap();
                 let mut out = vec![];
-                conn.write_tls(&mut out).unwrap();
+                client.tls.write_tls(&mut out).unwrap();
                 Some(TransmitBuild::new(
                     DelayedMessageOrChannelSend::Owned(out),
                     TransportType::Tcp,
                     listen_address,
-                    *client_addr,
+                    client.client_addr,
                 ))
             } else {
                 Some(transmit)
@@ -199,21 +230,21 @@ impl TurnServerApi for RustlsTurnServer {
         // incoming allocated address
         let listen_address = self.listen_address();
         if transmit.transport == TransportType::Tcp && transmit.from == listen_address {
-            let Some((client_addr, conn)) = self
-                .connections
+            let Some(client) = self
+                .clients
                 .iter_mut()
-                .find(|(client_addr, _conn)| transmit.to == *client_addr)
+                .find(|client| transmit.to == client.client_addr)
             else {
                 return Some(transmit);
             };
-            conn.writer().write_all(&transmit.data).unwrap();
+            client.tls.writer().write_all(&transmit.data).unwrap();
             let mut out = vec![];
-            conn.write_tls(&mut out).unwrap();
+            client.tls.write_tls(&mut out).unwrap();
             Some(Transmit::new(
                 out,
                 TransportType::Tcp,
                 listen_address,
-                *client_addr,
+                client.client_addr,
             ))
         } else {
             Some(transmit)
@@ -226,17 +257,54 @@ impl TurnServerApi for RustlsTurnServer {
     fn poll(&mut self, now: Instant) -> TurnServerPollRet {
         let protocol_ret = self.server.poll(now);
         let mut have_pending = false;
-        for (_client_addr, conn) in self.connections.iter_mut() {
-            let io_state = match conn.process_new_packets() {
+        for (idx, client) in self.clients.iter_mut().enumerate() {
+            trace!("client: {client:?}");
+            let io_state = match client.tls.process_new_packets() {
                 Ok(io_state) => io_state,
                 Err(e) => {
                     warn!("Error processing TLS: {e:?}");
                     continue;
                 }
             };
+            trace!("{io_state:?}");
             if io_state.tls_bytes_to_write() > 0 {
                 have_pending = true;
+                continue;
+            } else if !client.peer_closed && io_state.peer_has_closed() {
+                client.peer_closed = true;
+                if !client.local_closed {
+                    client.tls.send_close_notify();
+                    client.local_closed = true;
+                    have_pending = true;
+                    continue;
+                }
             }
+            if client.local_closed && client.peer_closed && !client.tls.wants_write() {
+                let client = self.clients.remove(idx);
+                return TurnServerPollRet::TcpClose {
+                    local_addr: self.server.listen_address(),
+                    remote_addr: client.client_addr,
+                };
+            }
+        }
+        if let TurnServerPollRet::TcpClose {
+            local_addr,
+            remote_addr,
+        } = protocol_ret
+        {
+            let Some(client) = self
+                .clients
+                .iter_mut()
+                .find(|client| client.client_addr == remote_addr)
+            else {
+                return TurnServerPollRet::TcpClose {
+                    local_addr,
+                    remote_addr,
+                };
+            };
+            client.tls.send_close_notify();
+            client.local_closed = true;
+            return TurnServerPollRet::WaitUntil(now);
         }
         if have_pending {
             return TurnServerPollRet::WaitUntil(now);
@@ -249,23 +317,34 @@ impl TurnServerApi for RustlsTurnServer {
         let listen_address = self.listen_address();
 
         while let Some(transmit) = self.server.poll_transmit(now) {
-            let Some((_client_addr, conn)) = self
-                .connections
+            if let Some(client) = self
+                .clients
                 .iter_mut()
-                .find(|(client_addr, _conn)| transmit.to == *client_addr)
-            else {
+                .find(|client| transmit.to == client.client_addr)
+            {
+                if transmit.data.is_empty() {
+                    if !client.local_closed {
+                        warn!("client {} closed", client.client_addr);
+                        client.tls.send_close_notify();
+                        client.local_closed = true;
+                    }
+                } else {
+                    client.tls.writer().write_all(&transmit.data).unwrap();
+                }
+            } else {
                 warn!("return transmit: {transmit:?}");
                 return Some(transmit);
             };
-            conn.writer().write_all(&transmit.data).unwrap();
         }
 
-        for (client_addr, conn) in self.connections.iter_mut() {
-            if !conn.wants_write() {
+        for client in self.clients.iter_mut() {
+            trace!("client: {client:?}");
+            let client_addr = client.client_addr;
+            if !client.tls.wants_write() {
                 continue;
             }
             let mut vec = vec![];
-            let n = match conn.write_tls(&mut vec) {
+            let n = match client.tls.write_tls(&mut vec) {
                 Ok(n) => n,
                 Err(e) => {
                     warn!("error writing TLS: {e:?}");
@@ -278,28 +357,49 @@ impl TurnServerApi for RustlsTurnServer {
                 vec,
                 TransportType::Tcp,
                 listen_address,
-                *client_addr,
+                client_addr,
             ));
         }
         None
     }
 
     /// Notify the [`TurnServer`] that a UDP socket has been allocated (or an error) in response to
-    /// [TurnServerPollRet::AllocateSocketUdp].
-    fn allocated_udp_socket(
+    /// [TurnServerPollRet::AllocateSocket].
+    fn allocated_socket(
         &mut self,
         transport: TransportType,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
+        allocation_transport: TransportType,
         family: AddressFamily,
         socket_addr: Result<SocketAddr, SocketAllocateError>,
         now: Instant,
     ) {
-        self.server.allocated_udp_socket(
+        self.server.allocated_socket(
             transport,
             local_addr,
             remote_addr,
+            allocation_transport,
             family,
+            socket_addr,
+            now,
+        )
+    }
+
+    fn tcp_connected(
+        &mut self,
+        relayed_addr: SocketAddr,
+        peer_addr: SocketAddr,
+        listen_addr: SocketAddr,
+        client_addr: SocketAddr,
+        socket_addr: Result<SocketAddr, crate::api::TcpConnectError>,
+        now: Instant,
+    ) {
+        self.server.tcp_connected(
+            relayed_addr,
+            peer_addr,
+            listen_addr,
+            client_addr,
             socket_addr,
             now,
         )

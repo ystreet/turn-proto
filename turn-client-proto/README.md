@@ -14,10 +14,10 @@ the [Rust programming language](https://www.rust-lang.org/).
  - [x] [RFC5766](https://tools.ietf.org/html/rfc5766):
    Traversal Using Relays around NAT (TURN): Relay Extensions to Session
    Traversal Utilities for NAT (STUN)
- - [ ] [RFC6062](https://tools.ietf.org/html/rfc6062):
+ - [x] [RFC6062](https://tools.ietf.org/html/rfc6062):
    Traversal Using Relays around NAT (TURN) Extensions for TCP Allocations
  - [x] [RFC6156](https://tools.ietf.org/html/rfc6156):
    Traversal Using Relays around NAT (TURN) Extension for IPv6
- - [ ] [RFC8656](https://tools.ietf.org/html/rfc8656):
+ - [x] [RFC8656](https://tools.ietf.org/html/rfc8656):
    Traversal Using Relays around NAT (TURN): Relay Extensions to Session
    Traversal Utilities for NAT (STUN)

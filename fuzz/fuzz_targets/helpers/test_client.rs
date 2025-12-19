@@ -1,8 +1,8 @@
 use core::net::SocketAddr;
 use stun_types::TransportType;
-use turn_client_proto::stun::Instant;
 use turn_client_proto::api::TurnClientApi;
 use turn_client_proto::client::TurnClient;
+use turn_client_proto::stun::Instant;
 use turn_client_proto::udp::TurnClientUdp;
 use turn_server_proto::api::{TurnServerApi, TurnServerPollRet};
 use turn_server_proto::server::TurnServer;
@@ -55,27 +55,31 @@ impl TestClient {
         let transmit = self.client.poll_transmit(now).unwrap();
         self.server.recv(transmit, now);
         for _ in 0..2 {
-            let TurnServerPollRet::AllocateSocketUdp {
+            let TurnServerPollRet::AllocateSocket {
                 transport,
-                local_addr,
-                remote_addr,
+                listen_addr,
+                client_addr,
+                allocation_transport,
                 family,
-            } = self.server.poll(now) else {
+            } = self.server.poll(now)
+            else {
                 unreachable!();
             };
             match family {
-                AddressFamily::IPV4 => self.server.allocated_udp_socket(
+                AddressFamily::IPV4 => self.server.allocated_socket(
                     transport,
-                    local_addr,
-                    remote_addr,
+                    listen_addr,
+                    client_addr,
+                    allocation_transport,
                     family,
                     Ok(self.relayed_ipv4),
                     now,
                 ),
-                AddressFamily::IPV6 => self.server.allocated_udp_socket(
+                AddressFamily::IPV6 => self.server.allocated_socket(
                     transport,
-                    local_addr,
-                    remote_addr,
+                    listen_addr,
+                    client_addr,
+                    allocation_transport,
                     family,
                     Ok(self.relayed_ipv6),
                     now,

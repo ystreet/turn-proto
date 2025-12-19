@@ -10,6 +10,7 @@
 //!
 //! An implementation of a TURN client suitable for TCP connections.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::net::{IpAddr, SocketAddr};
 use core::ops::Range;
@@ -28,7 +29,8 @@ use turn_types::TurnCredentials;
 use tracing::{trace, warn};
 
 use crate::api::{
-    DataRangeOrOwned, DelayedMessageOrChannelSend, TransmitBuild, TurnClientApi, TurnPeerData,
+    DataRangeOrOwned, DelayedMessageOrChannelSend, Socket5Tuple, TcpAllocateError, TcpConnectError,
+    TransmitBuild, TurnClientApi, TurnPeerData,
 };
 use crate::protocol::{TurnClientProtocol, TurnProtocolChannelRecv, TurnProtocolRecv};
 
@@ -41,7 +43,18 @@ pub use crate::api::{
 #[derive(Debug)]
 pub struct TurnClientTcp {
     protocol: TurnClientProtocol,
-    incoming_tcp_buffer: TurnTcpBuffer,
+    incoming_tcp_buffers: BTreeMap<(SocketAddr, SocketAddr), TcpBuffer>,
+}
+
+#[derive(Debug)]
+enum TcpBuffer {
+    // The control TURN connection. Always buffered.
+    Control(TurnTcpBuffer),
+    WaitingForConnectionBindResponse(TurnTcpBuffer),
+    // reached if after ConnectionBind there is more data.
+    PendingData(Vec<u8>, SocketAddr),
+    // peer address
+    Passthrough(SocketAddr),
 }
 
 impl TurnClientTcp {
@@ -60,6 +73,8 @@ impl TurnClientTcp {
     ///     local_addr,
     ///     remote_addr,
     ///     credentials,
+    ///     // The transport protocol of the allocation on the TURN server.
+    ///     TransportType::Udp,
     ///     &[AddressFamily::IPV4]
     /// );
     /// assert_eq!(client.transport(), TransportType::Tcp);
@@ -74,6 +89,7 @@ impl TurnClientTcp {
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         credentials: TurnCredentials,
+        allocation_transport: TransportType,
         allocation_families: &[AddressFamily],
     ) -> Self {
         let stun_agent = StunAgent::builder(TransportType::Tcp, local_addr)
@@ -81,8 +97,16 @@ impl TurnClientTcp {
             .build();
 
         Self {
-            protocol: TurnClientProtocol::new(stun_agent, credentials, allocation_families),
-            incoming_tcp_buffer: TurnTcpBuffer::new(),
+            protocol: TurnClientProtocol::new(
+                stun_agent,
+                credentials,
+                allocation_transport,
+                allocation_families,
+            ),
+            incoming_tcp_buffers: BTreeMap::from([(
+                (local_addr, remote_addr),
+                TcpBuffer::Control(TurnTcpBuffer::new()),
+            )]),
         }
     }
 }
@@ -150,6 +174,33 @@ impl TurnClientApi for TurnClientTcp {
         self.protocol.bind_channel(transport, peer_addr, now)
     }
 
+    fn tcp_connect(&mut self, peer_addr: SocketAddr, now: Instant) -> Result<(), TcpConnectError> {
+        self.protocol.tcp_connect(peer_addr, now)
+    }
+
+    fn allocated_tcp_socket(
+        &mut self,
+        id: u32,
+        five_tuple: Socket5Tuple,
+        peer_addr: SocketAddr,
+        local_addr: Option<SocketAddr>,
+        now: Instant,
+    ) -> Result<(), TcpAllocateError> {
+        self.protocol
+            .allocated_tcp_socket(id, five_tuple, peer_addr, local_addr, now)?;
+        if let Some(local_addr) = local_addr {
+            self.incoming_tcp_buffers.insert(
+                (local_addr, self.remote_addr()),
+                TcpBuffer::WaitingForConnectionBindResponse(TurnTcpBuffer::new()),
+            );
+        }
+        Ok(())
+    }
+
+    fn tcp_closed(&mut self, local_addr: SocketAddr, remote_addr: SocketAddr, now: Instant) {
+        self.protocol.tcp_closed(local_addr, remote_addr, now);
+    }
+
     fn send_to<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         transport: TransportType,
@@ -166,10 +217,7 @@ impl TurnClientApi for TurnClientTcp {
         now: Instant,
     ) -> TurnRecvRet<T> {
         /* is this data for our client? */
-        if transmit.to != self.local_addr()
-            || self.transport() != transmit.transport
-            || transmit.from != self.remote_addr()
-        {
+        if self.transport() != transmit.transport || transmit.from != self.remote_addr() {
             trace!(
                 "received data not directed at us ({:?}) but for {:?}!",
                 self.local_addr(),
@@ -178,7 +226,104 @@ impl TurnClientApi for TurnClientTcp {
             return TurnRecvRet::Ignored(transmit);
         }
 
-        let ret = match self.incoming_tcp_buffer.incoming_tcp(transmit) {
+        let Some(tcp_buffer) = self
+            .incoming_tcp_buffers
+            .get_mut(&(transmit.to, transmit.from))
+        else {
+            return TurnRecvRet::Ignored(transmit);
+        };
+
+        if transmit.data.as_ref().is_empty() {
+            self.protocol.tcp_closed(transmit.to, transmit.from, now);
+            self.incoming_tcp_buffers
+                .remove(&(transmit.to, transmit.from));
+            return TurnRecvRet::Handled;
+        }
+
+        let tcp_buffer = match tcp_buffer {
+            TcpBuffer::WaitingForConnectionBindResponse(buffer) => {
+                match buffer.incoming_tcp(transmit) {
+                    None => return TurnRecvRet::Handled,
+                    // protocol violation
+                    Some(
+                        IncomingTcp::CompleteChannel(transmit, _)
+                        | IncomingTcp::StoredChannel(_, transmit),
+                    ) => {
+                        return TurnRecvRet::Ignored(transmit);
+                    }
+                    Some(IncomingTcp::CompleteMessage(transmit, msg_range)) => {
+                        let Ok(msg) = Message::from_bytes(
+                            &transmit.data.as_ref()[msg_range.start..msg_range.end],
+                        ) else {
+                            // protocol violation
+                            return TurnRecvRet::Handled;
+                        };
+                        let msg_transmit =
+                            Transmit::new(msg, transmit.transport, transmit.from, transmit.to);
+                        if let TurnProtocolRecv::TcpConnectionBound { peer_addr } =
+                            self.protocol.handle_message(msg_transmit, now)
+                        {
+                            if msg_range.end > transmit.data.as_ref().len() {
+                                *tcp_buffer = TcpBuffer::PendingData(
+                                    transmit.data.as_ref()[msg_range.end..].to_vec(),
+                                    peer_addr,
+                                );
+                            } else {
+                                *tcp_buffer = TcpBuffer::Passthrough(peer_addr);
+                            }
+                            return TurnRecvRet::Handled;
+                        } else {
+                            // possible protocol violation
+                            return TurnRecvRet::Handled;
+                        }
+                    }
+                    Some(IncomingTcp::StoredMessage(msg_data, transmit)) => {
+                        let Ok(msg) = Message::from_bytes(&msg_data) else {
+                            return TurnRecvRet::Handled;
+                        };
+                        let msg_transmit =
+                            Transmit::new(msg, transmit.transport, transmit.from, transmit.to);
+                        if let TurnProtocolRecv::TcpConnectionBound { peer_addr } =
+                            self.protocol.handle_message(msg_transmit, now)
+                        {
+                            if buffer.is_empty() {
+                                *tcp_buffer = TcpBuffer::Passthrough(peer_addr);
+                            } else {
+                                let mut new_buffer = TurnTcpBuffer::new();
+                                core::mem::swap(buffer, &mut new_buffer);
+                                let data = new_buffer.into_inner();
+                                *tcp_buffer = TcpBuffer::PendingData(data, peer_addr);
+                            }
+                        }
+                        return TurnRecvRet::Handled;
+                    }
+                }
+            }
+            TcpBuffer::PendingData(data, peer) => {
+                let mut replace = Vec::default();
+                core::mem::swap(&mut replace, data);
+                let ret = TurnRecvRet::PeerData(TurnPeerData {
+                    data: DataRangeOrOwned::Owned(replace),
+                    transport: transmit.transport,
+                    peer: *peer,
+                });
+                *tcp_buffer = TcpBuffer::Passthrough(*peer);
+                return ret;
+            }
+            TcpBuffer::Passthrough(peer) => {
+                return TurnRecvRet::PeerData(TurnPeerData {
+                    data: DataRangeOrOwned::Range {
+                        range: 0..transmit.data.as_ref().len(),
+                        data: transmit.data,
+                    },
+                    transport: transmit.transport,
+                    peer: *peer,
+                });
+            }
+            TcpBuffer::Control(tcp_buffer) => tcp_buffer,
+        };
+
+        let ret = match tcp_buffer.incoming_tcp(transmit) {
             None => TurnRecvRet::Handled,
             Some(IncomingTcp::CompleteMessage(transmit, msg_range)) => {
                 let Ok(msg) =
@@ -186,8 +331,10 @@ impl TurnClientApi for TurnClientTcp {
                 else {
                     return TurnRecvRet::Handled;
                 };
+                let msg_transmit =
+                    Transmit::new(msg, transmit.transport, transmit.from, transmit.to);
                 TurnRecvRet::from_protocol_recv_subrange(
-                    self.protocol.handle_message(msg, now),
+                    self.protocol.handle_message(msg_transmit, now),
                     transmit,
                     msg_range.start,
                 )
@@ -216,8 +363,10 @@ impl TurnClientApi for TurnClientTcp {
                 let Ok(msg) = Message::from_bytes(&msg_data) else {
                     return TurnRecvRet::Handled;
                 };
+                let msg_transmit =
+                    Transmit::new(msg, transmit.transport, transmit.from, transmit.to);
                 TurnRecvRet::from_protocol_recv_stored(
-                    self.protocol.handle_message(msg, now),
+                    self.protocol.handle_message(msg_transmit, now),
                     transmit,
                     msg_data,
                 )
@@ -258,48 +407,109 @@ impl TurnClientApi for TurnClientTcp {
     }
 
     fn poll_recv(&mut self, now: Instant) -> Option<TurnPeerData<Vec<u8>>> {
-        while let Some(recv) = self.incoming_tcp_buffer.poll_recv() {
-            match recv {
-                StoredTcp::Message(msg_data) => {
-                    let Ok(msg) = Message::from_bytes(&msg_data) else {
-                        continue;
-                    };
-                    if let TurnProtocolRecv::PeerData {
-                        range,
-                        transport,
-                        peer,
-                    } = self.protocol.handle_message(msg, now)
-                    {
-                        return Some(TurnPeerData {
-                            data: DataRangeOrOwned::Range {
-                                data: msg_data,
-                                range,
-                            },
-                            transport,
-                            peer,
-                        });
+        for ((local_addr, remote_addr), tcp_buffer) in self.incoming_tcp_buffers.iter_mut() {
+            match tcp_buffer {
+                TcpBuffer::Passthrough(_) => continue,
+                TcpBuffer::PendingData(data, peer) => {
+                    let mut replace = Vec::default();
+                    core::mem::swap(&mut replace, data);
+                    let ret = Some(TurnPeerData {
+                        data: DataRangeOrOwned::Owned(replace),
+                        transport: TransportType::Tcp,
+                        peer: *peer,
+                    });
+                    *tcp_buffer = TcpBuffer::Passthrough(*peer);
+                    return ret;
+                }
+                TcpBuffer::WaitingForConnectionBindResponse(buffer) => {
+                    if let Some(recv) = buffer.poll_recv() {
+                        match recv {
+                            // protocol violation
+                            StoredTcp::Channel(_) => continue,
+                            StoredTcp::Message(msg_data) => {
+                                let Ok(msg) = Message::from_bytes(&msg_data) else {
+                                    continue;
+                                };
+                                if let TurnProtocolRecv::TcpConnectionBound { peer_addr } =
+                                    self.protocol.handle_message(
+                                        Transmit::new(
+                                            msg,
+                                            TransportType::Tcp,
+                                            *remote_addr,
+                                            *local_addr,
+                                        ),
+                                        now,
+                                    )
+                                {
+                                    if buffer.is_empty() {
+                                        *tcp_buffer = TcpBuffer::Passthrough(peer_addr);
+                                    } else {
+                                        let mut new_buffer = TurnTcpBuffer::new();
+                                        core::mem::swap(buffer, &mut new_buffer);
+                                        let data = new_buffer.into_inner();
+                                        *tcp_buffer = TcpBuffer::PendingData(data, peer_addr);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-                StoredTcp::Channel(data) => {
-                    let Ok(channel) = ChannelData::parse(&data) else {
-                        continue;
-                    };
-                    if let TurnProtocolChannelRecv::PeerData {
-                        range,
-                        transport,
-                        peer,
-                    } = self.protocol.handle_channel(channel, now)
-                    {
-                        return Some(TurnPeerData {
-                            data: DataRangeOrOwned::Range { data, range },
-                            transport,
-                            peer,
-                        });
+                TcpBuffer::Control(buffer) => {
+                    while let Some(recv) = buffer.poll_recv() {
+                        match recv {
+                            StoredTcp::Message(msg_data) => {
+                                let Ok(msg) = Message::from_bytes(&msg_data) else {
+                                    continue;
+                                };
+                                let msg_transmit = Transmit::new(
+                                    msg,
+                                    TransportType::Tcp,
+                                    *remote_addr,
+                                    *local_addr,
+                                );
+                                if let TurnProtocolRecv::PeerData {
+                                    range,
+                                    transport,
+                                    peer,
+                                } = self.protocol.handle_message(msg_transmit, now)
+                                {
+                                    return Some(TurnPeerData {
+                                        data: DataRangeOrOwned::Range {
+                                            data: msg_data,
+                                            range,
+                                        },
+                                        transport,
+                                        peer,
+                                    });
+                                }
+                            }
+                            StoredTcp::Channel(data) => {
+                                let Ok(channel) = ChannelData::parse(&data) else {
+                                    continue;
+                                };
+                                if let TurnProtocolChannelRecv::PeerData {
+                                    range,
+                                    transport,
+                                    peer,
+                                } = self.protocol.handle_channel(channel, now)
+                                {
+                                    return Some(TurnPeerData {
+                                        data: DataRangeOrOwned::Range { data, range },
+                                        transport,
+                                        peer,
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
         None
+    }
+
+    fn protocol_error(&mut self) {
+        self.protocol.protocol_error()
     }
 }
 
@@ -313,7 +523,9 @@ pub(crate) fn ensure_data_owned(data: Vec<u8>, range: Range<usize>) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use turn_server_proto::api::TurnServerApi;
+    use core::time::Duration;
+
+    use turn_server_proto::api::{TurnServerApi, TurnServerPollRet};
     use turn_server_proto::server::TurnServer;
 
     use alloc::string::String;
@@ -334,8 +546,16 @@ mod tests {
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
         credentials: TurnCredentials,
+        allocation_transport: TransportType,
     ) -> TurnClient {
-        TurnClientTcp::allocate(local_addr, remote_addr, credentials, &[AddressFamily::IPV4]).into()
+        TurnClientTcp::allocate(
+            local_addr,
+            remote_addr,
+            credentials,
+            allocation_transport,
+            &[AddressFamily::IPV4],
+        )
+        .into()
     }
 
     fn turn_server_tcp_new(listen_addr: SocketAddr, realm: String) -> TurnServer {
@@ -531,5 +751,71 @@ mod tests {
             unreachable!();
         };
         assert_eq!(peer.data(), peer_data.as_slice());
+    }
+
+    fn create_test_tcp_allocation(split_transmit_bytes: usize) -> TurnTest<TurnClient, TurnServer> {
+        TurnTest::<TurnClient, TurnServer>::builder()
+            .split_transmit_bytes(split_transmit_bytes)
+            .allocation_transport(TransportType::Tcp)
+            .build(turn_tcp_new, turn_server_tcp_new)
+    }
+
+    #[test]
+    fn test_turn_tcp_data_peer_close() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut test = create_test_tcp_allocation(0);
+        turn_allocate_permission(&mut test, now);
+        test.client
+            .tcp_closed(test.local_tcp_socket, test.server.listen_address(), now);
+        assert!(matches!(
+            test.client
+                .send_to(test.allocation_transport, test.peer_addr, [0, 3, 2], now),
+            Err(SendError::NoTcpSocket)
+        ));
+    }
+
+    #[test]
+    fn test_turn_tcp_allocate_tcp_expire_server() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut test = create_test_tcp_allocation(0);
+        turn_allocate_expire_server(&mut test, now);
+    }
+
+    #[test]
+    fn test_turn_tcp_permission_expire() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut test = create_test_tcp_allocation(0);
+        turn_allocate_permission(&mut test, now);
+        let now = now + Duration::from_secs(3000);
+        assert!(
+            matches!(test.server.poll(now), TurnServerPollRet::TcpClose { local_addr, remote_addr } if local_addr == test.turn_alloc_addr && remote_addr == test.peer_addr)
+        );
+        assert!(
+            matches!(test.server.poll(now), TurnServerPollRet::TcpClose { local_addr, remote_addr } if local_addr == test.server.listen_address() && remote_addr == test.local_tcp_socket)
+        );
+        assert!(matches!(
+            test.client.recv(
+                Transmit::new(
+                    [],
+                    TransportType::Tcp,
+                    test.server.listen_address(),
+                    test.local_tcp_socket
+                ),
+                now
+            ),
+            TurnRecvRet::Handled
+        ));
+        assert!(
+            matches!(test.server.poll(now), TurnServerPollRet::SocketClose { transport, listen_addr } if transport == test.allocation_transport && listen_addr == test.turn_alloc_addr)
+        );
+
+        assert!(matches!(
+            test.client
+                .send_to(test.allocation_transport, test.peer_addr, [0, 3, 2], now),
+            Err(SendError::NoTcpSocket)
+        ));
     }
 }

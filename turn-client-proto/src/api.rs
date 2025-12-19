@@ -68,6 +68,27 @@ pub trait TurnClientApi: core::fmt::Debug + Send {
         now: Instant,
     ) -> Result<(), BindChannelError>;
 
+    /// Attempt to connect to a peer from the TURN server using TCP.
+    ///
+    /// Requires that a TCP allocation has been allocated on the TURN server.
+    fn tcp_connect(&mut self, peer_addr: SocketAddr, now: Instant) -> Result<(), TcpConnectError>;
+
+    /// Indicate success (or failure) to create a socket for the specified server and peer address.
+    ///
+    /// The values @id, @five_tuple, and @peer_addr must match the values provided in matching the
+    /// [`TurnPollRet::AllocateTcpSocket`].
+    fn allocated_tcp_socket(
+        &mut self,
+        id: u32,
+        five_tuple: Socket5Tuple,
+        peer_addr: SocketAddr,
+        local_addr: Option<SocketAddr>,
+        now: Instant,
+    ) -> Result<(), TcpAllocateError>;
+
+    /// Indicate that the TCP connection has been closed.
+    fn tcp_closed(&mut self, local_addr: SocketAddr, remote_addr: SocketAddr, now: Instant);
+
     /// Send data to a peer through the TURN server.
     ///
     /// The provided transport, address and data are the data to send to the peer.
@@ -101,6 +122,9 @@ pub trait TurnClientApi: core::fmt::Debug + Send {
 
     /// Poll for an event that has occurred.
     fn poll_event(&mut self) -> Option<TurnEvent>;
+
+    /// A higher layer has encountered an error and this client is no longer usable.
+    fn protocol_error(&mut self);
 }
 
 /// Return value from calling [poll](TurnClientApi::poll)().
@@ -109,8 +133,38 @@ pub enum TurnPollRet {
     /// The caller should wait until the provided time. Other events may cause this value to
     /// modified and poll() should be rechecked.
     WaitUntil(Instant),
+    /// The caller should initiate a connection using the provided remote address based on the
+    /// provided local address.
+    AllocateTcpSocket {
+        /// The server-unique identifier for this connection.
+        id: u32,
+        /// The client-server network 5-tuple.
+        socket: Socket5Tuple,
+        /// The address of the peer to connect to.
+        peer_addr: SocketAddr,
+    },
+    /// The client has completed closing a TCP connection between the TURN client and a peer.
+    ///
+    /// The connection can be in progress of being setup.
+    TcpClose {
+        /// The socket address local to the TURN client.
+        local_addr: SocketAddr,
+        /// The address of the remote peer.
+        remote_addr: SocketAddr,
+    },
     /// The connection is closed and no further progress will be made.
     Closed,
+}
+
+/// A socket with the specified network 5-tuple.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Socket5Tuple {
+    /// The transport for the socket.
+    pub transport: TransportType,
+    /// The local address for the socket.
+    pub from: SocketAddr,
+    /// The remote address for the socket.
+    pub to: SocketAddr,
 }
 
 /// Return value from call [recv](TurnClientApi::recv).
@@ -149,6 +203,17 @@ pub struct TurnPeerData<T: AsRef<[u8]> + core::fmt::Debug> {
 }
 
 impl<T: AsRef<[u8]> + core::fmt::Debug> TurnPeerData<T> {
+    /// Produce an owned variant of [`TurnPeerData`], copying only if necessary.
+    pub fn into_owned<R: AsRef<[u8]> + core::fmt::Debug>(self) -> TurnPeerData<R> {
+        TurnPeerData {
+            data: self.data.into_owned(),
+            transport: self.transport,
+            peer: self.peer,
+        }
+    }
+}
+
+impl<T: AsRef<[u8]> + core::fmt::Debug> TurnPeerData<T> {
     /// The data slice of this [`TurnPeerData`]
     pub fn data(&self) -> &[u8] {
         self.data.as_ref()
@@ -177,6 +242,10 @@ pub enum TurnEvent {
     ChannelCreated(TransportType, SocketAddr),
     /// A channel could not be installed for the provided transport and IP address.
     ChannelCreateFailed(TransportType, SocketAddr),
+    /// A TCP connection was created for the provided peer IP address.
+    TcpConnected(SocketAddr),
+    /// A TCP connection could not be installed for the provided peer IP address.
+    TcpConnectFailed(SocketAddr),
 }
 
 /// Errors produced when attempting to bind a channel.
@@ -222,6 +291,36 @@ pub enum SendError {
     /// There is no permission installed for the requested peer.
     #[error("There is no permission installed for the requested peer")]
     NoPermission,
+    /// There is no local TCP socket for the requested peer.
+    #[error("There is no local TCP socket for the requested peer")]
+    NoTcpSocket,
+}
+
+/// Errors produced when attempting to connect to a peer over TCP.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum TcpConnectError {
+    /// The TCP connection already exists and cannot be recreated.
+    #[error("The TCP connection already exists and cannot be recreated.")]
+    AlreadyExists,
+    /// There is no connection to the TURN server that can handle this TCP socket.
+    #[error("There is no connection to the TURN server that can handle this TCP socket.")]
+    NoAllocation,
+    /// There is no permission installed for the requested peer.
+    #[error("There is no permission installed for the requested peer")]
+    NoPermission,
+}
+
+/// Errors produced when attempting to connect to a peer over TCP.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum TcpAllocateError {
+    /// The TCP connection already exists and cannot be recreated.
+    #[error("The TCP connection already exists and cannot be recreated.")]
+    AlreadyExists,
+    /// There is no connection to the TURN server that can handle this TCP socket.
+    #[error("There is no connection to the TURN server that can handle this TCP socket.")]
+    NoAllocation,
 }
 
 /// A slice range or an owned piece of data.
@@ -291,8 +390,10 @@ pub enum DelayedMessageOrChannelSend<T: AsRef<[u8]> + core::fmt::Debug> {
     Channel(DelayedChannel<T>),
     /// A [`DelayedMessage`].
     Message(DelayedMessage<T>),
+    /// Passthrough of a piece of data.
+    Data(T),
     /// An already constructed piece of data.
-    Data(Vec<u8>),
+    OwnedData(Vec<u8>),
 }
 
 impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedMessageOrChannelSend<T> {
@@ -310,7 +411,8 @@ impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedTransmitBuild for DelayedMessageO
         match self {
             Self::Channel(channel) => channel.len(),
             Self::Message(msg) => msg.len(),
-            Self::Data(owned) => owned.len(),
+            Self::Data(data) => data.as_ref().len(),
+            Self::OwnedData(owned) => owned.len(),
         }
     }
 
@@ -318,7 +420,8 @@ impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedTransmitBuild for DelayedMessageO
         match self {
             Self::Channel(channel) => channel.build(),
             Self::Message(msg) => msg.build(),
-            Self::Data(owned) => owned,
+            Self::Data(data) => data.as_ref().to_vec(),
+            Self::OwnedData(owned) => owned,
         }
     }
 
@@ -326,7 +429,11 @@ impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedTransmitBuild for DelayedMessageO
         match self {
             Self::Channel(channel) => channel.write_into(data),
             Self::Message(msg) => msg.write_into(data),
-            Self::Data(owned) => {
+            Self::Data(slice) => {
+                data.copy_from_slice(slice.as_ref());
+                slice.as_ref().len()
+            }
+            Self::OwnedData(owned) => {
                 data.copy_from_slice(&owned);
                 owned.len()
             }
@@ -347,13 +454,17 @@ pub(crate) mod tests {
     use super::*;
     use tracing::trace;
     use turn_server_proto::api::{TurnServerApi, TurnServerPollRet};
-    use turn_types::stun::{
-        attribute::{
-            AttributeStaticType, ErrorCode, MessageIntegrity, MessageIntegritySha256, Nonce, Realm,
-            Username, XorMappedAddress,
+    use turn_types::{
+        attribute::ConnectionId,
+        message::{CONNECT, CONNECTION_BIND},
+        stun::{
+            attribute::{
+                AttributeStaticType, ErrorCode, MessageIntegrity, MessageIntegritySha256, Nonce,
+                Realm, Username, XorMappedAddress,
+            },
+            message::{Message, MessageClass, MessageType, MessageWriteVec, Method, TransactionId},
+            prelude::{MessageWrite, MessageWriteExt},
         },
-        message::{Message, MessageType, MessageWriteVec, Method, TransactionId},
-        prelude::{MessageWrite, MessageWriteExt},
     };
     use turn_types::{
         attribute::{
@@ -481,12 +592,13 @@ pub(crate) mod tests {
         turn_alloc_addr: SocketAddr,
         peer_addr: SocketAddr,
         split_transmit_bytes: usize,
+        allocation_transport: TransportType,
     }
     impl TurnTestBuilder {
         pub(crate) fn build<
             A: TurnClientApi,
             S: TurnServerApi,
-            FClient: FnOnce(SocketAddr, SocketAddr, TurnCredentials) -> A,
+            FClient: FnOnce(SocketAddr, SocketAddr, TurnCredentials, TransportType) -> A,
             FServer: FnOnce(SocketAddr, String) -> S,
         >(
             self,
@@ -497,6 +609,7 @@ pub(crate) mod tests {
                 self.client_addr,
                 self.turn_listen_addr,
                 self.credentials.clone(),
+                self.allocation_transport,
             );
             let mut server = server(self.turn_listen_addr, self.realm);
             server.add_user(
@@ -510,11 +623,18 @@ pub(crate) mod tests {
                 turn_alloc_addr: self.turn_alloc_addr,
                 peer_addr: self.peer_addr,
                 split_transmit_bytes: self.split_transmit_bytes,
+                allocation_transport: self.allocation_transport,
+                local_tcp_socket: "127.0.0.1:9999".parse().unwrap(),
             }
         }
 
         pub(crate) fn split_transmit_bytes(mut self, bytes: usize) -> Self {
             self.split_transmit_bytes = bytes;
+            self
+        }
+
+        pub(crate) fn allocation_transport(mut self, allocation_transport: TransportType) -> Self {
+            self.allocation_transport = allocation_transport;
             self
         }
     }
@@ -526,6 +646,8 @@ pub(crate) mod tests {
         pub turn_alloc_addr: SocketAddr,
         pub peer_addr: SocketAddr,
         pub split_transmit_bytes: usize,
+        pub allocation_transport: TransportType,
+        pub local_tcp_socket: SocketAddr,
     }
 
     impl<A: TurnClientApi, S: TurnServerApi> TurnTest<A, S> {
@@ -539,6 +661,7 @@ pub(crate) mod tests {
                 turn_alloc_addr: "10.0.0.20:2000".parse().unwrap(),
                 peer_addr: "10.0.0.3:3000".parse().unwrap(),
                 split_transmit_bytes: 0,
+                allocation_transport: TransportType::Udp,
             }
         }
 
@@ -614,10 +737,11 @@ pub(crate) mod tests {
             assert!(msg.has_attribute(Username::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
             assert!(self.server.recv(transmit, now).is_none());
-            let TurnServerPollRet::AllocateSocketUdp {
+            let TurnServerPollRet::AllocateSocket {
                 transport,
-                local_addr: alloc_local_addr,
-                remote_addr: alloc_remote_addr,
+                listen_addr: alloc_local_addr,
+                client_addr: alloc_remote_addr,
+                allocation_transport,
                 family,
             } = self.server.poll(now)
             else {
@@ -626,10 +750,12 @@ pub(crate) mod tests {
             assert_eq!(transport, self.client.transport());
             assert_eq!(alloc_local_addr, self.server.listen_address());
             assert_eq!(alloc_remote_addr, self.client.local_addr());
-            self.server.allocated_udp_socket(
+            assert_eq!(allocation_transport, self.allocation_transport);
+            self.server.allocated_socket(
                 transport,
                 alloc_local_addr,
                 alloc_remote_addr,
+                allocation_transport,
                 family,
                 Ok(self.turn_alloc_addr),
                 now,
@@ -652,8 +778,10 @@ pub(crate) mod tests {
             assert!(self
                 .client
                 .relayed_addresses()
-                .any(|(transport, relayed)| transport == TransportType::Udp
-                    && relayed == self.turn_alloc_addr))
+                .any(
+                    |(transport, relayed)| transport == self.allocation_transport
+                        && relayed == self.turn_alloc_addr
+                ))
         }
 
         fn refresh(&mut self, now: Instant) {
@@ -688,8 +816,10 @@ pub(crate) mod tests {
             assert!(self
                 .client
                 .relayed_addresses()
-                .any(|(transport, relayed)| transport == TransportType::Udp
-                    && relayed == self.turn_alloc_addr))
+                .any(
+                    |(transport, relayed)| transport == self.allocation_transport
+                        && relayed == self.turn_alloc_addr
+                ))
         }
 
         fn delete_allocation(&mut self, now: Instant) {
@@ -730,13 +860,15 @@ pub(crate) mod tests {
             assert!(!self
                 .client
                 .relayed_addresses()
-                .any(|(transport, relayed)| transport == TransportType::Udp
-                    && relayed == self.turn_alloc_addr))
+                .any(
+                    |(transport, relayed)| transport == self.allocation_transport
+                        && relayed == self.turn_alloc_addr
+                ))
         }
 
         fn create_permission(&mut self, now: Instant) {
             self.client
-                .create_permission(TransportType::Udp, self.peer_addr.ip(), now)
+                .create_permission(self.allocation_transport, self.peer_addr.ip(), now)
                 .unwrap();
             let transmit = self.client.poll_transmit(now).unwrap();
             self.handle_create_permission(transmit, now);
@@ -787,13 +919,13 @@ pub(crate) mod tests {
         fn validate_client_permission_state(&self) {
             assert!(self
                 .client
-                .permissions(TransportType::Udp, self.turn_alloc_addr)
+                .permissions(self.allocation_transport, self.turn_alloc_addr)
                 .any(|perm_addr| perm_addr == self.peer_addr.ip()));
         }
 
         fn bind_channel(&mut self, now: Instant) {
             self.client
-                .bind_channel(TransportType::Udp, self.peer_addr, now)
+                .bind_channel(self.allocation_transport, self.peer_addr, now)
                 .unwrap();
             let transmit = self.client.poll_transmit(now).unwrap();
             self.handle_bind_channel(transmit, now);
@@ -821,7 +953,7 @@ pub(crate) mod tests {
             ));
             assert!(self
                 .client
-                .have_permission(TransportType::Udp, self.peer_addr.ip()))
+                .have_permission(self.allocation_transport, self.peer_addr.ip()))
         }
 
         fn sendrecv_data(&mut self, now: Instant) {
@@ -829,7 +961,7 @@ pub(crate) mod tests {
             let data = [4; 8];
             let transmit = self
                 .client
-                .send_to(TransportType::Udp, self.peer_addr, data, now)
+                .send_to(self.allocation_transport, self.peer_addr, data, now)
                 .unwrap()
                 .unwrap();
             assert!(matches!(
@@ -841,7 +973,7 @@ pub(crate) mod tests {
             assert_eq!(transmit.from, self.client.local_addr());
             assert_eq!(transmit.to, self.server.listen_address());
             let transmit = self.server.recv(transmit, now).unwrap();
-            assert_eq!(transmit.transport, TransportType::Udp);
+            assert_eq!(transmit.transport, self.allocation_transport);
             assert_eq!(transmit.from, self.turn_alloc_addr);
             assert_eq!(transmit.to, self.peer_addr);
             assert_eq!(transmit.build().data, data);
@@ -853,7 +985,7 @@ pub(crate) mod tests {
                 .recv(
                     Transmit::new(
                         sent_data,
-                        TransportType::Udp,
+                        self.allocation_transport,
                         self.peer_addr,
                         self.turn_alloc_addr,
                     ),
@@ -891,7 +1023,7 @@ pub(crate) mod tests {
         ) {
             let transmit = self
                 .client
-                .send_to(TransportType::Udp, self.peer_addr, to_peer, now)
+                .send_to(self.allocation_transport, self.peer_addr, to_peer, now)
                 .unwrap()
                 .unwrap();
             assert!(matches!(
@@ -908,7 +1040,7 @@ pub(crate) mod tests {
                 .map(|transmit| transmit.build())
                 .or_else(|| self.server.poll_transmit(now))
                 .unwrap();
-            assert_eq!(transmit.transport, TransportType::Udp);
+            assert_eq!(transmit.transport, self.allocation_transport);
             assert_eq!(transmit.from, self.turn_alloc_addr);
             assert_eq!(transmit.to, self.peer_addr);
             assert_eq!(transmit.data, to_peer);
@@ -919,7 +1051,7 @@ pub(crate) mod tests {
                 .recv(
                     Transmit::new(
                         from_peer,
-                        TransportType::Udp,
+                        self.allocation_transport,
                         self.peer_addr,
                         self.turn_alloc_addr,
                     ),
@@ -939,6 +1071,134 @@ pub(crate) mod tests {
             assert_eq!(peer_data.data(), from_peer);
             assert!(self.client.poll_recv(now).is_none());
         }
+
+        fn tcp_connect(&mut self, now: Instant) {
+            self.client.tcp_connect(self.peer_addr, now).unwrap();
+            let transmit = self.client.poll_transmit(now).unwrap();
+            assert_eq!(transmit.transport, self.client.transport());
+            assert_eq!(transmit.from, self.client.local_addr());
+            assert_eq!(transmit.to, self.server.listen_address());
+            let msg = Message::from_bytes(&transmit.data).unwrap();
+            assert!(msg.has_method(CONNECT));
+            assert!(self.server.recv(transmit, now).is_none());
+            let TurnServerPollRet::TcpConnect {
+                relayed_addr,
+                peer_addr,
+                listen_addr,
+                client_addr,
+            } = self.server.poll(now)
+            else {
+                unreachable!();
+            };
+            assert_eq!(peer_addr, self.peer_addr);
+            assert_eq!(listen_addr, self.server.listen_address());
+            assert_eq!(client_addr, self.client.local_addr());
+            self.server.tcp_connected(
+                relayed_addr,
+                peer_addr,
+                listen_addr,
+                client_addr,
+                Ok(relayed_addr),
+                now,
+            );
+            let transmit = self.server.poll_transmit(now).unwrap();
+            assert_eq!(transmit.from, self.server.listen_address());
+            assert_eq!(transmit.to, self.client.local_addr());
+            assert_eq!(transmit.transport, self.client.transport());
+            let msg = Message::from_bytes(&transmit.data).unwrap();
+            assert!(msg.has_method(CONNECT));
+            assert!(msg.has_class(MessageClass::Success));
+            let connection_id = msg.attribute::<ConnectionId>().unwrap().id();
+            assert!(matches!(
+                self.client.recv(transmit, now),
+                TurnRecvRet::Handled
+            ));
+            let TurnPollRet::AllocateTcpSocket {
+                id,
+                socket,
+                peer_addr,
+            } = self.client.poll(now)
+            else {
+                unreachable!();
+            };
+            assert_eq!(connection_id, id);
+            assert_eq!(socket.transport, TransportType::Tcp);
+            assert_eq!(socket.from, self.client.local_addr());
+            assert_eq!(socket.to, self.server.listen_address());
+            assert_eq!(peer_addr, self.peer_addr);
+            self.client
+                .allocated_tcp_socket(id, socket, peer_addr, Some(self.local_tcp_socket), now)
+                .unwrap();
+            let transmit = self.client.poll_transmit(now).unwrap();
+            assert_eq!(transmit.transport, TransportType::Tcp);
+            assert_eq!(transmit.from, self.local_tcp_socket);
+            assert_eq!(transmit.to, self.server.listen_address());
+            let msg = Message::from_bytes(&transmit.data).unwrap();
+            assert!(msg.has_method(CONNECTION_BIND));
+            assert_eq!(msg.attribute::<ConnectionId>().unwrap().id(), id);
+            let reply = self.server.recv(transmit, now).unwrap().build();
+            assert_eq!(reply.transport, TransportType::Tcp);
+            assert_eq!(reply.from, self.server.listen_address());
+            assert_eq!(reply.to, self.local_tcp_socket);
+            let msg = Message::from_bytes(&reply.data).unwrap();
+            assert!(msg.has_method(CONNECTION_BIND));
+            assert!(msg.has_class(MessageClass::Success));
+            assert!(matches!(self.client.recv(reply, now), TurnRecvRet::Handled));
+
+            assert!(matches!(
+                self.client.poll_event().unwrap(),
+                TurnEvent::TcpConnected(_peer_addr)
+            ));
+        }
+
+        fn tcp_alloc_sendrecv_data(&mut self, now: Instant) {
+            // client to peer
+            let data = [4; 8];
+            let transmit = self
+                .client
+                .send_to(self.allocation_transport, self.peer_addr, data, now)
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                transmit.data,
+                DelayedMessageOrChannelSend::Data(_)
+            ));
+            let transmit = transmit_send_build(transmit);
+            assert_eq!(transmit.transport, self.client.transport());
+            assert_eq!(transmit.from, self.local_tcp_socket);
+            assert_eq!(transmit.to, self.server.listen_address());
+            let transmit = self.server.recv(transmit, now).unwrap();
+            assert_eq!(transmit.transport, self.allocation_transport);
+            assert_eq!(transmit.from, self.turn_alloc_addr);
+            assert_eq!(transmit.to, self.peer_addr);
+            assert_eq!(transmit.build().data, data);
+
+            // peer to client
+            let sent_data = [5; 12];
+            let transmit = self
+                .server
+                .recv(
+                    Transmit::new(
+                        sent_data,
+                        self.allocation_transport,
+                        self.peer_addr,
+                        self.turn_alloc_addr,
+                    ),
+                    now,
+                )
+                .unwrap()
+                .build();
+            assert_eq!(transmit.transport, self.client.transport());
+            assert_eq!(transmit.from, self.server.listen_address());
+            assert_eq!(transmit.to, self.local_tcp_socket);
+            assert_eq!(&transmit.data, sent_data.as_slice());
+            let TurnRecvRet::PeerData(peer_data) = self.client_recv(transmit, now) else {
+                unreachable!();
+            };
+            assert_eq!(peer_data.peer, self.peer_addr);
+            assert_eq!(peer_data.as_ref(), sent_data);
+            assert!(self.client.poll_recv(now).is_none());
+        }
     }
 
     pub(crate) fn turn_allocate_permission<A: TurnClientApi, S: TurnServerApi>(
@@ -946,29 +1206,35 @@ pub(crate) mod tests {
         now: Instant,
     ) {
         test.allocate(now);
-        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
+        let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
             test.client.poll_event()
         else {
             unreachable!();
         };
+        assert_eq!(transport, test.allocation_transport);
         assert_eq!(relayed_address, test.turn_alloc_addr);
         test.create_permission(now);
-        let Some(TurnEvent::PermissionCreated(TransportType::Udp, permission_ip)) =
-            test.client.poll_event()
+        let Some(TurnEvent::PermissionCreated(transport, permission_ip)) = test.client.poll_event()
         else {
             unreachable!();
         };
+        assert_eq!(transport, test.allocation_transport);
         assert_eq!(permission_ip, test.peer_addr.ip());
 
-        test.sendrecv_data(now);
-        test.bind_channel(now);
-        let Some(TurnEvent::ChannelCreated(TransportType::Udp, channel_addr)) =
-            test.client.poll_event()
-        else {
-            unreachable!();
-        };
-        assert_eq!(channel_addr, test.peer_addr);
-        test.sendrecv_data_channel(now);
+        if test.allocation_transport == TransportType::Tcp {
+            test.tcp_connect(now);
+            test.tcp_alloc_sendrecv_data(now);
+        } else {
+            test.sendrecv_data(now);
+            test.bind_channel(now);
+            let Some(TurnEvent::ChannelCreated(transport, channel_addr)) = test.client.poll_event()
+            else {
+                unreachable!();
+            };
+            assert_eq!(transport, test.allocation_transport);
+            assert_eq!(channel_addr, test.peer_addr);
+            test.sendrecv_data_channel(now);
+        }
     }
 
     pub(crate) fn turn_allocate_expire_server<A: TurnClientApi, S: TurnServerApi>(
@@ -979,14 +1245,15 @@ pub(crate) mod tests {
             .set_nonce_expiry_duration(Duration::from_secs(9000));
 
         test.allocate(now);
-        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
+        let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
             test.client.poll_event()
         else {
             unreachable!();
         };
+        assert_eq!(transport, test.allocation_transport);
         assert_eq!(relayed_address, test.turn_alloc_addr);
         test.client
-            .create_permission(TransportType::Udp, test.peer_addr.ip(), now)
+            .create_permission(test.allocation_transport, test.peer_addr.ip(), now)
             .unwrap();
         let transmit = test.client.poll_transmit(now).unwrap();
         let now = now + Duration::from_secs(3000);
@@ -998,6 +1265,9 @@ pub(crate) mod tests {
         assert_eq!(err.code(), ErrorCode::ALLOCATION_MISMATCH);
         let ret = test.client.recv(transmit, now);
         assert!(matches!(ret, TurnRecvRet::Handled));
+        assert!(
+            matches!(test.server.poll(now), TurnServerPollRet::SocketClose { transport, listen_addr } if transport == test.allocation_transport && listen_addr == test.turn_alloc_addr)
+        );
     }
 
     pub(crate) fn turn_allocate_expire_client<A: TurnClientApi, S: TurnServerApi>(
@@ -1005,19 +1275,23 @@ pub(crate) mod tests {
         now: Instant,
     ) {
         test.allocate(now);
-        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
+        let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
             test.client.poll_event()
         else {
             unreachable!();
         };
+        assert_eq!(transport, test.allocation_transport);
         assert_eq!(relayed_address, test.turn_alloc_addr);
         let now = now + Duration::from_secs(3000);
         let Err(CreatePermissionError::NoAllocation) =
             test.client
-                .create_permission(TransportType::Udp, test.peer_addr.ip(), now)
+                .create_permission(test.allocation_transport, test.peer_addr.ip(), now)
         else {
             unreachable!();
         };
+        assert!(
+            matches!(test.server.poll(now), TurnServerPollRet::SocketClose { transport, listen_addr } if transport == test.allocation_transport && listen_addr == test.turn_alloc_addr)
+        );
     }
 
     pub(crate) fn turn_allocate_refresh<A: TurnClientApi, S: TurnServerApi>(
@@ -1025,11 +1299,12 @@ pub(crate) mod tests {
         now: Instant,
     ) {
         test.allocate(now);
-        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
+        let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
             test.client.poll_event()
         else {
             unreachable!();
         };
+        assert_eq!(transport, test.allocation_transport);
         assert_eq!(relayed_address, test.turn_alloc_addr);
 
         let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
@@ -1040,11 +1315,11 @@ pub(crate) mod tests {
 
         test.refresh(expiry);
         test.create_permission(expiry);
-        let Some(TurnEvent::PermissionCreated(TransportType::Udp, permission_ip)) =
-            test.client.poll_event()
+        let Some(TurnEvent::PermissionCreated(transport, permission_ip)) = test.client.poll_event()
         else {
             unreachable!();
         };
+        assert_eq!(transport, test.allocation_transport);
         assert_eq!(permission_ip, test.peer_addr.ip());
         test.sendrecv_data(expiry);
     }
@@ -1055,10 +1330,13 @@ pub(crate) mod tests {
     ) {
         test.allocate(now);
         test.delete_allocation(now);
+        assert!(
+            matches!(test.server.poll(now), TurnServerPollRet::SocketClose { transport, listen_addr } if transport == test.allocation_transport && listen_addr == test.turn_alloc_addr)
+        );
 
         let Err(CreatePermissionError::NoAllocation) =
             test.client
-                .create_permission(TransportType::Udp, test.peer_addr.ip(), now)
+                .create_permission(test.allocation_transport, test.peer_addr.ip(), now)
         else {
             unreachable!();
         };
@@ -1069,18 +1347,19 @@ pub(crate) mod tests {
         now: Instant,
     ) {
         test.allocate(now);
-        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
+        let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
             test.client.poll_event()
         else {
             unreachable!();
         };
+        assert_eq!(transport, test.allocation_transport);
         assert_eq!(relayed_address, test.turn_alloc_addr);
         test.bind_channel(now);
-        let Some(TurnEvent::PermissionCreated(TransportType::Udp, permission_ip)) =
-            test.client.poll_event()
+        let Some(TurnEvent::PermissionCreated(transport, permission_ip)) = test.client.poll_event()
         else {
             unreachable!();
         };
+        assert_eq!(transport, test.allocation_transport);
         assert_eq!(permission_ip, test.peer_addr.ip());
         test.sendrecv_data_channel(now);
     }
@@ -1091,18 +1370,19 @@ pub(crate) mod tests {
     ) {
         // tests that sending stun messages can be passed through the turn server
         test.allocate(now);
-        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
+        let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
             test.client.poll_event()
         else {
             unreachable!();
         };
+        assert_eq!(transport, test.allocation_transport);
         assert_eq!(relayed_address, test.turn_alloc_addr);
         test.bind_channel(now);
-        let Some(TurnEvent::PermissionCreated(TransportType::Udp, permission_ip)) =
-            test.client.poll_event()
+        let Some(TurnEvent::PermissionCreated(transport, permission_ip)) = test.client.poll_event()
         else {
             unreachable!();
         };
+        assert_eq!(transport, test.allocation_transport);
         assert_eq!(permission_ip, test.peer_addr.ip());
 
         let mut msg = Message::builder(
@@ -1124,19 +1404,20 @@ pub(crate) mod tests {
         now: Instant,
     ) {
         test.allocate(now);
-        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
+        let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
             test.client.poll_event()
         else {
             unreachable!();
         };
+        assert_eq!(transport, test.allocation_transport);
         assert_eq!(relayed_address, test.turn_alloc_addr);
 
         test.create_permission(now);
-        let Some(TurnEvent::PermissionCreated(TransportType::Udp, permission_ip)) =
-            test.client.poll_event()
+        let Some(TurnEvent::PermissionCreated(transport, permission_ip)) = test.client.poll_event()
         else {
             unreachable!();
         };
+        assert_eq!(transport, test.allocation_transport);
         assert_eq!(permission_ip, test.peer_addr.ip());
 
         let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
@@ -1175,19 +1456,20 @@ pub(crate) mod tests {
         now: Instant,
     ) {
         test.allocate(now);
-        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
+        let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
             test.client.poll_event()
         else {
             unreachable!();
         };
+        assert_eq!(transport, test.allocation_transport);
         assert_eq!(relayed_address, test.turn_alloc_addr);
 
         test.create_permission(now);
-        let Some(TurnEvent::PermissionCreated(TransportType::Udp, permission_ip)) =
-            test.client.poll_event()
+        let Some(TurnEvent::PermissionCreated(transport, permission_ip)) = test.client.poll_event()
         else {
             unreachable!();
         };
+        assert_eq!(transport, test.allocation_transport);
         assert_eq!(permission_ip, test.peer_addr.ip());
 
         let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
@@ -1223,7 +1505,7 @@ pub(crate) mod tests {
 
         assert!(!test
             .client
-            .have_permission(TransportType::Udp, test.peer_addr.ip()));
+            .have_permission(test.allocation_transport, test.peer_addr.ip()));
         let Some(TurnEvent::PermissionCreateFailed(_transport, ip)) = test.client.poll_event()
         else {
             unreachable!();
@@ -1236,25 +1518,26 @@ pub(crate) mod tests {
         now: Instant,
     ) {
         test.allocate(now);
-        let Some(TurnEvent::AllocationCreated(TransportType::Udp, relayed_address)) =
+        let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
             test.client.poll_event()
         else {
             unreachable!();
         };
+        assert_eq!(transport, test.allocation_transport);
         assert_eq!(relayed_address, test.turn_alloc_addr);
 
         test.bind_channel(now);
-        let Some(TurnEvent::PermissionCreated(TransportType::Udp, permission_ip)) =
-            test.client.poll_event()
+        let Some(TurnEvent::PermissionCreated(transport, permission_ip)) = test.client.poll_event()
         else {
             unreachable!();
         };
+        assert_eq!(transport, test.allocation_transport);
         assert_eq!(permission_ip, test.peer_addr.ip());
-        let Some(TurnEvent::ChannelCreated(TransportType::Udp, channel_addr)) =
-            test.client.poll_event()
+        let Some(TurnEvent::ChannelCreated(transport, channel_addr)) = test.client.poll_event()
         else {
             unreachable!();
         };
+        assert_eq!(transport, test.allocation_transport);
         assert_eq!(channel_addr, test.peer_addr);
 
         // two permission refreshes

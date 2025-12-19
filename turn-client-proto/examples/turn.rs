@@ -64,6 +64,7 @@
 use rustls::pki_types::ServerName;
 use rustls::ClientConfig;
 use rustls_platform_verifier::ConfigVerifierExt;
+use turn_client_proto::api::TcpConnectError;
 use turn_client_proto::client::TurnClient;
 use turn_client_proto::openssl::TurnClientOpensslTls;
 use turn_client_proto::prelude::*;
@@ -82,6 +83,7 @@ use turn_types::AddressFamily;
 use clap::{Parser, ValueEnum};
 
 use sans_io_time::Instant;
+use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::mpsc::SyncSender;
@@ -124,6 +126,7 @@ trait Client<T: AsRef<[u8]> + std::fmt::Debug> {
         peer_addr: SocketAddr,
         data: T,
     ) -> Result<(), SendError>;
+    fn tcp_connect(&self, peer_addr: SocketAddr) -> Result<(), TcpConnectError>;
 }
 
 #[derive(Clone, Debug)]
@@ -205,6 +208,18 @@ fn udp_send_thread(
             TurnPollRet::Closed => {
                 break;
             }
+            TurnPollRet::TcpClose {
+                local_addr: _,
+                remote_addr: _,
+            }
+            | TurnPollRet::AllocateTcpSocket {
+                id: _,
+                socket: _,
+                peer_addr: _,
+            } => {
+                // UDP connections to the TURN server cannot create TCP allocations/sockets.
+                unreachable!();
+            }
         };
 
         if let Some(event) = client.poll_event() {
@@ -270,6 +285,7 @@ impl ClientUdp {
             local_addr,
             remote_addr,
             credentials,
+            TransportType::Udp,
             allocation_families,
             ssl_context.build(),
         );
@@ -333,19 +349,23 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for ClientUdp {
         self.socket.send_to(&transmit.data, transmit.to).unwrap();
         Ok(())
     }
+
+    fn tcp_connect(&self, peer_addr: SocketAddr) -> Result<(), TcpConnectError> {
+        let mut inner = self.inner.0.lock().unwrap();
+        inner.tcp_connect(peer_addr, Instant::from_std(self.base_instant))
+    }
 }
 
 #[derive(Clone, Debug)]
 struct ClientTcp {
     base_instant: std::time::Instant,
-    send_sender: SyncSender<Data<'static>>,
-    inner: Arc<(Mutex<TurnClient>, Condvar)>,
+    inner: Arc<(Mutex<ClientTcpInner>, Condvar)>,
 }
 
 fn tcp_recv_thread(
     base_instant: std::time::Instant,
     mut tcp: TcpStream,
-    inner: Arc<(Mutex<TurnClient>, Condvar)>,
+    inner: Arc<(Mutex<ClientTcpInner>, Condvar)>,
 ) {
     std::thread::spawn(move || loop {
         let mut data = [0; 2048];
@@ -353,9 +373,9 @@ fn tcp_recv_thread(
             break;
         };
         {
-            let mut client = inner.0.lock().unwrap();
+            let mut inner_guard = inner.0.lock().unwrap();
             let now = Instant::from_std(base_instant);
-            let ret = client.recv(
+            let ret = inner_guard.client.recv(
                 Transmit::new(
                     &data[..size],
                     TransportType::Tcp,
@@ -400,12 +420,7 @@ fn tcp_recv_thread(
     });
 }
 
-fn tcp_send_thread(
-    base_instant: std::time::Instant,
-    mut socket: TcpStream,
-    events_sender: SyncSender<TurnEvent>,
-    inner: Arc<(Mutex<TurnClient>, Condvar)>,
-) -> SyncSender<Data<'static>> {
+fn tcp_send_thread(mut socket: TcpStream) -> SyncSender<Data<'static>> {
     let (send_sender, send_recv) = std::sync::mpsc::sync_channel::<Data<'static>>(8);
     std::thread::spawn(move || loop {
         while let Ok(recv) = send_recv.recv() {
@@ -414,33 +429,87 @@ fn tcp_send_thread(
         }
     });
 
+    send_sender
+}
+
+#[derive(Debug)]
+struct ClientTcpInner {
+    client: TurnClient,
+    socket_senders: BTreeMap<SocketAddr, SyncSender<Data<'static>>>,
+}
+
+fn tcp_send_loop(
+    base_instant: std::time::Instant,
+    events_sender: SyncSender<TurnEvent>,
+    inner: Arc<(Mutex<ClientTcpInner>, Condvar)>,
+) {
     let inner_s = inner.clone();
-    let sender = send_sender.clone();
     std::thread::spawn(move || loop {
         let now = Instant::from_std(base_instant);
-        let mut client = inner_s.0.lock().unwrap();
-        let lowest_wait = match client.poll(now) {
+        let mut inner = inner_s.0.lock().unwrap();
+        let lowest_wait = match inner.client.poll(now) {
             TurnPollRet::WaitUntil(wait) => wait,
             TurnPollRet::Closed => {
                 break;
             }
+            TurnPollRet::TcpClose {
+                local_addr,
+                remote_addr: _,
+            } => {
+                if let Some(sender) = inner.socket_senders.remove(&local_addr) {
+                    sender
+                        .send(Data::Owned(Vec::new().into_boxed_slice().into()))
+                        .unwrap();
+                }
+                continue;
+            }
+            TurnPollRet::AllocateTcpSocket {
+                id,
+                socket,
+                peer_addr,
+            } => {
+                // TODO: palm this off to a separate thread so polling the client is not blocked
+                let tcp = TcpStream::connect_timeout(&socket.to, std::time::Duration::from_secs(5))
+                    .inspect_err(|e| {
+                        eprintln!("Failed to open TCP connection to {peer_addr}: {e:?}")
+                    })
+                    .ok();
+                let local_addr = tcp.as_ref().and_then(|s| s.local_addr().ok());
+                if let Some((tcp, local_addr)) = tcp.zip(local_addr) {
+                    tcp_recv_thread(base_instant, tcp.try_clone().unwrap(), inner_s.clone());
+                    let sender = tcp_send_thread(tcp);
+                    inner.socket_senders.insert(local_addr, sender);
+                }
+                inner
+                    .client
+                    .allocated_tcp_socket(
+                        id,
+                        socket,
+                        peer_addr,
+                        local_addr,
+                        Instant::from_std(base_instant),
+                    )
+                    .unwrap();
+                continue;
+            }
         };
 
-        if let Some(event) = client.poll_event() {
+        if let Some(event) = inner.client.poll_event() {
             events_sender.send(event).unwrap();
         }
         let mut sent = false;
-        while let Some(transmit) = client.poll_transmit(now) {
+        while let Some(transmit) = inner.client.poll_transmit(now) {
+            let Some(sender) = inner.socket_senders.get(&transmit.from) else {
+                continue;
+            };
             sent = true;
             sender.send(transmit.data.into_owned()).unwrap();
         }
         if sent {
             continue;
         }
-        let _ = inner_s.1.wait_timeout(client, lowest_wait - now);
+        let _ = inner_s.1.wait_timeout(inner, lowest_wait - now);
     });
-
-    send_sender
 }
 
 impl ClientTcp {
@@ -448,31 +517,46 @@ impl ClientTcp {
         socket: TcpStream,
         to: SocketAddr,
         credentials: TurnCredentials,
+        allocation_transport: TransportType,
         allocation_families: &[AddressFamily],
         events_sender: SyncSender<TurnEvent>,
     ) -> Self {
         let base_instant = std::time::Instant::now();
         let local_addr = socket.local_addr().unwrap();
         let remote_addr = to;
-        let client =
-            TurnClientTcp::allocate(local_addr, remote_addr, credentials, allocation_families);
-        let inner = Arc::new((Mutex::new(client.into()), Condvar::new()));
-
+        let client = TurnClientTcp::allocate(
+            local_addr,
+            remote_addr,
+            credentials,
+            allocation_transport,
+            allocation_families,
+        );
         let socket_clone = socket.try_clone().unwrap();
+        let local_addr = socket.local_addr().unwrap();
+        let send_sender = tcp_send_thread(socket);
+        let inner = Arc::new((
+            Mutex::new(ClientTcpInner {
+                client: client.into(),
+                socket_senders: BTreeMap::from([(local_addr, send_sender.clone())]),
+            }),
+            Condvar::new(),
+        ));
+
         tcp_recv_thread(base_instant, socket_clone, inner.clone());
-        let send_sender = tcp_send_thread(base_instant, socket, events_sender, inner.clone());
+        tcp_send_loop(base_instant, events_sender, inner.clone());
 
         Self {
             base_instant,
-            send_sender,
             inner,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_rustls(
         socket: TcpStream,
         to: SocketAddr,
         credentials: TurnCredentials,
+        allocation_transport: TransportType,
         allocation_families: &[AddressFamily],
         server_name: ServerName<'static>,
         events_sender: SyncSender<TurnEvent>,
@@ -495,19 +579,27 @@ impl ClientTcp {
             local_addr,
             remote_addr,
             credentials,
+            allocation_transport,
             allocation_families,
             server_name,
             Arc::new(config),
         );
-        let inner = Arc::new((Mutex::new(client.into()), Condvar::new()));
-
         let socket_clone = socket.try_clone().unwrap();
+        let local_addr = socket.local_addr().unwrap();
+        let send_sender = tcp_send_thread(socket);
+        let inner = Arc::new((
+            Mutex::new(ClientTcpInner {
+                client: client.into(),
+                socket_senders: BTreeMap::from([(local_addr, send_sender.clone())]),
+            }),
+            Condvar::new(),
+        ));
+
         tcp_recv_thread(base_instant, socket_clone, inner.clone());
-        let send_sender = tcp_send_thread(base_instant, socket, events_sender, inner.clone());
+        tcp_send_loop(base_instant, events_sender, inner.clone());
 
         Self {
             base_instant,
-            send_sender,
             inner,
         }
     }
@@ -516,6 +608,7 @@ impl ClientTcp {
         socket: TcpStream,
         to: SocketAddr,
         credentials: TurnCredentials,
+        allocation_transport: TransportType,
         allocation_families: &[AddressFamily],
         events_sender: SyncSender<TurnEvent>,
         insecure_tls: bool,
@@ -536,18 +629,26 @@ impl ClientTcp {
             local_addr,
             remote_addr,
             credentials,
+            allocation_transport,
             allocation_families,
             ssl_context.build(),
         );
-        let inner = Arc::new((Mutex::new(client.into()), Condvar::new()));
-
         let socket_clone = socket.try_clone().unwrap();
+        let local_addr = socket.local_addr().unwrap();
+        let send_sender = tcp_send_thread(socket);
+        let inner = Arc::new((
+            Mutex::new(ClientTcpInner {
+                client: client.into(),
+                socket_senders: BTreeMap::from([(local_addr, send_sender.clone())]),
+            }),
+            Condvar::new(),
+        ));
+
         tcp_recv_thread(base_instant, socket_clone, inner.clone());
-        let send_sender = tcp_send_thread(base_instant, socket, events_sender, inner.clone());
+        tcp_send_loop(base_instant, events_sender, inner.clone());
 
         Self {
             base_instant,
-            send_sender,
             inner,
         }
     }
@@ -555,8 +656,8 @@ impl ClientTcp {
 
 impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for ClientTcp {
     fn close(&self) {
-        let mut client = self.inner.0.lock().unwrap();
-        let _ = client.delete(Instant::from_std(self.base_instant));
+        let mut inner = self.inner.0.lock().unwrap();
+        let _ = inner.client.delete(Instant::from_std(self.base_instant));
 
         self.inner.1.notify_one();
         // TODO: actually close the TCP connection.
@@ -567,8 +668,12 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for ClientTcp {
         transport: TransportType,
         peer_addr: IpAddr,
     ) -> Result<(), CreatePermissionError> {
-        let mut client = self.inner.0.lock().unwrap();
-        client.create_permission(transport, peer_addr, Instant::from_std(self.base_instant))?;
+        let mut inner = self.inner.0.lock().unwrap();
+        inner.client.create_permission(
+            transport,
+            peer_addr,
+            Instant::from_std(self.base_instant),
+        )?;
         self.inner.1.notify_one();
         Ok(())
     }
@@ -579,9 +684,10 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for ClientTcp {
         peer_addr: SocketAddr,
         data: T,
     ) -> Result<(), SendError> {
-        let transmit = {
-            let mut client = self.inner.0.lock().unwrap();
-            let transmit = client
+        let (transmit, sender) = {
+            let mut inner = self.inner.0.lock().unwrap();
+            let transmit = inner
+                .client
                 .send_to(
                     transport,
                     peer_addr,
@@ -589,15 +695,26 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for ClientTcp {
                     Instant::from_std(self.base_instant),
                 )?
                 .unwrap();
-            Transmit::new(
+            let Some(sender) = inner.socket_senders.get(&transmit.from) else {
+                return Ok(());
+            };
+            let transmit = Transmit::new(
                 Data::from(transmit.data.build().into_boxed_slice()).into_owned(),
                 transmit.transport,
                 transmit.from,
                 transmit.to,
-            )
+            );
+            (transmit, sender.clone())
         };
-        self.send_sender.send(transmit.data).unwrap();
+        sender.send(transmit.data.into_owned()).unwrap();
         Ok(())
+    }
+
+    fn tcp_connect(&self, peer_addr: SocketAddr) -> Result<(), TcpConnectError> {
+        let mut inner = self.inner.0.lock().unwrap();
+        inner
+            .client
+            .tcp_connect(peer_addr, Instant::from_std(self.base_instant))
     }
 }
 
@@ -667,14 +784,6 @@ mod danger {
 enum Transport {
     Udp,
     Tcp,
-    Tls,
-    Dtls,
-}
-
-impl Transport {
-    fn is_tls(&self) -> bool {
-        matches!(self, Self::Tls | Self::Dtls)
-    }
 }
 
 impl From<Transport> for TransportType {
@@ -682,8 +791,6 @@ impl From<Transport> for TransportType {
         match value {
             Transport::Udp => Self::Udp,
             Transport::Tcp => Self::Tcp,
-            Transport::Tls => Self::Tcp,
-            Transport::Dtls => Self::Udp,
         }
     }
 }
@@ -707,6 +814,11 @@ struct Cli {
     transport: Transport,
     #[arg(
         long,
+        help = "Whether to encrypt the communication with the TURN server using (D)TLS"
+    )]
+    use_tls: bool,
+    #[arg(
+        long,
         value_enum,
         default_value = "rustls",
         help = "The TLS Api to use when accessing the server using (D)TLS"
@@ -719,6 +831,13 @@ struct Cli {
         help = "The network address of the turn server to connect to"
     )]
     server: String,
+    #[arg(
+        long,
+        value_enum,
+        default_value = "udp",
+        help = "The network transport to use when connecting to the TURN server"
+    )]
+    allocation_transport: Transport,
     #[arg(
         short,
         long,
@@ -757,11 +876,28 @@ struct Cli {
     ipv6: bool,
 }
 
+fn send_loop(
+    client: &dyn Client<String>,
+    transport: TransportType,
+    peer: SocketAddr,
+    count: u64,
+    delay: u64,
+) {
+    for i in 0..count {
+        let data = format!("Hello from turn {}s.\n", i * delay);
+        println!("sending {data:?} to {peer}");
+        client.send(transport, peer, data).unwrap();
+        if i + 1 != count {
+            std::thread::sleep(std::time::Duration::from_secs(delay));
+        }
+    }
+}
+
 fn main() -> io::Result<()> {
     init_logs();
 
     let cli = Cli::parse();
-    let is_tls = cli.transport.is_tls();
+    let use_tls = cli.use_tls;
     let transport: TransportType = cli.transport.into();
     let credentials = TurnCredentials::new(&cli.user, &cli.password);
     let (events_sender, events_recv) = std::sync::mpsc::sync_channel(8);
@@ -779,6 +915,10 @@ fn main() -> io::Result<()> {
         cli.server.to_socket_addrs().unwrap().next().unwrap()
     });
 
+    if cli.allocation_transport == Transport::Tcp && cli.transport != Transport::Tcp {
+        panic!("TURN-TCP allocations can only be created with a TCP based connection to the TURN server. Use `--transport tcp`.");
+    }
+
     let client = match transport {
         TransportType::Udp => {
             let socket = if server.is_ipv4() {
@@ -790,7 +930,7 @@ fn main() -> io::Result<()> {
                 "Allocated UDP socket with local address {}",
                 socket.local_addr().unwrap()
             );
-            if is_tls {
+            if use_tls {
                 match cli.tls_api {
                     TlsApi::Rustls => panic!("DTLS over UDP is not currently supported using Rustls. Use openssl instead"),
                     TlsApi::Openssl => {
@@ -818,7 +958,7 @@ fn main() -> io::Result<()> {
         }
         TransportType::Tcp => {
             let socket = TcpStream::connect(server).unwrap();
-            if is_tls {
+            if use_tls {
                 let server_name = if was_dns {
                     let dns_name = cli.server.split(":").next().unwrap().to_string();
                     dns_name.try_into().unwrap()
@@ -831,6 +971,7 @@ fn main() -> io::Result<()> {
                             socket,
                             server,
                             credentials,
+                            cli.allocation_transport.into(),
                             &address_families,
                             server_name,
                             events_sender,
@@ -843,6 +984,7 @@ fn main() -> io::Result<()> {
                             socket,
                             server,
                             credentials,
+                            cli.allocation_transport.into(),
                             &address_families,
                             //server_name,
                             events_sender,
@@ -856,6 +998,7 @@ fn main() -> io::Result<()> {
                     socket,
                     server,
                     credentials,
+                    cli.allocation_transport.into(),
                     &address_families,
                     events_sender,
                 );
@@ -868,10 +1011,10 @@ fn main() -> io::Result<()> {
 
     while let Ok(event) = events_recv.recv() {
         match event {
-            TurnEvent::AllocationCreated(_relayed_transport, relayed) => {
+            TurnEvent::AllocationCreated(relayed_transport, relayed) => {
                 if relayed.is_ipv4() == peer_addr.is_ipv4() {
                     client
-                        .create_permission(TransportType::Udp, peer_addr.ip())
+                        .create_permission(relayed_transport, peer_addr.ip())
                         .unwrap();
                 }
             }
@@ -881,17 +1024,15 @@ fn main() -> io::Result<()> {
                     client.close();
                 }
             }
-            TurnEvent::PermissionCreated(transport, _peer_addr) => {
-                for i in 0..cli.count {
-                    let data = format!("Hello from turn {}s.\n", i * cli.delay);
-                    println!("sending {data:?} to {peer_addr}");
-                    client.send(transport, peer_addr, data).unwrap();
-                    if i + 1 != cli.count {
-                        std::thread::sleep(std::time::Duration::from_secs(cli.delay));
-                    }
+            TurnEvent::PermissionCreated(transport, _peer_addr) => match cli.allocation_transport {
+                Transport::Tcp => {
+                    client.tcp_connect(peer_addr).unwrap();
                 }
-                client.close();
-            }
+                Transport::Udp => {
+                    send_loop(client.as_ref(), transport, peer_addr, cli.count, cli.delay);
+                    client.close();
+                }
+            },
             TurnEvent::PermissionCreateFailed(transport, peer_addr) => {
                 error!("Permission create failed for {transport:?}, {peer_addr}");
                 client.close()
@@ -901,6 +1042,15 @@ fn main() -> io::Result<()> {
             }
             TurnEvent::ChannelCreateFailed(transport, peer_addr) => {
                 error!("Channel create failed for {transport:?}, {peer_addr}");
+                client.close();
+            }
+            TurnEvent::TcpConnected(peer_addr) => {
+                println!("TCP data connection to {peer_addr} has been completed");
+                send_loop(client.as_ref(), transport, peer_addr, cli.count, cli.delay);
+                client.close();
+            }
+            TurnEvent::TcpConnectFailed(peer_addr) => {
+                error!("TCP data connection to {peer_addr} has failed");
                 client.close();
             }
         }

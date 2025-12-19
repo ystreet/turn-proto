@@ -63,19 +63,21 @@ impl<T: TurnClientApi> TurnTest<T> {
         ));
         let transmit = self.client.poll_transmit(now).unwrap();
         assert!(self.server.recv(transmit, now).is_none());
-        let TurnServerPollRet::AllocateSocketUdp {
+        let TurnServerPollRet::AllocateSocket {
             transport: _,
-            local_addr,
-            remote_addr,
+            listen_addr,
+            client_addr,
+            allocation_transport,
             family,
         } = self.server.poll(now)
         else {
             unreachable!();
         };
-        self.server.allocated_udp_socket(
+        self.server.allocated_socket(
             TransportType::Udp,
-            local_addr,
-            remote_addr,
+            listen_addr,
+            client_addr,
+            allocation_transport,
             family,
             Ok(self.relayed_addr),
             now,

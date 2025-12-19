@@ -19,7 +19,9 @@ use turn_types::prelude::DelayedTransmitBuild;
 use turn_types::transmit::TransmitBuild;
 use turn_types::AddressFamily;
 
-use openssl::ssl::{HandshakeError, MidHandshakeSslStream, Ssl, SslContext, SslStream};
+use openssl::ssl::{
+    HandshakeError, MidHandshakeSslStream, ShutdownState, Ssl, SslContext, SslStream,
+};
 use stun_proto::agent::Transmit;
 use stun_proto::Instant;
 use tracing::{info, trace, warn};
@@ -35,7 +37,15 @@ use crate::server::TurnServer;
 pub struct OpensslTurnServer {
     server: TurnServer,
     ssl_context: SslContext,
-    connections: Vec<(SocketAddr, HandshakeState)>,
+    clients: Vec<Client>,
+}
+
+#[derive(Debug)]
+struct Client {
+    transport: TransportType,
+    client_addr: SocketAddr,
+    tls: HandshakeState,
+    shutdown: ShutdownState,
 }
 
 #[derive(Debug)]
@@ -164,7 +174,7 @@ impl OpensslTurnServer {
         Self {
             server: TurnServer::new(transport, listen_addr, realm),
             ssl_context,
-            connections: vec![],
+            clients: vec![],
         }
     }
 }
@@ -203,27 +213,33 @@ impl TurnServerApi for OpensslTurnServer {
         now: Instant,
     ) -> Option<TransmitBuild<DelayedMessageOrChannelSend<T>>> {
         let listen_address = self.listen_address();
-        if transmit.transport == TransportType::Tcp && transmit.to == listen_address {
+        if transmit.to == listen_address {
             trace!("receiving TLS data: {:x?}", transmit.data.as_ref());
             // incoming client
-            let (client_addr, conn) = match self
-                .connections
+            let client = match self
+                .clients
                 .iter_mut()
-                .find(|(client_addr, _conn)| *client_addr == transmit.from)
+                .find(|client| client.client_addr == transmit.from)
             {
-                Some((client_addr, conn)) => (*client_addr, conn),
+                Some(client) => client,
                 None => {
-                    let len = self.connections.len();
+                    let len = self.clients.len();
                     let ssl = Ssl::new(&self.ssl_context).expect("Cannot create ssl structure");
-                    self.connections
-                        .push((transmit.from, HandshakeState::Init(ssl, OsslBio::default())));
-                    info!("new connection from {}", transmit.from);
-                    let ret = &mut self.connections[len];
-                    (ret.0, &mut ret.1)
+                    self.clients.push(Client {
+                        transport: transmit.transport,
+                        client_addr: transmit.from,
+                        tls: HandshakeState::Init(ssl, OsslBio::default()),
+                        shutdown: ShutdownState::empty(),
+                    });
+                    info!(
+                        "new connection from {} {}",
+                        transmit.transport, transmit.from
+                    );
+                    &mut self.clients[len]
                 }
             };
-            conn.inner_mut().push_incoming(transmit.data.as_ref());
-            let stream = match conn.complete() {
+            client.tls.inner_mut().push_incoming(transmit.data.as_ref());
+            let stream = match client.tls.complete() {
                 Ok(s) => s,
                 Err(e) => {
                     if e.kind() != std::io::ErrorKind::WouldBlock {
@@ -238,11 +254,29 @@ impl TurnServerApi for OpensslTurnServer {
                 Ok(len) => len,
                 Err(e) => {
                     if e.kind() != std::io::ErrorKind::WouldBlock {
-                        tracing::warn!("Error: {e}");
+                        warn!("Error: {e}");
                     }
                     return None;
                 }
             };
+            warn!("received: {len} plaintext bytes");
+            if len == 0 {
+                let pre_shutdown = stream.get_shutdown();
+                let _ = stream.shutdown();
+                client.shutdown = stream.get_shutdown();
+                if !pre_shutdown.contains(ShutdownState::SENT) {
+                    return stream.get_mut().pop_outgoing().map(|data| {
+                        TransmitBuild::new(
+                            DelayedMessageOrChannelSend::Owned(data),
+                            transmit.transport,
+                            listen_address,
+                            client.client_addr,
+                        )
+                    });
+                } else {
+                    return None;
+                }
+            }
             plaintext.resize(len, 0);
 
             let transmit = self.server.recv(
@@ -250,18 +284,15 @@ impl TurnServerApi for OpensslTurnServer {
                 now,
             )?;
 
-            if transmit.transport == TransportType::Tcp
-                && transmit.from == listen_address
-                && transmit.to == client_addr
-            {
+            if transmit.from == listen_address && transmit.to == client.client_addr {
                 let plaintext = transmit.data.build();
                 stream.write_all(&plaintext).unwrap();
                 stream.get_mut().pop_outgoing().map(|data| {
                     TransmitBuild::new(
                         DelayedMessageOrChannelSend::Owned(data),
-                        TransportType::Tcp,
+                        transmit.transport,
                         listen_address,
-                        client_addr,
+                        client.client_addr,
                     )
                 })
             } else {
@@ -275,17 +306,17 @@ impl TurnServerApi for OpensslTurnServer {
             }
         } else if let Some(transmit) = self.server.recv(transmit, now) {
             // incoming allocated address
-            if transmit.transport == TransportType::Tcp && transmit.from == listen_address {
-                let Some((client_addr, conn)) = self
-                    .connections
+            if transmit.from == listen_address {
+                let Some(client) = self
+                    .clients
                     .iter_mut()
-                    .find(|(client_addr, _conn)| transmit.to == *client_addr)
+                    .find(|client| transmit.to == client.client_addr)
                 else {
                     return Some(transmit);
                 };
 
                 let plaintext = transmit.data.build();
-                let stream = match conn.complete() {
+                let stream = match client.tls.complete() {
                     Ok(s) => s,
                     Err(e) => {
                         if e.kind() != std::io::ErrorKind::WouldBlock {
@@ -298,9 +329,9 @@ impl TurnServerApi for OpensslTurnServer {
                 stream.get_mut().pop_outgoing().map(|data| {
                     TransmitBuild::new(
                         DelayedMessageOrChannelSend::Owned(data),
-                        TransportType::Tcp,
+                        transmit.transport,
                         listen_address,
-                        *client_addr,
+                        client.client_addr,
                     )
                 })
             } else {
@@ -320,15 +351,15 @@ impl TurnServerApi for OpensslTurnServer {
         let transmit = self.server.recv_icmp(family, bytes, now)?;
         // incoming allocated address
         let listen_address = self.listen_address();
-        if transmit.transport == TransportType::Tcp && transmit.from == listen_address {
-            let Some((client_addr, conn)) = self
-                .connections
+        if transmit.from == listen_address {
+            let Some(client) = self
+                .clients
                 .iter_mut()
-                .find(|(client_addr, _conn)| transmit.to == *client_addr)
+                .find(|client| transmit.to == client.client_addr)
             else {
                 return Some(transmit);
             };
-            let stream = match conn.complete() {
+            let stream = match client.tls.complete() {
                 Ok(s) => s,
                 Err(e) => {
                     if e.kind() != std::io::ErrorKind::WouldBlock {
@@ -338,10 +369,9 @@ impl TurnServerApi for OpensslTurnServer {
                 }
             };
             stream.write_all(&transmit.data).unwrap();
-            stream
-                .get_mut()
-                .pop_outgoing()
-                .map(|data| Transmit::new(data, TransportType::Tcp, listen_address, *client_addr))
+            stream.get_mut().pop_outgoing().map(|data| {
+                Transmit::new(data, transmit.transport, listen_address, client.client_addr)
+            })
         } else {
             Some(transmit)
         }
@@ -351,18 +381,51 @@ impl TurnServerApi for OpensslTurnServer {
     ///
     /// The returned value indicates what the caller should do.
     fn poll(&mut self, now: Instant) -> TurnServerPollRet {
+        let listen_address = self.listen_address();
         let protocol_ret = self.server.poll(now);
         let mut have_pending = false;
-        for (_client_addr, conn) in self.connections.iter_mut() {
-            let stream = match conn.complete() {
+        for (idx, client) in self.clients.iter_mut().enumerate() {
+            let stream = match client.tls.complete() {
                 Ok(s) => s,
                 Err(_) => continue,
             };
+            client.shutdown = stream.get_shutdown();
             if !stream.get_mut().outgoing.is_empty() {
                 have_pending = true;
+                continue;
+            }
+            if client
+                .shutdown
+                .contains(ShutdownState::SENT | ShutdownState::RECEIVED)
+            {
+                let client = self.clients.swap_remove(idx);
+                return TurnServerPollRet::TcpClose {
+                    local_addr: listen_address,
+                    remote_addr: client.client_addr,
+                };
             }
         }
         if have_pending {
+            return TurnServerPollRet::WaitUntil(now);
+        }
+        if let TurnServerPollRet::TcpClose {
+            local_addr: _,
+            remote_addr,
+        } = protocol_ret
+        {
+            let Some(client) = self
+                .clients
+                .iter_mut()
+                .find(|client| client.client_addr == remote_addr)
+            else {
+                return protocol_ret;
+            };
+            if let Ok(stream) = client.tls.complete() {
+                if let Err(e) = stream.shutdown() {
+                    warn!("Failed to shutdown ssl connection to {remote_addr}: {e:?}");
+                }
+                client.shutdown = stream.get_shutdown();
+            }
             return TurnServerPollRet::WaitUntil(now);
         }
         protocol_ret
@@ -372,61 +435,85 @@ impl TurnServerApi for OpensslTurnServer {
     fn poll_transmit(&mut self, now: Instant) -> Option<Transmit<Vec<u8>>> {
         let listen_address = self.listen_address();
 
-        for (client_addr, conn) in self.connections.iter_mut() {
-            if let Some(data) = conn.inner_mut().pop_outgoing() {
+        for client in self.clients.iter_mut() {
+            if let Some(data) = client.tls.inner_mut().pop_outgoing() {
                 return Some(Transmit::new(
                     data,
-                    TransportType::Tcp,
+                    client.transport,
                     listen_address,
-                    *client_addr,
+                    client.client_addr,
                 ));
             }
         }
 
         while let Some(transmit) = self.server.poll_transmit(now) {
-            let Some((client_addr, conn)) = self
-                .connections
+            let Some(client) = self
+                .clients
                 .iter_mut()
-                .find(|(client_addr, _conn)| transmit.to == *client_addr)
+                .find(|client| transmit.to == client.client_addr)
             else {
                 warn!("return transmit: {transmit:?}");
                 return Some(transmit);
             };
-            let stream = match conn.complete() {
+            let stream = match client.tls.complete() {
                 Ok(s) => s,
                 // FIXME: how to deal with early data
-                Err(_) => continue,
+                Err(e) => {
+                    warn!("early data -> ignored: {e:?}");
+                    continue;
+                }
             };
             stream.write_all(&transmit.data).unwrap();
 
-            if let Some(data) = conn.inner_mut().pop_outgoing() {
+            if let Some(data) = client.tls.inner_mut().pop_outgoing() {
                 return Some(Transmit::new(
                     data,
-                    TransportType::Tcp,
+                    client.transport,
                     listen_address,
-                    *client_addr,
+                    client.client_addr,
                 ));
             }
         }
         None
     }
 
-    /// Notify the [`TurnServer`] that a UDP socket has been allocated (or an error) in response to
-    /// [TurnServerPollRet::AllocateSocketUdp].
-    fn allocated_udp_socket(
+    /// Notify the [`TurnServer`] that a socket has been allocated (or an error) in response to
+    /// [TurnServerPollRet::AllocateSocket].
+    fn allocated_socket(
         &mut self,
         transport: TransportType,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
+        allocation_transport: TransportType,
         family: AddressFamily,
         socket_addr: Result<SocketAddr, SocketAllocateError>,
         now: Instant,
     ) {
-        self.server.allocated_udp_socket(
+        self.server.allocated_socket(
             transport,
             local_addr,
             remote_addr,
+            allocation_transport,
             family,
+            socket_addr,
+            now,
+        )
+    }
+
+    fn tcp_connected(
+        &mut self,
+        relayed_addr: SocketAddr,
+        peer_addr: SocketAddr,
+        listen_addr: SocketAddr,
+        client_addr: SocketAddr,
+        socket_addr: Result<SocketAddr, crate::api::TcpConnectError>,
+        now: Instant,
+    ) {
+        self.server.tcp_connected(
+            relayed_addr,
+            peer_addr,
+            listen_addr,
+            client_addr,
             socket_addr,
             now,
         )
