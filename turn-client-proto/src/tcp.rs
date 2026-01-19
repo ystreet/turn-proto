@@ -671,6 +671,67 @@ mod tests {
     }
 
     #[test]
+    fn test_turn_tcp_allocate_udp_send_recv() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut test = create_test(0);
+        test.allocate(now);
+        let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
+            test.client.poll_event()
+        else {
+            unreachable!();
+        };
+        assert_eq!(transport, test.allocation_transport);
+        assert_eq!(relayed_address, test.turn_alloc_addr);
+        test.create_permission(now);
+        let Some(TurnEvent::PermissionCreated(transport, permission_ip)) = test.client.poll_event()
+        else {
+            unreachable!();
+        };
+        assert_eq!(transport, test.allocation_transport);
+        assert_eq!(permission_ip, test.peer_addr.ip());
+        let sent_data = [7; 9];
+        let transmit = test
+            .client
+            .send_to(TransportType::Udp, test.peer_addr, sent_data, now)
+            .unwrap()
+            .unwrap()
+            .build();
+        assert_eq!(transmit.transport, TransportType::Tcp);
+        assert_eq!(transmit.from, test.client.local_addr());
+        assert_eq!(transmit.to, test.server.listen_address());
+        let forward = test.server.recv(transmit, now).unwrap().build();
+        assert_eq!(forward.transport, TransportType::Udp);
+        assert_eq!(forward.from, test.turn_alloc_addr);
+        assert_eq!(forward.to, test.peer_addr);
+        assert_eq!(&forward.data, sent_data.as_slice());
+
+        let sent_data = [9; 8];
+        let transmit = test
+            .server
+            .recv(
+                Transmit::new(
+                    sent_data,
+                    TransportType::Udp,
+                    test.peer_addr,
+                    test.turn_alloc_addr,
+                ),
+                now,
+            )
+            .unwrap()
+            .build();
+        assert_eq!(transmit.transport, TransportType::Tcp);
+        assert_eq!(transmit.from, test.server.listen_address());
+        assert_eq!(transmit.to, test.client.local_addr());
+        let TurnRecvRet::PeerData(peer_data) = test.client.recv(transmit, now) else {
+            unreachable!();
+        };
+        assert_eq!(peer_data.transport, TransportType::Udp);
+        assert_eq!(peer_data.peer, test.peer_addr);
+        assert_eq!(peer_data.data.as_ref(), sent_data);
+    }
+
+    #[test]
     fn test_tcp_offpath_data() {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;

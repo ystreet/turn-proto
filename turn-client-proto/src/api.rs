@@ -700,7 +700,7 @@ pub(crate) mod tests {
             }
         }
 
-        fn allocate(&mut self, now: Instant) {
+        pub(crate) fn allocate(&mut self, now: Instant) {
             // initial allocate
             let transmit = self.client.poll_transmit(now).unwrap();
             let msg = Message::from_bytes(&transmit.data).unwrap();
@@ -866,7 +866,7 @@ pub(crate) mod tests {
                 ))
         }
 
-        fn create_permission(&mut self, now: Instant) {
+        pub(crate) fn create_permission(&mut self, now: Instant) {
             self.client
                 .create_permission(self.allocation_transport, self.peer_addr.ip(), now)
                 .unwrap();

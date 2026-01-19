@@ -846,15 +846,18 @@ impl TurnClientProtocol {
                     };
                     let peer_addr = peer_addr.addr(msg.transaction_id());
                     if let Some((offset, data)) = data {
-                        if allocations
-                            .iter()
-                            .all(|alloc| !alloc.have_permission(peer_addr.ip()))
-                        {
+                        let Some(allocation_transport) = allocations.iter().find_map(|alloc| {
+                            if alloc.have_permission(peer_addr.ip()) {
+                                Some(alloc.transport)
+                            } else {
+                                None
+                            }
+                        }) else {
                             return TurnProtocolRecv::Ignored;
-                        }
+                        };
                         TurnProtocolRecv::PeerData {
                             range: offset + 4..offset + 4 + data.data().len(),
-                            transport,
+                            transport: allocation_transport,
                             peer: peer_addr,
                         }
                     } else if let Some(icmp) = icmp {
