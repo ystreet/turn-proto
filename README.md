@@ -61,3 +61,10 @@ sans-IO API and thus does no networking calls of its own.
 `turn-server-proto` builds on top of `turn-types` and implements a TURN server
 for communicating with TURN clients. It does this using a sans-IO API and thus
 does no networking calls of its own.
+
+## Funding
+
+[Support for TURN](https://nlnet.nl/project/librice/) has been funded in part through the
+[NGI0 Commons Fund](https://nlnet.nl/commonsfund) a fund established by
+[NLnet](https://nlnet.nl) with financial support from the European Commission's
+[Next Generation Internet](https://ngi.eu) programme.
