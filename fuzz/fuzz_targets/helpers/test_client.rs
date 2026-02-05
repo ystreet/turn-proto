@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025 Matthew Waters <matthew@centricular.com>
+//
+// SPDX-License-Identifier: MIT OR Apache-2.0
 use core::net::SocketAddr;
 use stun_types::TransportType;
 use turn_client_proto::api::TurnClientApi;
