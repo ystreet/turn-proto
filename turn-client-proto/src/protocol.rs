@@ -4457,6 +4457,132 @@ mod tests {
         assert_eq!(&transmit.data.build(), data.as_slice());
     }
 
+    #[test]
+    fn test_turn_client_protocol_tcp_connection_bind_already_exists() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(
+            TransportType::Tcp,
+            TransportType::Tcp,
+            &[AddressFamily::IPV4],
+        );
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        create_permission(&mut client, now);
+        client
+            .tcp_connect(generate_xor_peer_address(), now)
+            .unwrap();
+        connect_success_response(&mut client, 1, now);
+        client
+            .allocated_tcp_socket(
+                1,
+                Socket5Tuple {
+                    transport: TransportType::Tcp,
+                    from: client.local_addr(),
+                    to: client.remote_addr(),
+                },
+                generate_xor_peer_address(),
+                Some(generate_tcp_local_address()),
+                now,
+            )
+            .unwrap();
+        let credentials = client_credentials(&client);
+        assert!(matches!(
+            connection_bind_response(
+                &mut client,
+                |msg| {
+                    let mut response = Message::builder_error(&msg, MessageWriteVec::new());
+                    response
+                        .add_attribute(
+                            &ErrorCode::builder(ErrorCode::CONNECTION_ALREADY_EXISTS)
+                                .build()
+                                .unwrap(),
+                        )
+                        .unwrap();
+                    response
+                        .add_message_integrity(
+                            &credentials.clone().into(),
+                            IntegrityAlgorithm::Sha1,
+                        )
+                        .unwrap();
+                    response.finish()
+                },
+                now,
+            ),
+            TurnProtocolRecv::Handled
+        ));
+        assert!(
+            matches!(client.poll_event(), Some(TurnEvent::TcpConnectFailed(peer_addr)) if peer_addr == generate_xor_peer_address())
+        );
+
+        let data = [4; 9];
+        assert!(matches!(
+            client.send_to(TransportType::Tcp, generate_xor_peer_address(), data, now),
+            Err(SendError::NoTcpSocket)
+        ));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_tcp_connection_bind_bad_integrity() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(
+            TransportType::Tcp,
+            TransportType::Tcp,
+            &[AddressFamily::IPV4],
+        );
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        create_permission(&mut client, now);
+        client
+            .tcp_connect(generate_xor_peer_address(), now)
+            .unwrap();
+        connect_success_response(&mut client, 1, now);
+        client
+            .allocated_tcp_socket(
+                1,
+                Socket5Tuple {
+                    transport: TransportType::Tcp,
+                    from: client.local_addr(),
+                    to: client.remote_addr(),
+                },
+                generate_xor_peer_address(),
+                Some(generate_tcp_local_address()),
+                now,
+            )
+            .unwrap();
+        let wrong_credentials = client
+            .credentials
+            .clone()
+            .into_long_term_credentials("wrong-realm");
+        assert!(matches!(
+            connection_bind_response(
+                &mut client,
+                |msg| {
+                    let mut response = Message::builder_success(&msg, MessageWriteVec::new());
+                    response
+                        .add_message_integrity(
+                            &wrong_credentials.clone().into(),
+                            IntegrityAlgorithm::Sha1,
+                        )
+                        .unwrap();
+                    response.finish()
+                },
+                now,
+            ),
+            TurnProtocolRecv::Handled
+        ));
+        assert!(
+            matches!(client.poll_event(), Some(TurnEvent::TcpConnectFailed(peer_addr)) if peer_addr == generate_xor_peer_address())
+        );
+
+        let data = [4; 9];
+        assert!(matches!(
+            client.send_to(TransportType::Tcp, generate_xor_peer_address(), data, now),
+            Err(SendError::NoTcpSocket)
+        ));
+    }
+
     fn server_connection_attempt_message(
         connection_id: u32,
         credentials: LongTermCredentials,
@@ -4593,6 +4719,155 @@ mod tests {
             client.send_to(TransportType::Tcp, generate_xor_peer_address(), data, now),
             Err(SendError::NoTcpSocket)
         ));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_tcp_connection_attempt_missing_attributes() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        for attr in [ConnectionId::TYPE, XorPeerAddress::TYPE] {
+            let mut client = new_protocol_with_families(
+                TransportType::Tcp,
+                TransportType::Tcp,
+                &[AddressFamily::IPV4],
+            );
+            initial_allocate(&mut client, now);
+            authenticated_allocate(&mut client, now);
+            create_permission(&mut client, now);
+
+            let credentials = client_credentials(&client);
+            let mut request = Message::builder_request(CONNECTION_ATTEMPT, MessageWriteVec::new());
+            if attr != ConnectionId::TYPE {
+                request.add_attribute(&ConnectionId::new(1)).unwrap();
+            }
+            if attr != XorPeerAddress::TYPE {
+                request
+                    .add_attribute(&XorPeerAddress::new(
+                        generate_xor_peer_address(),
+                        request.transaction_id(),
+                    ))
+                    .unwrap();
+            }
+            request
+                .add_message_integrity(&credentials.clone().into(), IntegrityAlgorithm::Sha1)
+                .unwrap();
+            let msg_transmit = Transmit::new(
+                Message::from_bytes(&request).unwrap(),
+                client.transport(),
+                client.remote_addr(),
+                client.local_addr(),
+            );
+            assert!(matches!(
+                client.handle_message(msg_transmit, now),
+                TurnProtocolRecv::Handled
+            ));
+            let transmit = client.poll_transmit(now).unwrap();
+            assert_eq!(transmit.from, client.local_addr());
+            assert_eq!(transmit.to, client.remote_addr());
+            let msg = Message::from_bytes(&transmit.data).unwrap();
+            msg.validate_integrity(&credentials.into()).unwrap();
+            assert!(msg.has_method(CONNECTION_ATTEMPT));
+            assert!(msg.has_class(MessageClass::Error));
+            let error = msg.attribute::<ErrorCode>().unwrap();
+            assert_eq!(error.code(), ErrorCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn test_turn_client_protocol_tcp_connection_attempt_wrong_ip_family() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(
+            TransportType::Tcp,
+            TransportType::Tcp,
+            &[AddressFamily::IPV4],
+        );
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        create_permission(&mut client, now);
+
+        let credentials = client_credentials(&client);
+        let request = server_connection_attempt_message(
+            1,
+            credentials.clone(),
+            generate_ipv6_xor_peer_address(),
+        );
+        let msg_transmit = Transmit::new(
+            Message::from_bytes(&request).unwrap(),
+            client.transport(),
+            client.remote_addr(),
+            client.local_addr(),
+        );
+        assert!(matches!(
+            client.handle_message(msg_transmit, now),
+            TurnProtocolRecv::Handled
+        ));
+        let transmit = client.poll_transmit(now).unwrap();
+        assert_eq!(transmit.from, client.local_addr());
+        assert_eq!(transmit.to, client.remote_addr());
+        let msg = Message::from_bytes(&transmit.data).unwrap();
+        msg.validate_integrity(&credentials.into()).unwrap();
+        assert!(msg.has_method(CONNECTION_ATTEMPT));
+        assert!(msg.has_class(MessageClass::Error));
+        let error = msg.attribute::<ErrorCode>().unwrap();
+        assert_eq!(error.code(), ErrorCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_tcp_connection_attempt_already_exists() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(
+            TransportType::Tcp,
+            TransportType::Tcp,
+            &[AddressFamily::IPV4],
+        );
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        create_permission(&mut client, now);
+
+        let credentials = client_credentials(&client);
+        server_connection_attempt_success(
+            &mut client,
+            1,
+            credentials.clone(),
+            generate_xor_peer_address(),
+            Some(generate_tcp_local_address()),
+            now,
+        );
+        connection_bind_success_response(&mut client, generate_xor_peer_address(), now);
+
+        let request =
+            server_connection_attempt_message(2, credentials.clone(), generate_xor_peer_address())
+                .finish();
+        let msg_transmit = Transmit::new(
+            Message::from_bytes(&request).unwrap(),
+            client.transport(),
+            client.remote_addr(),
+            client.local_addr(),
+        );
+        assert!(matches!(
+            client.handle_message(msg_transmit, now),
+            TurnProtocolRecv::Handled
+        ));
+        let transmit = client.poll_transmit(now).unwrap();
+        assert_eq!(transmit.from, client.local_addr());
+        assert_eq!(transmit.to, client.remote_addr());
+        let msg = Message::from_bytes(&transmit.data).unwrap();
+        msg.validate_integrity(&credentials.into()).unwrap();
+        assert!(msg.has_method(CONNECTION_ATTEMPT));
+        assert!(msg.has_class(MessageClass::Error));
+        let error = msg.attribute::<ErrorCode>().unwrap();
+        assert_eq!(error.code(), ErrorCode::CONNECTION_ALREADY_EXISTS);
+
+        let data = [4; 9];
+        let transmit = client
+            .send_to(TransportType::Tcp, generate_xor_peer_address(), data, now)
+            .unwrap();
+        assert_eq!(transmit.transport, TransportType::Tcp);
+        assert_eq!(transmit.from, generate_tcp_local_address());
+        assert_eq!(transmit.to, client.remote_addr());
+        assert_eq!(&transmit.data.build(), data.as_slice());
     }
 
     #[test]
