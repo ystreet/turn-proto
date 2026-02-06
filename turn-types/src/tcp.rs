@@ -334,7 +334,10 @@ mod tests {
             .unwrap();
         assert!(matches!(ret, IncomingTcp::CompleteMessage(_, _)));
         assert_eq!(ret.data(), &msg);
+        assert_eq!(ret.as_ref(), &msg);
         assert!(ret.message().is_some());
+        assert!(tcp.is_empty());
+        assert_eq!(tcp.len(), 0);
         assert!(tcp.into_inner().is_empty());
     }
 
@@ -354,7 +357,10 @@ mod tests {
             .unwrap();
         assert!(matches!(ret, IncomingTcp::CompleteChannel(_, _)));
         assert_eq!(ret.data(), &msg);
+        assert_eq!(ret.as_ref(), &msg);
         assert!(ret.channel().is_some());
+        assert!(tcp.is_empty());
+        assert_eq!(tcp.len(), 0);
         assert!(tcp.into_inner().is_empty());
     }
 
@@ -384,6 +390,8 @@ mod tests {
                 local_addr,
             ));
             assert!(ret.is_none());
+            assert!(!tcp.is_empty());
+            assert_eq!(tcp.len(), i);
         }
         let ret = tcp
             .incoming_tcp(Transmit::new(
@@ -394,11 +402,14 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(ret.data(), &msg);
+        assert_eq!(ret.as_ref(), &msg);
         assert!(ret.message().is_some());
         let IncomingTcp::StoredMessage(produced, _) = ret else {
             unreachable!();
         };
         assert_eq!(produced, msg);
+        assert!(tcp.is_empty());
+        assert_eq!(tcp.len(), 0);
         assert!(tcp.into_inner().is_empty());
     }
 
@@ -428,6 +439,8 @@ mod tests {
                 local_addr,
             ));
             assert!(ret.is_none());
+            assert!(!tcp.is_empty());
+            assert_eq!(tcp.len(), i);
         }
         let ret = tcp
             .incoming_tcp(Transmit::new(
@@ -438,6 +451,7 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(ret.data(), &channel);
+        assert_eq!(ret.as_ref(), &channel);
         assert!(ret.channel().is_some());
         let IncomingTcp::StoredChannel(produced, _) = ret else {
             unreachable!()
@@ -464,6 +478,7 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(ret.data(), &msg);
+        assert_eq!(ret.as_ref(), &msg);
         assert!(ret.message().is_some());
         let IncomingTcp::CompleteMessage(transmit, msg_range) = ret else {
             unreachable!();
@@ -472,6 +487,7 @@ mod tests {
         assert_eq!(transmit.data, input);
         let ret = tcp.poll_recv().unwrap();
         assert_eq!(ret.data(), &channel);
+        assert_eq!(ret.as_ref(), &channel);
         let StoredTcp::Channel(produced) = ret else {
             unreachable!()
         };
@@ -496,6 +512,7 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(ret.data(), &channel);
+        assert_eq!(ret.as_ref(), &channel);
         assert!(ret.channel().is_some());
         let IncomingTcp::CompleteChannel(transmit, channel_range) = ret else {
             unreachable!()
@@ -504,6 +521,7 @@ mod tests {
         assert_eq!(transmit.data, input);
         let ret = tcp.poll_recv().unwrap();
         assert_eq!(ret.data(), &msg);
+        assert_eq!(ret.as_ref(), &msg);
         let StoredTcp::Message(produced) = ret else {
             unreachable!()
         };
