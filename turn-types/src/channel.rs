@@ -167,4 +167,22 @@ mod tests {
         assert_eq!(expected, 4);
         assert_eq!(actual, 3);
     }
+
+    static CHANNEL_SINGLE_BYTE: [u8; 5] = [0x40, 0x00, 0x00, 0x01, 0x42];
+
+    #[test]
+    fn channel_data_parse_success() {
+        let channel = ChannelData::parse(&CHANNEL_SINGLE_BYTE).unwrap();
+        assert_eq!(channel.data(), &[0x42]);
+        assert_eq!(channel.as_ref(), &[0x42]);
+    }
+
+    #[test]
+    fn channel_data_display() {
+        let channel = ChannelData::parse(&CHANNEL_SINGLE_BYTE).unwrap();
+        assert_eq!(
+            &alloc::format!("{channel}"),
+            "ChannelData(id: 16384, data of 1 bytes)"
+        );
+    }
 }
