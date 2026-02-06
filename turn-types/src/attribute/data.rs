@@ -42,6 +42,7 @@ impl AttributeWrite for Data<'_> {
     fn write_into_unchecked(&self, dest: &mut [u8]) {
         self.write_header_unchecked(dest);
         dest[4..4 + self.data.len()].copy_from_slice(&self.data);
+        dest[4 + self.data.len()..self.padded_len()].fill(0);
     }
 }
 
@@ -123,7 +124,7 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
     use byteorder::{BigEndian, ByteOrder};
-    use std::println;
+    use tracing::trace;
 
     #[test]
     fn data() {
@@ -132,12 +133,27 @@ mod tests {
         let data = Data::new(&bytes);
         assert_eq!(data.get_type(), Data::TYPE);
         assert_eq!(data.data(), &bytes);
+    }
+
+    #[test]
+    fn data_raw() {
+        let _log = crate::tests::test_init_log();
+        let bytes = vec![0, 1, 2, 3, 4, 5];
+        let data = Data::new(&bytes);
         let raw: RawAttribute = data.to_raw();
-        println!("{}", raw);
+        trace!("{}", raw);
         assert_eq!(raw.get_type(), Data::TYPE);
         let data2 = Data::try_from(raw.clone()).unwrap();
         assert_eq!(data2.get_type(), Data::TYPE);
         assert_eq!(data2.data(), &bytes);
+    }
+
+    #[test]
+    fn data_raw_wrong_type() {
+        let _log = crate::tests::test_init_log();
+        let bytes = vec![0, 1, 2, 3, 4, 5];
+        let data = Data::new(&bytes);
+        let raw: RawAttribute = data.to_raw();
         // provide incorrectly typed data
         let mut data: Vec<_> = raw.into();
         BigEndian::write_u16(&mut data[0..2], 0);
@@ -145,5 +161,30 @@ mod tests {
             Data::try_from(RawAttribute::from_bytes(data.as_ref()).unwrap()),
             Err(StunParseError::WrongAttributeImplementation)
         ));
+    }
+
+    #[test]
+    fn data_write_into() {
+        let _log = crate::tests::test_init_log();
+        let bytes = vec![0, 1, 2, 3];
+        let data = Data::new(&bytes);
+        let raw: RawAttribute = data.to_raw();
+        let mut dest = vec![0; raw.padded_len()];
+        data.write_into(&mut dest).unwrap();
+        let raw = RawAttribute::from_bytes(&dest).unwrap();
+        let data2 = Data::try_from(raw.clone()).unwrap();
+        assert_eq!(data2.get_type(), Data::TYPE);
+        assert_eq!(data2.data(), &bytes);
+    }
+
+    #[test]
+    #[should_panic = "out of range"]
+    fn data_write_into_unchecked() {
+        let _log = crate::tests::test_init_log();
+        let bytes = vec![0, 1, 2, 3, 4, 5];
+        let data = Data::new(&bytes);
+        let raw: RawAttribute = data.to_raw();
+        let mut dest = vec![0; raw.padded_len() - 1];
+        data.write_into_unchecked(&mut dest);
     }
 }

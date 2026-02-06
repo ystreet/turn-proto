@@ -46,6 +46,7 @@ impl AttributeWrite for ChannelNumber {
     fn write_into_unchecked(&self, dest: &mut [u8]) {
         self.write_header_unchecked(dest);
         BigEndian::write_u16(&mut dest[4..6], self.channel);
+        dest[7..self.padded_len()].fill(0);
     }
 }
 
@@ -105,9 +106,9 @@ impl core::fmt::Display for ChannelNumber {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
+    use alloc::{vec, vec::Vec};
     use byteorder::{BigEndian, ByteOrder};
-    use std::println;
+    use tracing::trace;
 
     #[test]
     fn channel_number() {
@@ -115,12 +116,29 @@ mod tests {
         let c = ChannelNumber::new(6);
         assert_eq!(c.get_type(), ChannelNumber::TYPE);
         assert_eq!(c.channel(), 6);
+    }
+
+    #[test]
+    fn channel_number_raw() {
+        let _log = crate::tests::test_init_log();
+        let c = ChannelNumber::new(6);
+        assert_eq!(c.get_type(), ChannelNumber::TYPE);
+        assert_eq!(c.channel(), 6);
         let raw: RawAttribute = c.to_raw();
-        println!("{}", raw);
+        trace!("{}", raw);
         assert_eq!(raw.get_type(), ChannelNumber::TYPE);
         let c2 = ChannelNumber::try_from(&raw).unwrap();
         assert_eq!(c2.get_type(), ChannelNumber::TYPE);
         assert_eq!(c2.channel(), 6);
+    }
+
+    #[test]
+    fn channel_number_raw_wrong_type() {
+        let _log = crate::tests::test_init_log();
+        let c = ChannelNumber::new(6);
+        assert_eq!(c.get_type(), ChannelNumber::TYPE);
+        assert_eq!(c.channel(), 6);
+        let raw: RawAttribute = c.to_raw();
         // provide incorrectly typed data
         let mut data: Vec<_> = raw.into();
         BigEndian::write_u16(&mut data[0..2], 0);
@@ -128,5 +146,32 @@ mod tests {
             ChannelNumber::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
             Err(StunParseError::WrongAttributeImplementation)
         ));
+    }
+
+    #[test]
+    fn channel_number_write_into() {
+        let _log = crate::tests::test_init_log();
+        let c = ChannelNumber::new(6);
+        assert_eq!(c.channel(), 6);
+        let raw: RawAttribute = c.to_raw();
+
+        let mut dest = vec![0; raw.padded_len()];
+        c.write_into(&mut dest).unwrap();
+        let raw = RawAttribute::from_bytes(&dest).unwrap();
+        let c2 = ChannelNumber::try_from(&raw).unwrap();
+        assert_eq!(c2.get_type(), ChannelNumber::TYPE);
+        assert_eq!(c2.channel(), c.channel());
+    }
+
+    #[test]
+    #[should_panic = "out of range"]
+    fn channel_number_write_into_unchecked() {
+        let _log = crate::tests::test_init_log();
+        let c = ChannelNumber::new(6);
+        assert_eq!(c.channel(), 6);
+        let raw: RawAttribute = c.to_raw();
+
+        let mut dest = vec![0; raw.padded_len() - 1];
+        c.write_into_unchecked(&mut dest);
     }
 }

@@ -41,6 +41,7 @@ impl AttributeWrite for EvenPort {
     fn write_into_unchecked(&self, dest: &mut [u8]) {
         self.write_header_unchecked(dest);
         dest[4] = self.bits;
+        dest[5..self.padded_len()].fill(0)
     }
 }
 
@@ -101,22 +102,36 @@ impl core::fmt::Display for EvenPort {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
+    use alloc::{vec, vec::Vec};
     use byteorder::{BigEndian, ByteOrder};
-    use std::println;
+    use tracing::trace;
 
     #[test]
     fn even_port() {
         let _log = crate::tests::test_init_log();
         let even_port = EvenPort::new(true);
+        trace!("{even_port}");
         assert_eq!(even_port.get_type(), EvenPort::TYPE);
         assert!(even_port.requested());
-        let raw: RawAttribute = even_port.to_raw();
-        println!("{}", raw);
+    }
+
+    #[test]
+    fn even_port_raw() {
+        let _log = crate::tests::test_init_log();
+        let even_port = EvenPort::new(true);
+        let raw = RawAttribute::from(&even_port);
         assert_eq!(raw.get_type(), EvenPort::TYPE);
         let even_port2 = EvenPort::try_from(&raw).unwrap();
         assert_eq!(even_port2.get_type(), EvenPort::TYPE);
         assert!(even_port2.requested());
+    }
+
+    #[test]
+    fn even_port_raw_wrong_type() {
+        let _log = crate::tests::test_init_log();
+        let even_port = EvenPort::new(true);
+        let raw = RawAttribute::from(&even_port);
+
         // provide incorrectly typed data
         let mut data: Vec<_> = raw.into();
         BigEndian::write_u16(&mut data[0..2], 0);
@@ -124,5 +139,30 @@ mod tests {
             EvenPort::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
             Err(StunParseError::WrongAttributeImplementation)
         ));
+    }
+
+    #[test]
+    fn even_port_write_into() {
+        let _log = crate::tests::test_init_log();
+        let even_port = EvenPort::new(true);
+        let raw = RawAttribute::from(&even_port);
+
+        let mut dest = vec![0; raw.padded_len()];
+        even_port.write_into(&mut dest).unwrap();
+        let raw = RawAttribute::from_bytes(&dest).unwrap();
+        let even_port2 = EvenPort::try_from(&raw).unwrap();
+        assert_eq!(even_port2.get_type(), EvenPort::TYPE);
+        assert!(even_port2.requested());
+    }
+
+    #[test]
+    #[should_panic = "out of range"]
+    fn even_port_write_into_unchecked() {
+        let _log = crate::tests::test_init_log();
+        let even_port = EvenPort::new(true);
+        let raw = RawAttribute::from(&even_port);
+
+        let mut dest = vec![0; raw.padded_len() - 1];
+        even_port.write_into_unchecked(&mut dest);
     }
 }

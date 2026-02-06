@@ -80,17 +80,33 @@ impl core::fmt::Display for DontFragment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
+    use alloc::{vec, vec::Vec};
     use byteorder::{BigEndian, ByteOrder};
-    use std::println;
+    use tracing::trace;
 
     #[test]
     fn dont_fragment() {
         let _log = crate::tests::test_init_log();
         let frag = DontFragment::new();
         assert_eq!(frag.get_type(), DontFragment::TYPE);
+    }
+
+    #[test]
+    fn dont_fragment_raw() {
+        let _log = crate::tests::test_init_log();
+        let frag = DontFragment::new();
         let raw: RawAttribute = frag.to_raw();
-        println!("{}", raw);
+        trace!("{}", raw);
+        assert_eq!(raw.get_type(), DontFragment::TYPE);
+        let frag2 = DontFragment::try_from(&raw).unwrap();
+        assert_eq!(frag2.get_type(), DontFragment::TYPE);
+    }
+
+    #[test]
+    fn dont_fragment_raw_wrong_type() {
+        let _log = crate::tests::test_init_log();
+        let frag = DontFragment::new();
+        let raw: RawAttribute = frag.to_raw();
         assert_eq!(raw.get_type(), DontFragment::TYPE);
         let frag2 = DontFragment::try_from(&raw).unwrap();
         assert_eq!(frag2.get_type(), DontFragment::TYPE);
@@ -101,5 +117,27 @@ mod tests {
             DontFragment::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
             Err(StunParseError::WrongAttributeImplementation)
         ));
+    }
+
+    #[test]
+    fn dont_fragment_write_into() {
+        let _log = crate::tests::test_init_log();
+        let frag = DontFragment::new();
+        let raw: RawAttribute = frag.to_raw();
+        let mut dest = vec![0; raw.padded_len()];
+        frag.write_into(&mut dest).unwrap();
+        let raw = RawAttribute::from_bytes(&dest).unwrap();
+        let frag2 = DontFragment::try_from(&raw).unwrap();
+        assert_eq!(frag2.get_type(), DontFragment::TYPE);
+    }
+
+    #[test]
+    #[should_panic = "out of range"]
+    fn dont_fragment_write_into_unchcked() {
+        let _log = crate::tests::test_init_log();
+        let frag = DontFragment::new();
+        let raw: RawAttribute = frag.to_raw();
+        let mut dest = vec![0; raw.padded_len() - 1];
+        frag.write_into_unchecked(&mut dest);
     }
 }

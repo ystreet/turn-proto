@@ -121,8 +121,8 @@ impl core::fmt::Display for Icmp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
-    use std::println;
+    use alloc::{vec, vec::Vec};
+    use tracing::trace;
 
     #[test]
     fn icmp() {
@@ -132,22 +132,32 @@ mod tests {
         assert_eq!(mapped.icmp_type(), 2);
         assert_eq!(mapped.code(), 4);
         assert_eq!(mapped.data(), 8);
+    }
+
+    #[test]
+    fn icmp_raw() {
+        let _log = crate::tests::test_init_log();
+        let mapped = Icmp::new(2, 4, 8);
         let raw: RawAttribute = mapped.to_raw();
-        println!("{}", raw);
+        trace!("{}", raw);
         assert_eq!(raw.get_type(), Icmp::TYPE);
         let mapped2 = Icmp::try_from(&raw).unwrap();
         assert_eq!(mapped2.get_type(), Icmp::TYPE);
         assert_eq!(mapped2.icmp_type(), 2);
         assert_eq!(mapped2.code(), 4);
         assert_eq!(mapped2.data(), 8);
+    }
+
+    #[test]
+    fn icmp_raw_short() {
+        let _log = crate::tests::test_init_log();
+        let mapped = Icmp::new(2, 4, 8);
+        let raw: RawAttribute = mapped.to_raw();
+        assert_eq!(raw.get_type(), Icmp::TYPE);
         // truncate by one byte
         let mut data: Vec<_> = raw.clone().into();
         let len = data.len();
         BigEndian::write_u16(&mut data[2..4], len as u16 - 4 - 1);
-        println!(
-            "{:?}",
-            Icmp::try_from(&RawAttribute::from_bytes(data[..len - 1].as_ref()).unwrap())
-        );
         assert!(matches!(
             Icmp::try_from(&RawAttribute::from_bytes(data[..len - 1].as_ref()).unwrap()),
             Err(StunParseError::Truncated {
@@ -155,6 +165,14 @@ mod tests {
                 actual: _,
             })
         ));
+    }
+
+    #[test]
+    fn icmp_raw_wrong_type() {
+        let _log = crate::tests::test_init_log();
+        let mapped = Icmp::new(2, 4, 8);
+        let raw: RawAttribute = mapped.to_raw();
+        assert_eq!(raw.get_type(), Icmp::TYPE);
         // provide incorrectly typed data
         let mut data: Vec<_> = raw.clone().into();
         BigEndian::write_u16(&mut data[0..2], 0);
@@ -162,5 +180,30 @@ mod tests {
             Icmp::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
             Err(StunParseError::WrongAttributeImplementation)
         ));
+    }
+
+    #[test]
+    fn icmp_write_into() {
+        let _log = crate::tests::test_init_log();
+        let mapped = Icmp::new(2, 4, 8);
+        let raw: RawAttribute = mapped.to_raw();
+        let mut dest = vec![0; raw.padded_len()];
+        mapped.write_into(&mut dest).unwrap();
+        let raw = RawAttribute::from_bytes(&dest).unwrap();
+        let mapped2 = Icmp::try_from(&raw).unwrap();
+        assert_eq!(mapped2.get_type(), Icmp::TYPE);
+        assert_eq!(mapped2.icmp_type(), 2);
+        assert_eq!(mapped2.code(), 4);
+        assert_eq!(mapped2.data(), 8);
+    }
+
+    #[test]
+    #[should_panic = "out of range"]
+    fn icmp_write_into_unchecked() {
+        let _log = crate::tests::test_init_log();
+        let mapped = Icmp::new(2, 4, 8);
+        let raw: RawAttribute = mapped.to_raw();
+        let mut dest = vec![0; raw.padded_len() - 1];
+        mapped.write_into_unchecked(&mut dest);
     }
 }
