@@ -106,7 +106,7 @@ mod tests {
     use super::*;
     use alloc::vec::Vec;
     use byteorder::{BigEndian, ByteOrder};
-    use std::println;
+    use tracing::trace;
 
     #[test]
     fn requested_transport() {
@@ -114,12 +114,29 @@ mod tests {
         let trans = ConnectionId::new(17);
         assert_eq!(trans.get_type(), ConnectionId::TYPE);
         assert_eq!(trans.id(), 17);
+    }
+
+    #[test]
+    fn requested_transport_raw() {
+        let _log = crate::tests::test_init_log();
+        let trans = ConnectionId::new(17);
+        assert_eq!(trans.get_type(), ConnectionId::TYPE);
+        assert_eq!(trans.id(), 17);
         let raw: RawAttribute = trans.to_raw();
-        println!("raw: {raw:?}");
+        trace!("raw: {raw:?}");
         assert_eq!(raw.get_type(), ConnectionId::TYPE);
         let trans2 = ConnectionId::try_from(&raw).unwrap();
         assert_eq!(trans2.get_type(), ConnectionId::TYPE);
         assert_eq!(trans2.id(), 17);
+    }
+
+    #[test]
+    fn requested_transport_raw_wrong_type() {
+        let _log = crate::tests::test_init_log();
+        let trans = ConnectionId::new(17);
+        assert_eq!(trans.get_type(), ConnectionId::TYPE);
+        assert_eq!(trans.id(), 17);
+        let raw: RawAttribute = trans.to_raw();
         // provide incorrectly typed data
         let mut data: Vec<_> = raw.into();
         BigEndian::write_u16(&mut data[0..2], 0);
@@ -127,10 +144,29 @@ mod tests {
             ConnectionId::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
             Err(StunParseError::WrongAttributeImplementation)
         ));
+    }
+
+    #[test]
+    fn requested_transport_write_into() {
+        let _log = crate::tests::test_init_log();
+        let trans = ConnectionId::new(17);
+        assert_eq!(trans.get_type(), ConnectionId::TYPE);
+        assert_eq!(trans.id(), 17);
         let mut data = [0; 8];
         trans.write_into(&mut data).unwrap();
         let raw = RawAttribute::from_bytes(&data).unwrap();
         let trans2 = ConnectionId::from_raw_ref(&raw).unwrap();
         assert_eq!(trans.id(), trans2.id());
+    }
+
+    #[test]
+    #[should_panic = "out of range"]
+    fn requested_transport_write_into_unchecked() {
+        let _log = crate::tests::test_init_log();
+        let trans = ConnectionId::new(17);
+        assert_eq!(trans.get_type(), ConnectionId::TYPE);
+        assert_eq!(trans.id(), 17);
+        let mut data = [0; 7];
+        trans.write_into_unchecked(&mut data);
     }
 }

@@ -558,28 +558,47 @@ impl core::fmt::Display for AddressErrorCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
+    use alloc::{vec, vec::Vec};
     use byteorder::{BigEndian, ByteOrder};
-    use std::println;
+    use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use tracing::trace;
+
+    const ADDRS: [SocketAddr; 2] = [
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)), 40000),
+        SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::new(
+                0xfd12, 0x3456, 0x789a, 0x01, 0x0, 0x0, 0x0, 0x1,
+            )),
+            41000,
+        ),
+    ];
 
     #[test]
-    fn xor_peer_address() {
+    fn xor_peer_address_raw() {
         let _log = crate::tests::test_init_log();
         let transaction_id = 0x9876_5432_1098_7654_3210_9876.into();
-        let addrs = &[
-            "192.168.0.1:40000".parse().unwrap(),
-            "[fd12:3456:789a:1::1]:41000".parse().unwrap(),
-        ];
-        for addr in addrs {
-            let mapped = XorPeerAddress::new(*addr, transaction_id);
+        for addr in ADDRS {
+            let mapped = XorPeerAddress::new(addr, transaction_id);
             assert_eq!(mapped.get_type(), XorPeerAddress::TYPE);
-            assert_eq!(mapped.addr(transaction_id), *addr);
+            assert_eq!(mapped.addr(transaction_id), addr);
             let raw: RawAttribute = mapped.to_raw();
-            println!("{}", raw);
+            trace!("{}", raw);
             assert_eq!(raw.get_type(), XorPeerAddress::TYPE);
             let mapped2 = XorPeerAddress::try_from(&raw).unwrap();
             assert_eq!(mapped2.get_type(), XorPeerAddress::TYPE);
-            assert_eq!(mapped2.addr(transaction_id), *addr);
+            assert_eq!(mapped2.addr(transaction_id), addr);
+        }
+    }
+
+    #[test]
+    fn xor_peer_address_raw_short() {
+        let _log = crate::tests::test_init_log();
+        let transaction_id = 0x9876_5432_1098_7654_3210_9876.into();
+        for addr in ADDRS {
+            let mapped = XorPeerAddress::new(addr, transaction_id);
+            assert_eq!(mapped.get_type(), XorPeerAddress::TYPE);
+            assert_eq!(mapped.addr(transaction_id), addr);
+            let raw: RawAttribute = mapped.to_raw();
             // truncate by one byte
             let mut data: Vec<_> = raw.clone().into();
             let len = data.len();
@@ -593,6 +612,18 @@ mod tests {
                     actual: _,
                 })
             ));
+        }
+    }
+
+    #[test]
+    fn xor_peer_address_raw_wrong_type() {
+        let _log = crate::tests::test_init_log();
+        let transaction_id = 0x9876_5432_1098_7654_3210_9876.into();
+        for addr in ADDRS {
+            let mapped = XorPeerAddress::new(addr, transaction_id);
+            assert_eq!(mapped.get_type(), XorPeerAddress::TYPE);
+            assert_eq!(mapped.addr(transaction_id), addr);
+            let raw: RawAttribute = mapped.to_raw();
             // provide incorrectly typed data
             let mut data: Vec<_> = raw.into();
             BigEndian::write_u16(&mut data[0..2], 0);
@@ -604,23 +635,62 @@ mod tests {
     }
 
     #[test]
-    fn xor_relayed_address() {
+    fn xor_peer_address_write_into() {
         let _log = crate::tests::test_init_log();
         let transaction_id = 0x9876_5432_1098_7654_3210_9876.into();
-        let addrs = &[
-            "192.168.0.1:40000".parse().unwrap(),
-            "[fd12:3456:789a:1::1]:41000".parse().unwrap(),
-        ];
-        for addr in addrs {
-            let mapped = XorRelayedAddress::new(*addr, transaction_id);
-            assert_eq!(mapped.get_type(), XorRelayedAddress::TYPE);
-            assert_eq!(mapped.addr(transaction_id), *addr);
+        for addr in ADDRS {
+            let mapped = XorPeerAddress::new(addr, transaction_id);
+            assert_eq!(mapped.get_type(), XorPeerAddress::TYPE);
+            assert_eq!(mapped.addr(transaction_id), addr);
             let raw: RawAttribute = mapped.to_raw();
-            println!("{}", raw);
+            let mut dest = vec![0; raw.padded_len()];
+            mapped.write_into(&mut dest).unwrap();
+            let raw = RawAttribute::from_bytes(&dest).unwrap();
+            let mapped2 = XorPeerAddress::try_from(&raw).unwrap();
+            assert_eq!(mapped2.addr(transaction_id), addr);
+        }
+    }
+
+    #[test]
+    #[should_panic = "out of range"]
+    fn xor_peer_address_write_into_unchecked() {
+        let _log = crate::tests::test_init_log();
+        let transaction_id = 0x9876_5432_1098_7654_3210_9876.into();
+        let addr = ADDRS[0];
+        let mapped = XorPeerAddress::new(addr, transaction_id);
+        assert_eq!(mapped.get_type(), XorPeerAddress::TYPE);
+        assert_eq!(mapped.addr(transaction_id), addr);
+        let raw: RawAttribute = mapped.to_raw();
+        let mut dest = vec![0; raw.padded_len() - 1];
+        mapped.write_into_unchecked(&mut dest);
+    }
+
+    #[test]
+    fn xor_relayed_address_raw() {
+        let _log = crate::tests::test_init_log();
+        let transaction_id = 0x9876_5432_1098_7654_3210_9876.into();
+        for addr in ADDRS {
+            let mapped = XorRelayedAddress::new(addr, transaction_id);
+            assert_eq!(mapped.get_type(), XorRelayedAddress::TYPE);
+            assert_eq!(mapped.addr(transaction_id), addr);
+            let raw: RawAttribute = mapped.to_raw();
+            trace!("{}", raw);
             assert_eq!(raw.get_type(), XorRelayedAddress::TYPE);
             let mapped2 = XorRelayedAddress::try_from(&raw).unwrap();
             assert_eq!(mapped2.get_type(), XorRelayedAddress::TYPE);
-            assert_eq!(mapped2.addr(transaction_id), *addr);
+            assert_eq!(mapped2.addr(transaction_id), addr);
+        }
+    }
+
+    #[test]
+    fn xor_relayed_address_raw_short() {
+        let _log = crate::tests::test_init_log();
+        let transaction_id = 0x9876_5432_1098_7654_3210_9876.into();
+        for addr in ADDRS {
+            let mapped = XorRelayedAddress::new(addr, transaction_id);
+            assert_eq!(mapped.get_type(), XorRelayedAddress::TYPE);
+            assert_eq!(mapped.addr(transaction_id), addr);
+            let raw: RawAttribute = mapped.to_raw();
             // truncate by one byte
             let mut data: Vec<_> = raw.clone().into();
             let len = data.len();
@@ -634,6 +704,18 @@ mod tests {
                     actual: _,
                 })
             ));
+        }
+    }
+
+    #[test]
+    fn xor_relayed_address_raw_wrong_type() {
+        let _log = crate::tests::test_init_log();
+        let transaction_id = 0x9876_5432_1098_7654_3210_9876.into();
+        for addr in ADDRS {
+            let mapped = XorRelayedAddress::new(addr, transaction_id);
+            assert_eq!(mapped.get_type(), XorRelayedAddress::TYPE);
+            assert_eq!(mapped.addr(transaction_id), addr);
+            let raw: RawAttribute = mapped.to_raw();
             // provide incorrectly typed data
             let mut data: Vec<_> = raw.into();
             BigEndian::write_u16(&mut data[0..2], 0);
@@ -645,19 +727,55 @@ mod tests {
     }
 
     #[test]
-    fn requested_address_family() {
+    fn xor_relayed_address_write_into() {
+        let _log = crate::tests::test_init_log();
+        let transaction_id = 0x9876_5432_1098_7654_3210_9876.into();
+        for addr in ADDRS {
+            let mapped = XorRelayedAddress::new(addr, transaction_id);
+            assert_eq!(mapped.get_type(), XorRelayedAddress::TYPE);
+            assert_eq!(mapped.addr(transaction_id), addr);
+            let raw: RawAttribute = mapped.to_raw();
+            let mut dest = vec![0; raw.padded_len()];
+            mapped.write_into(&mut dest).unwrap();
+            let raw = RawAttribute::from_bytes(&dest).unwrap();
+            let mapped2 = XorRelayedAddress::try_from(&raw).unwrap();
+            assert_eq!(mapped2.addr(transaction_id), addr);
+        }
+    }
+
+    #[test]
+    #[should_panic = "out of range"]
+    fn xor_relayed_address_write_into_unchecked() {
+        let _log = crate::tests::test_init_log();
+        let transaction_id = 0x9876_5432_1098_7654_3210_9876.into();
+        let addr = ADDRS[0];
+        let mapped = XorRelayedAddress::new(addr, transaction_id);
+        assert_eq!(mapped.get_type(), XorRelayedAddress::TYPE);
+        assert_eq!(mapped.addr(transaction_id), addr);
+        let raw: RawAttribute = mapped.to_raw();
+        let mut dest = vec![0; raw.padded_len() - 1];
+        mapped.write_into_unchecked(&mut dest);
+    }
+
+    #[test]
+    fn requested_address_family_raw() {
         let _log = crate::tests::test_init_log();
         for family in [AddressFamily::IPV4, AddressFamily::IPV6] {
             let mapped = RequestedAddressFamily::new(family);
             assert_eq!(mapped.get_type(), RequestedAddressFamily::TYPE);
             assert_eq!(mapped.family(), family);
             let raw: RawAttribute = mapped.to_raw();
-            println!("{}", raw);
+            trace!("{}", raw);
             assert_eq!(raw.get_type(), RequestedAddressFamily::TYPE);
             let mapped2 = RequestedAddressFamily::try_from(&raw).unwrap();
             assert_eq!(mapped2.get_type(), RequestedAddressFamily::TYPE);
             assert_eq!(mapped2.family(), family);
         }
+    }
+
+    #[test]
+    fn requested_address_family_raw_short() {
+        let _log = crate::tests::test_init_log();
         let mapped = RequestedAddressFamily::new(AddressFamily::IPV4);
         let raw: RawAttribute = mapped.to_raw();
         // truncate by one byte
@@ -673,6 +791,13 @@ mod tests {
                 actual: _,
             })
         ));
+    }
+
+    #[test]
+    fn requested_address_family_raw_wrong_type() {
+        let _log = crate::tests::test_init_log();
+        let mapped = RequestedAddressFamily::new(AddressFamily::IPV4);
+        let raw: RawAttribute = mapped.to_raw();
         // provide incorrectly typed data
         let mut data: Vec<_> = raw.clone().into();
         BigEndian::write_u16(&mut data[0..2], 0);
@@ -680,6 +805,13 @@ mod tests {
             RequestedAddressFamily::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
             Err(StunParseError::WrongAttributeImplementation)
         ));
+    }
+
+    #[test]
+    fn requested_address_family_raw_wrong_family() {
+        let _log = crate::tests::test_init_log();
+        let mapped = RequestedAddressFamily::new(AddressFamily::IPV4);
+        let raw: RawAttribute = mapped.to_raw();
         // provide invalid address family
         let mut data: Vec<_> = raw.clone().into();
         data[4] = 3;
@@ -690,27 +822,57 @@ mod tests {
     }
 
     #[test]
-    fn additional_address_family() {
+    fn requested_address_family_write_into() {
+        let _log = crate::tests::test_init_log();
+        for family in [AddressFamily::IPV4, AddressFamily::IPV6] {
+            let mapped = RequestedAddressFamily::new(family);
+            assert_eq!(mapped.get_type(), RequestedAddressFamily::TYPE);
+            assert_eq!(mapped.family(), family);
+            let raw: RawAttribute = mapped.to_raw();
+            let mut dest = vec![0; raw.padded_len()];
+            mapped.write_into(&mut dest).unwrap();
+            let raw = RawAttribute::from_bytes(&dest).unwrap();
+            let mapped2 = RequestedAddressFamily::try_from(&raw).unwrap();
+            assert_eq!(mapped2.get_type(), RequestedAddressFamily::TYPE);
+            assert_eq!(mapped2.family(), family);
+        }
+    }
+
+    #[test]
+    #[should_panic = "out of bounds"]
+    fn requested_address_family_write_into_unchecked() {
+        let _log = crate::tests::test_init_log();
+        let mapped = RequestedAddressFamily::new(AddressFamily::IPV6);
+        let raw: RawAttribute = mapped.to_raw();
+        let mut dest = vec![0; raw.padded_len() - 1];
+        mapped.write_into_unchecked(&mut dest);
+    }
+
+    #[test]
+    fn additional_address_family_raw() {
         let _log = crate::tests::test_init_log();
         let mapped = AdditionalAddressFamily::new(AddressFamily::IPV6);
         assert_eq!(mapped.get_type(), AdditionalAddressFamily::TYPE);
         assert_eq!(mapped.family(), AddressFamily::IPV6);
         let raw: RawAttribute = mapped.to_raw();
-        println!("{}", raw);
+        trace!("{}", raw);
         assert_eq!(raw.get_type(), AdditionalAddressFamily::TYPE);
         let mapped2 = AdditionalAddressFamily::try_from(&raw).unwrap();
         assert_eq!(mapped2.get_type(), AdditionalAddressFamily::TYPE);
         assert_eq!(mapped2.family(), AddressFamily::IPV6);
+    }
+
+    #[test]
+    fn additional_address_family_raw_short() {
+        let _log = crate::tests::test_init_log();
+        let mapped = AdditionalAddressFamily::new(AddressFamily::IPV6);
+        assert_eq!(mapped.get_type(), AdditionalAddressFamily::TYPE);
+        assert_eq!(mapped.family(), AddressFamily::IPV6);
+        let raw: RawAttribute = mapped.to_raw();
         // truncate by one byte
         let mut data: Vec<_> = raw.clone().into();
         let len = data.len();
         BigEndian::write_u16(&mut data[2..4], len as u16 - 4 - 1);
-        println!(
-            "{:?}",
-            AdditionalAddressFamily::try_from(
-                &RawAttribute::from_bytes(data[..len - 1].as_ref()).unwrap()
-            )
-        );
         assert!(matches!(
             AdditionalAddressFamily::try_from(
                 &RawAttribute::from_bytes(data[..len - 1].as_ref()).unwrap()
@@ -720,6 +882,15 @@ mod tests {
                 actual: _,
             })
         ));
+    }
+
+    #[test]
+    fn additional_address_family_raw_wrong_type() {
+        let _log = crate::tests::test_init_log();
+        let mapped = AdditionalAddressFamily::new(AddressFamily::IPV6);
+        assert_eq!(mapped.get_type(), AdditionalAddressFamily::TYPE);
+        assert_eq!(mapped.family(), AddressFamily::IPV6);
+        let raw: RawAttribute = mapped.to_raw();
         // provide incorrectly typed data
         let mut data: Vec<_> = raw.clone().into();
         BigEndian::write_u16(&mut data[0..2], 0);
@@ -727,6 +898,15 @@ mod tests {
             AdditionalAddressFamily::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
             Err(StunParseError::WrongAttributeImplementation)
         ));
+    }
+
+    #[test]
+    fn additional_address_family_raw_wrong_family() {
+        let _log = crate::tests::test_init_log();
+        let mapped = AdditionalAddressFamily::new(AddressFamily::IPV6);
+        assert_eq!(mapped.get_type(), AdditionalAddressFamily::TYPE);
+        assert_eq!(mapped.family(), AddressFamily::IPV6);
+        let raw: RawAttribute = mapped.to_raw();
         // provide invalid address family
         let mut data: Vec<_> = raw.clone().into();
         data[4] = 1;
@@ -744,6 +924,32 @@ mod tests {
     }
 
     #[test]
+    fn additional_address_family_write_into() {
+        let _log = crate::tests::test_init_log();
+        let family = AddressFamily::IPV6;
+        let mapped = AdditionalAddressFamily::new(family);
+        assert_eq!(mapped.get_type(), AdditionalAddressFamily::TYPE);
+        assert_eq!(mapped.family(), family);
+        let raw: RawAttribute = mapped.to_raw();
+        let mut dest = vec![0; raw.padded_len()];
+        mapped.write_into(&mut dest).unwrap();
+        let raw = RawAttribute::from_bytes(&dest).unwrap();
+        let mapped2 = AdditionalAddressFamily::try_from(&raw).unwrap();
+        assert_eq!(mapped2.get_type(), AdditionalAddressFamily::TYPE);
+        assert_eq!(mapped2.family(), family);
+    }
+
+    #[test]
+    #[should_panic = "out of bounds"]
+    fn additional_address_fmaily_write_into_unchecked() {
+        let _log = crate::tests::test_init_log();
+        let mapped = AdditionalAddressFamily::new(AddressFamily::IPV6);
+        let raw: RawAttribute = mapped.to_raw();
+        let mut dest = vec![0; raw.padded_len() - 1];
+        mapped.write_into_unchecked(&mut dest);
+    }
+
+    #[test]
     fn address_error_code() {
         let _log = crate::tests::test_init_log();
         let error = ErrorCode::builder(ErrorCode::INSUFFICIENT_CAPACITY)
@@ -755,28 +961,91 @@ mod tests {
             assert_eq!(mapped.family(), family);
             assert_eq!(mapped.error(), &error);
             let raw: RawAttribute = mapped.to_raw();
-            println!("{}", raw);
+            trace!("{}", raw);
             assert_eq!(raw.get_type(), AddressErrorCode::TYPE);
             let mapped2 = AddressErrorCode::try_from(&raw).unwrap();
             assert_eq!(mapped2.get_type(), AddressErrorCode::TYPE);
             assert_eq!(mapped2.family(), family);
             assert_eq!(mapped2.error(), &error);
         }
-        let mapped = AddressErrorCode::new(AddressFamily::IPV6, error);
+    }
+
+    #[test]
+    fn address_error_code_raw_wrong_type() {
+        let _log = crate::tests::test_init_log();
+        let error = ErrorCode::builder(ErrorCode::INSUFFICIENT_CAPACITY)
+            .build()
+            .unwrap();
+        for family in [AddressFamily::IPV4, AddressFamily::IPV6] {
+            let mapped = AddressErrorCode::new(family, error.clone());
+            assert_eq!(mapped.get_type(), AddressErrorCode::TYPE);
+            assert_eq!(mapped.family(), family);
+            assert_eq!(mapped.error(), &error);
+            let raw: RawAttribute = mapped.to_raw();
+            // provide incorrectly typed data
+            let mut data: Vec<_> = raw.clone().into();
+            BigEndian::write_u16(&mut data[0..2], 0);
+            assert!(matches!(
+                AddressErrorCode::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
+                Err(StunParseError::WrongAttributeImplementation)
+            ));
+        }
+    }
+
+    #[test]
+    fn address_error_code_raw_wrong_family() {
+        let _log = crate::tests::test_init_log();
+        let error = ErrorCode::builder(ErrorCode::INSUFFICIENT_CAPACITY)
+            .build()
+            .unwrap();
+        for family in [AddressFamily::IPV4, AddressFamily::IPV6] {
+            let mapped = AddressErrorCode::new(family, error.clone());
+            assert_eq!(mapped.get_type(), AddressErrorCode::TYPE);
+            assert_eq!(mapped.family(), family);
+            assert_eq!(mapped.error(), &error);
+            let raw: RawAttribute = mapped.to_raw();
+            // provide invalid address family
+            let mut data: Vec<_> = raw.clone().into();
+            data[4] = 3;
+            assert!(matches!(
+                AddressErrorCode::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
+                Err(StunParseError::InvalidAttributeData)
+            ));
+        }
+    }
+
+    #[test]
+    fn address_error_code_write_into() {
+        let _log = crate::tests::test_init_log();
+        let error = ErrorCode::builder(ErrorCode::INSUFFICIENT_CAPACITY)
+            .build()
+            .unwrap();
+        for family in [AddressFamily::IPV4, AddressFamily::IPV6] {
+            let mapped = AddressErrorCode::new(family, error.clone());
+            assert_eq!(mapped.get_type(), AddressErrorCode::TYPE);
+            assert_eq!(mapped.family(), family);
+            assert_eq!(mapped.error(), &error);
+            let raw: RawAttribute = mapped.to_raw();
+            let mut dest = vec![0; raw.padded_len()];
+            mapped.write_into(&mut dest).unwrap();
+            let raw = RawAttribute::from_bytes(&dest).unwrap();
+            let mapped2 = AddressErrorCode::try_from(&raw).unwrap();
+            assert_eq!(mapped2.get_type(), AddressErrorCode::TYPE);
+            assert_eq!(mapped2.family(), family);
+            assert_eq!(mapped.error(), &error);
+        }
+    }
+
+    #[test]
+    #[should_panic = "out of range"]
+    fn address_error_code_write_into_unchecked() {
+        let _log = crate::tests::test_init_log();
+        let error = ErrorCode::builder(ErrorCode::INSUFFICIENT_CAPACITY)
+            .build()
+            .unwrap();
+        let mapped = AddressErrorCode::new(AddressFamily::IPV6, error.clone());
         let raw: RawAttribute = mapped.to_raw();
-        // provide incorrectly typed data
-        let mut data: Vec<_> = raw.clone().into();
-        BigEndian::write_u16(&mut data[0..2], 0);
-        assert!(matches!(
-            AddressErrorCode::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
-            Err(StunParseError::WrongAttributeImplementation)
-        ));
-        // provide invalid address family
-        let mut data: Vec<_> = raw.clone().into();
-        data[4] = 3;
-        assert!(matches!(
-            AddressErrorCode::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
-            Err(StunParseError::InvalidAttributeData)
-        ));
+        let mut dest = vec![0; raw.padded_len() - 1];
+        mapped.write_into_unchecked(&mut dest);
     }
 }

@@ -105,9 +105,9 @@ impl core::fmt::Display for Lifetime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
+    use alloc::{vec, vec::Vec};
     use byteorder::{BigEndian, ByteOrder};
-    use std::println;
+    use tracing::trace;
 
     #[test]
     fn lifetime() {
@@ -115,12 +115,25 @@ mod tests {
         let lifetime = Lifetime::new(600);
         assert_eq!(lifetime.get_type(), Lifetime::TYPE);
         assert_eq!(lifetime.seconds(), 600);
+    }
+
+    #[test]
+    fn lifetime_raw() {
+        let _log = crate::tests::test_init_log();
+        let lifetime = Lifetime::new(600);
         let raw: RawAttribute = lifetime.to_raw();
-        println!("{}", raw);
+        trace!("{}", raw);
         assert_eq!(raw.get_type(), Lifetime::TYPE);
         let lifetime2 = Lifetime::try_from(&raw).unwrap();
         assert_eq!(lifetime2.get_type(), Lifetime::TYPE);
         assert_eq!(lifetime2.seconds(), 600);
+    }
+
+    #[test]
+    fn lifetime_raw_wrong_type() {
+        let _log = crate::tests::test_init_log();
+        let lifetime = Lifetime::new(600);
+        let raw: RawAttribute = lifetime.to_raw();
         // provide incorrectly typed data
         let mut data: Vec<_> = raw.into();
         BigEndian::write_u16(&mut data[0..2], 0);
@@ -128,5 +141,28 @@ mod tests {
             Lifetime::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
             Err(StunParseError::WrongAttributeImplementation)
         ));
+    }
+
+    #[test]
+    fn lifetime_write_into() {
+        let _log = crate::tests::test_init_log();
+        let lifetime = Lifetime::new(600);
+        let raw: RawAttribute = lifetime.to_raw();
+        let mut dest = vec![0; raw.padded_len()];
+        lifetime.write_into(&mut dest).unwrap();
+        let raw = RawAttribute::from_bytes(&dest).unwrap();
+        let lifetime2 = Lifetime::try_from(&raw).unwrap();
+        assert_eq!(lifetime2.get_type(), Lifetime::TYPE);
+        assert_eq!(lifetime2.seconds(), 600);
+    }
+
+    #[test]
+    #[should_panic = "out of range"]
+    fn lifetime_write_into_unchecked() {
+        let _log = crate::tests::test_init_log();
+        let lifetime = Lifetime::new(600);
+        let raw: RawAttribute = lifetime.to_raw();
+        let mut dest = vec![0; raw.padded_len() - 1];
+        lifetime.write_into_unchecked(&mut dest);
     }
 }

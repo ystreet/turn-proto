@@ -106,9 +106,9 @@ impl core::fmt::Display for ReservationToken {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
+    use alloc::{vec, vec::Vec};
     use byteorder::{BigEndian, ByteOrder};
-    use std::println;
+    use tracing::trace;
 
     #[test]
     fn reservation_token() {
@@ -116,12 +116,25 @@ mod tests {
         let token = ReservationToken::new(200);
         assert_eq!(token.get_type(), ReservationToken::TYPE);
         assert_eq!(token.token(), 200);
+    }
+
+    #[test]
+    fn reservation_token_raw() {
+        let _log = crate::tests::test_init_log();
+        let token = ReservationToken::new(200);
         let raw: RawAttribute = token.to_raw();
-        println!("{}", raw);
+        trace!("{}", raw);
         assert_eq!(raw.get_type(), ReservationToken::TYPE);
         let token2 = ReservationToken::try_from(&raw).unwrap();
         assert_eq!(token2.get_type(), ReservationToken::TYPE);
         assert_eq!(token2.token(), 200);
+    }
+
+    #[test]
+    fn reservation_token_raw_wrong_type() {
+        let _log = crate::tests::test_init_log();
+        let token = ReservationToken::new(200);
+        let raw: RawAttribute = token.to_raw();
         // provide incorrectly typed data
         let mut data: Vec<_> = raw.into();
         BigEndian::write_u16(&mut data[0..2], 0);
@@ -129,5 +142,30 @@ mod tests {
             ReservationToken::try_from(&RawAttribute::from_bytes(data.as_ref()).unwrap()),
             Err(StunParseError::WrongAttributeImplementation)
         ));
+    }
+
+    #[test]
+    fn reservation_token_write_into() {
+        let _log = crate::tests::test_init_log();
+        let token = ReservationToken::new(200);
+        let raw: RawAttribute = token.to_raw();
+
+        let mut dest = vec![0; raw.padded_len()];
+        token.write_into(&mut dest).unwrap();
+        let raw = RawAttribute::from_bytes(&dest).unwrap();
+        let token2 = ReservationToken::try_from(&raw).unwrap();
+        assert_eq!(token2.get_type(), ReservationToken::TYPE);
+        assert_eq!(token2.token(), 200);
+    }
+
+    #[test]
+    #[should_panic = "out of range"]
+    fn reservation_token_write_into_unchecked() {
+        let _log = crate::tests::test_init_log();
+        let token = ReservationToken::new(200);
+        let raw: RawAttribute = token.to_raw();
+
+        let mut dest = vec![0; raw.padded_len() - 1];
+        token.write_into_unchecked(&mut dest);
     }
 }
