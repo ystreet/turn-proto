@@ -3025,6 +3025,24 @@ mod tests {
         check_allocate_reply_failed(&mut client, TurnProtocolRecv::Handled, now + EXPIRY_BUFFER);
     }
 
+    #[test]
+    fn test_turn_client_protocol_initial_allocate_unexpected_success() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol();
+        let ret = allocate_response(
+            &mut client,
+            |msg| {
+                let mut reply = Message::builder_success(&msg, MessageWriteVec::new());
+                reply.add_attribute(&Realm::new("realm").unwrap()).unwrap();
+                reply.add_attribute(&Nonce::new("nonce").unwrap()).unwrap();
+                reply.finish()
+            },
+            now,
+        );
+        check_allocate_reply_failed(&mut client, ret, now);
+    }
+
     fn initial_allocate(client: &mut TurnClientProtocol, now: Instant) {
         assert!(matches!(
             allocate_response(
