@@ -1074,7 +1074,7 @@ pub(crate) mod tests {
             assert!(self.client.poll_recv(now).is_none());
         }
 
-        fn tcp_connect(&mut self, now: Instant) {
+        pub(crate) fn tcp_connect(&mut self, now: Instant) -> u32 {
             self.client.tcp_connect(self.peer_addr, now).unwrap();
             let transmit = self.client.poll_transmit(now).unwrap();
             assert_eq!(transmit.transport, self.client.transport());
@@ -1112,9 +1112,13 @@ pub(crate) mod tests {
             assert!(msg.has_class(MessageClass::Success));
             let connection_id = msg.attribute::<ConnectionId>().unwrap().id();
             assert!(matches!(
-                self.client.recv(transmit, now),
+                self.client_recv(transmit, now),
                 TurnRecvRet::Handled
             ));
+            connection_id
+        }
+
+        pub(crate) fn tcp_connection_bind(&mut self, connection_id: u32, now: Instant) {
             let TurnPollRet::AllocateTcpSocket {
                 id,
                 socket,
@@ -1145,7 +1149,7 @@ pub(crate) mod tests {
             let msg = Message::from_bytes(&reply.data).unwrap();
             assert!(msg.has_method(CONNECTION_BIND));
             assert!(msg.has_class(MessageClass::Success));
-            assert!(matches!(self.client.recv(reply, now), TurnRecvRet::Handled));
+            assert!(matches!(self.client_recv(reply, now), TurnRecvRet::Handled));
 
             assert!(matches!(
                 self.client.poll_event().unwrap(),
@@ -1194,7 +1198,7 @@ pub(crate) mod tests {
             assert_eq!(transmit.from, self.server.listen_address());
             assert_eq!(transmit.to, self.local_tcp_socket);
             assert_eq!(&transmit.data, sent_data.as_slice());
-            let TurnRecvRet::PeerData(peer_data) = self.client_recv(transmit, now) else {
+            let TurnRecvRet::PeerData(peer_data) = self.client.recv(transmit, now) else {
                 unreachable!();
             };
             assert_eq!(peer_data.peer, self.peer_addr);
@@ -1224,7 +1228,8 @@ pub(crate) mod tests {
         assert_eq!(permission_ip, test.peer_addr.ip());
 
         if test.allocation_transport == TransportType::Tcp {
-            test.tcp_connect(now);
+            let connection_id = test.tcp_connect(now);
+            test.tcp_connection_bind(connection_id, now);
             test.tcp_alloc_sendrecv_data(now);
         } else {
             test.sendrecv_data(now);
