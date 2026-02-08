@@ -4601,6 +4601,68 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_turn_client_protocol_tcp_connection_bind_wrong_transaction_id() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(
+            TransportType::Tcp,
+            TransportType::Tcp,
+            &[AddressFamily::IPV4],
+        );
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        create_permission(&mut client, now);
+        client
+            .tcp_connect(generate_xor_peer_address(), now)
+            .unwrap();
+        connect_success_response(&mut client, 1, now);
+        client
+            .allocated_tcp_socket(
+                1,
+                Socket5Tuple {
+                    transport: TransportType::Tcp,
+                    from: client.local_addr(),
+                    to: client.remote_addr(),
+                },
+                generate_xor_peer_address(),
+                Some(generate_tcp_local_address()),
+                now,
+            )
+            .unwrap();
+        let credentials = client_credentials(&client);
+        assert!(matches!(
+            connection_bind_response(
+                &mut client,
+                |msg| {
+                    let mut response = Message::builder(
+                        MessageType::from_class_method(MessageClass::Success, msg.method()),
+                        TransactionId::generate(),
+                        MessageWriteVec::new(),
+                    );
+                    response
+                        .add_message_integrity(
+                            &credentials.clone().into(),
+                            IntegrityAlgorithm::Sha1,
+                        )
+                        .unwrap();
+                    response.finish()
+                },
+                now,
+            ),
+            TurnProtocolRecv::Handled
+        ));
+        assert!(
+            matches!(client.poll_event(), Some(TurnEvent::TcpConnectFailed(peer_addr)) if peer_addr == generate_xor_peer_address())
+        );
+
+        let data = [4; 9];
+        assert!(matches!(
+            client.send_to(TransportType::Tcp, generate_xor_peer_address(), data, now),
+            Err(SendError::NoTcpSocket)
+        ));
+    }
+
     fn server_connection_attempt_message(
         connection_id: u32,
         credentials: LongTermCredentials,
