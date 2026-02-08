@@ -265,7 +265,12 @@ impl TurnClientApi for TurnClientTcp {
                         if let TurnProtocolRecv::TcpConnectionBound { peer_addr } =
                             self.protocol.handle_message(msg_transmit, now)
                         {
-                            if msg_range.end > transmit.data.as_ref().len() {
+                            let data_len = transmit.data.as_ref().len();
+                            if msg_range.end < data_len {
+                                trace!(
+                                    "Have {} bytes after success ConnectionBind from peer",
+                                    data_len - msg_range.end
+                                );
                                 *tcp_buffer = TcpBuffer::PendingData(
                                     transmit.data.as_ref()[msg_range.end..].to_vec(),
                                     peer_addr,
@@ -304,6 +309,7 @@ impl TurnClientApi for TurnClientTcp {
             TcpBuffer::PendingData(data, peer) => {
                 let mut replace = Vec::default();
                 core::mem::swap(&mut replace, data);
+                replace.extend_from_slice(transmit.data.as_ref());
                 let ret = TurnRecvRet::PeerData(TurnPeerData {
                     data: DataRangeOrOwned::Owned(replace),
                     transport: transmit.transport,
@@ -827,58 +833,220 @@ mod tests {
     fn test_turn_tcp_data_peer_close() {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
-        let mut test = create_test_tcp_allocation(0);
-        turn_allocate_permission(&mut test, now);
-        test.client
-            .tcp_closed(test.local_tcp_socket, test.server.listen_address(), now);
-        assert!(matches!(
+        for split in TRANSMIT_SPLITS {
+            let mut test = create_test_tcp_allocation(split);
+            turn_allocate_permission(&mut test, now);
             test.client
-                .send_to(test.allocation_transport, test.peer_addr, [0, 3, 2], now),
-            Err(SendError::NoTcpSocket)
-        ));
+                .tcp_closed(test.local_tcp_socket, test.server.listen_address(), now);
+            assert!(matches!(
+                test.client
+                    .send_to(test.allocation_transport, test.peer_addr, [0, 3, 2], now),
+                Err(SendError::NoTcpSocket)
+            ));
+        }
     }
 
     #[test]
     fn test_turn_tcp_allocate_tcp_expire_server() {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
-        let mut test = create_test_tcp_allocation(0);
-        turn_allocate_expire_server(&mut test, now);
+        for split in TRANSMIT_SPLITS {
+            let mut test = create_test_tcp_allocation(split);
+            turn_allocate_expire_server(&mut test, now);
+        }
     }
 
     #[test]
     fn test_turn_tcp_permission_expire() {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
-        let mut test = create_test_tcp_allocation(0);
-        turn_allocate_permission(&mut test, now);
-        let now = now + Duration::from_secs(3000);
-        assert!(
-            matches!(test.server.poll(now), TurnServerPollRet::TcpClose { local_addr, remote_addr } if local_addr == test.turn_alloc_addr && remote_addr == test.peer_addr)
-        );
-        assert!(
-            matches!(test.server.poll(now), TurnServerPollRet::TcpClose { local_addr, remote_addr } if local_addr == test.server.listen_address() && remote_addr == test.local_tcp_socket)
-        );
-        assert!(matches!(
-            test.client.recv(
-                Transmit::new(
-                    [],
-                    TransportType::Tcp,
-                    test.server.listen_address(),
-                    test.local_tcp_socket
+        for split in TRANSMIT_SPLITS {
+            let mut test = create_test_tcp_allocation(split);
+            turn_allocate_permission(&mut test, now);
+            let now = now + Duration::from_secs(3000);
+            assert!(
+                matches!(test.server.poll(now), TurnServerPollRet::TcpClose { local_addr, remote_addr } if local_addr == test.turn_alloc_addr && remote_addr == test.peer_addr)
+            );
+            assert!(
+                matches!(test.server.poll(now), TurnServerPollRet::TcpClose { local_addr, remote_addr } if local_addr == test.server.listen_address() && remote_addr == test.local_tcp_socket)
+            );
+            assert!(matches!(
+                test.client.recv(
+                    Transmit::new(
+                        [],
+                        TransportType::Tcp,
+                        test.server.listen_address(),
+                        test.local_tcp_socket
+                    ),
+                    now
                 ),
-                now
-            ),
-            TurnRecvRet::Handled
-        ));
-        assert!(
-            matches!(test.server.poll(now), TurnServerPollRet::SocketClose { transport, listen_addr } if transport == test.allocation_transport && listen_addr == test.turn_alloc_addr)
-        );
+                TurnRecvRet::Handled
+            ));
+            assert!(
+                matches!(test.server.poll(now), TurnServerPollRet::SocketClose { transport, listen_addr } if transport == test.allocation_transport && listen_addr == test.turn_alloc_addr)
+            );
 
-        assert!(matches!(
+            assert!(matches!(
+                test.client
+                    .send_to(test.allocation_transport, test.peer_addr, [0, 3, 2], now),
+                Err(SendError::NoTcpSocket)
+            ));
+        }
+    }
+
+    #[test]
+    fn test_turn_tcp_connection_bind_success_with_data_poll_recv() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        for split in TRANSMIT_SPLITS {
+            let mut test = create_test_tcp_allocation(split);
+            test.allocate(now);
+            let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
+                test.client.poll_event()
+            else {
+                unreachable!();
+            };
+            assert_eq!(transport, test.allocation_transport);
+            assert_eq!(relayed_address, test.turn_alloc_addr);
+            test.create_permission(now);
+            let Some(TurnEvent::PermissionCreated(_transport, _permission_ip)) =
+                test.client.poll_event()
+            else {
+                unreachable!();
+            };
+            let connection_id = test.tcp_connect(now);
+            let TurnPollRet::AllocateTcpSocket {
+                id,
+                socket,
+                peer_addr,
+            } = test.client.poll(now)
+            else {
+                unreachable!();
+            };
+            assert_eq!(connection_id, id);
             test.client
-                .send_to(test.allocation_transport, test.peer_addr, [0, 3, 2], now),
-            Err(SendError::NoTcpSocket)
-        ));
+                .allocated_tcp_socket(id, socket, peer_addr, Some(test.local_tcp_socket), now)
+                .unwrap();
+
+            let data = [8; 7];
+            // some peer sent data before ConnectionBind has completed
+            assert!(test
+                .server
+                .recv(
+                    Transmit::new(
+                        data,
+                        test.allocation_transport,
+                        test.peer_addr,
+                        relayed_address
+                    ),
+                    now
+                )
+                .is_none());
+
+            let transmit = test.client.poll_transmit(now).unwrap();
+            let reply = test.server.recv(transmit, now).unwrap().build();
+            let reply2 = test.server.poll_transmit(now).unwrap();
+            assert!(matches!(
+                test.client_recv(combine_transmit(&reply, &reply2), now),
+                TurnRecvRet::Handled
+            ));
+
+            assert!(matches!(
+                test.client.poll_event().unwrap(),
+                TurnEvent::TcpConnected(_peer_addr)
+            ));
+
+            let recved = test.client.poll_recv(now).unwrap();
+            assert_eq!(recved.transport, test.allocation_transport);
+            assert_eq!(recved.peer, test.peer_addr);
+            assert_eq!(recved.data(), data.as_slice());
+        }
+    }
+
+    #[test]
+    fn test_turn_tcp_connection_bind_success_with_data_recv() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        for split in TRANSMIT_SPLITS {
+            let mut test = create_test_tcp_allocation(split);
+            test.allocate(now);
+            let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
+                test.client.poll_event()
+            else {
+                unreachable!();
+            };
+            assert_eq!(transport, test.allocation_transport);
+            assert_eq!(relayed_address, test.turn_alloc_addr);
+            test.create_permission(now);
+            let Some(TurnEvent::PermissionCreated(_transport, _permission_ip)) =
+                test.client.poll_event()
+            else {
+                unreachable!();
+            };
+            let connection_id = test.tcp_connect(now);
+            let TurnPollRet::AllocateTcpSocket {
+                id,
+                socket,
+                peer_addr,
+            } = test.client.poll(now)
+            else {
+                unreachable!();
+            };
+            assert_eq!(connection_id, id);
+            test.client
+                .allocated_tcp_socket(id, socket, peer_addr, Some(test.local_tcp_socket), now)
+                .unwrap();
+
+            let data = [8; 7];
+            // some peer sent data before ConnectionBind has completed
+            assert!(test
+                .server
+                .recv(
+                    Transmit::new(
+                        data,
+                        test.allocation_transport,
+                        test.peer_addr,
+                        relayed_address
+                    ),
+                    now
+                )
+                .is_none());
+
+            let transmit = test.client.poll_transmit(now).unwrap();
+            let reply = test.server.recv(transmit, now).unwrap().build();
+            let reply2 = test.server.poll_transmit(now).unwrap();
+            assert!(matches!(
+                test.client_recv(combine_transmit(&reply, &reply2), now),
+                TurnRecvRet::Handled
+            ));
+
+            assert!(matches!(
+                test.client.poll_event().unwrap(),
+                TurnEvent::TcpConnected(_peer_addr)
+            ));
+
+            let data2 = [42; 19];
+            let transmit = test
+                .server
+                .recv(
+                    Transmit::new(
+                        data2,
+                        test.allocation_transport,
+                        test.peer_addr,
+                        relayed_address,
+                    ),
+                    now,
+                )
+                .unwrap()
+                .build();
+
+            let TurnRecvRet::PeerData(recved) = test.client.recv(transmit, now) else {
+                unreachable!();
+            };
+            assert_eq!(recved.transport, test.allocation_transport);
+            assert_eq!(recved.peer, test.peer_addr);
+            assert_eq!(&recved.data()[..data.len()], data.as_slice());
+            assert_eq!(&recved.data()[data.len()..], data2.as_slice());
+        }
     }
 }
