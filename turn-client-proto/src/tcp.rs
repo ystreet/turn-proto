@@ -16,6 +16,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::net::{IpAddr, SocketAddr};
 use core::ops::Range;
+use stun_proto::auth::LongTermClientAuth;
 use turn_types::stun::message::Message;
 
 use stun_proto::agent::{StunAgent, Transmit};
@@ -77,7 +78,7 @@ impl TurnClientTcp {
     ///     credentials,
     ///     // The transport protocol of the allocation on the TURN server.
     ///     TransportType::Udp,
-    ///     &[AddressFamily::IPV4]
+    ///     &[AddressFamily::IPV4],
     /// );
     /// assert_eq!(client.transport(), TransportType::Tcp);
     /// assert_eq!(client.local_addr(), local_addr);
@@ -97,11 +98,13 @@ impl TurnClientTcp {
         let stun_agent = StunAgent::builder(TransportType::Tcp, local_addr)
             .remote_addr(remote_addr)
             .build();
+        let mut stun_auth = LongTermClientAuth::new();
+        stun_auth.set_credentials(credentials.into());
 
         Self {
             protocol: TurnClientProtocol::new(
                 stun_agent,
-                credentials,
+                stun_auth,
                 allocation_transport,
                 allocation_families,
             ),

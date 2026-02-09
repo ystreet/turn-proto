@@ -14,6 +14,7 @@
 
 use alloc::vec::Vec;
 use core::net::{IpAddr, SocketAddr};
+use stun_proto::auth::LongTermClientAuth;
 
 use stun_proto::agent::{StunAgent, Transmit};
 use stun_proto::types::data::Data;
@@ -81,11 +82,13 @@ impl TurnClientUdp {
         let stun_agent = StunAgent::builder(TransportType::Udp, local_addr)
             .remote_addr(remote_addr)
             .build();
+        let mut stun_auth = LongTermClientAuth::new();
+        stun_auth.set_credentials(credentials.into());
 
         Self {
             protocol: TurnClientProtocol::new(
                 stun_agent,
-                credentials,
+                stun_auth,
                 TransportType::Udp,
                 allocation_families,
             ),

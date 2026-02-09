@@ -40,7 +40,6 @@ extern crate alloc;
 extern crate std;
 
 pub use stun_types as stun;
-use stun_types::message::LongTermCredentials;
 pub mod attribute;
 pub mod channel;
 pub mod message;
@@ -54,6 +53,7 @@ pub mod prelude {
 
 use alloc::borrow::ToOwned;
 use alloc::string::{String, ToString};
+use stun_types::message::{LongTermCredentials, LongTermKeyCredentials};
 pub use stun_types::AddressFamily;
 
 /// Initialize some debugging functionality of the library.
@@ -72,10 +72,16 @@ pub struct TurnCredentials {
     password: String,
 }
 
+impl From<TurnCredentials> for LongTermCredentials {
+    fn from(value: TurnCredentials) -> Self {
+        LongTermCredentials::new(value.username, value.password)
+    }
+}
+
 impl TurnCredentials {
     /// Transform these credentials into some `LongTermCredentials` for use in a STUN context.
-    pub fn into_long_term_credentials(self, realm: &str) -> LongTermCredentials {
-        LongTermCredentials::new(self.username, self.password, realm.to_string())
+    pub fn into_long_term_credentials(self, realm: &str) -> LongTermKeyCredentials {
+        LongTermKeyCredentials::new(self.username, self.password, realm.to_string())
     }
 
     /// Construct a new set of [`TurnCredentials`]

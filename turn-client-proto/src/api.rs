@@ -766,6 +766,7 @@ pub(crate) mod tests {
             let Some(transmit) = self.server.poll_transmit(now) else {
                 unreachable!();
             };
+            trace!("server: {:?}", self.server);
             let msg = Message::from_bytes(&transmit.data).unwrap();
             assert!(msg.has_method(ALLOCATE));
             assert!(msg.has_class(stun_proto::types::message::MessageClass::Success));

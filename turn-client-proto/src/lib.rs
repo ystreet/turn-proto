@@ -48,7 +48,7 @@
 //!     local_address,
 //!     turn_server_address,
 //!     credentials,
-//!     &[turn_types::AddressFamily::IPV4]
+//!     &[turn_types::AddressFamily::IPV4],
 //! );
 //! ```
 
