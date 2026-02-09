@@ -779,7 +779,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1377,11 +1377,12 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "stun-proto"
-version = "1.0.2"
+version = "2.0.0-rc.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb20bcca0364f603ff3ba2158f464452239c89a397f2f4305fac8e64d687b36c"
+checksum = "2872b4e7c884e67d6cc430f89a6be6a532650607095227663aca1403c7456fef"
 dependencies = [
  "byteorder",
+ "rand",
  "sans-io-time",
  "stun-types",
  "thiserror 2.0.17",
@@ -1390,9 +1391,9 @@ dependencies = [
 
 [[package]]
 name = "stun-types"
-version = "1.0.2"
+version = "2.0.0-rc.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02f29d883cdb94117322c88476936f28bd2744e30833f367049f9f877db26be6"
+checksum = "b673679c962a1f0594bf5ca37f640fd8cc214138ec995d9ce17885fad2950dce"
 dependencies = [
  "arbitrary",
  "byteorder",
@@ -1802,7 +1803,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

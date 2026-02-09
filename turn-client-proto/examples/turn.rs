@@ -606,6 +606,7 @@ impl ClientTcp {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_openssl(
         socket: TcpStream,
         to: SocketAddr,

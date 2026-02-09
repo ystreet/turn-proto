@@ -65,6 +65,7 @@ struct Socket {
 
 impl TurnClientRustls {
     /// Allocate an address on a TURN server to relay data to and from peers.
+    #[allow(clippy::too_many_arguments)]
     pub fn allocate(
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
