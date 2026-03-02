@@ -56,6 +56,8 @@ pub(crate) static CHANNEL_DURATION: Duration = Duration::from_secs(600);
 pub(crate) static CHANNEL_REMOVE_DURATION: Duration = Duration::from_secs(300);
 /// Timeout for a TCP STUN request to expire.
 pub(crate) static TCP_STUN_REQUEST_TIMEOUT: Duration = Duration::from_millis(39500);
+/// The minimum amount of time to send consecutive requests.
+pub(crate) static MIN_STUN_REQUEST_CADENCE: Duration = Duration::from_millis(50);
 
 #[derive(Debug)]
 pub(crate) struct TurnClientProtocol {
@@ -66,10 +68,17 @@ pub(crate) struct TurnClientProtocol {
     state: AuthState,
     allocations: Vec<Allocation>,
 
-    pending_transmits: VecDeque<Transmit<Data<'static>>>,
+    pending_transmits: VecDeque<PendingTransmit>,
+    last_send_time: Option<Instant>,
 
     pending_events: VecDeque<TurnEvent>,
     pending_socket_removal: VecDeque<Socket5Tuple>,
+}
+
+#[derive(Debug)]
+struct PendingTransmit {
+    transmit: Transmit<Data<'static>>,
+    is_stun_request: bool,
 }
 
 impl TurnClientProtocol {
@@ -105,6 +114,7 @@ impl TurnClientProtocol {
             state: AuthState::Initial,
             allocations: vec![],
             pending_transmits: VecDeque::default(),
+            last_send_time: None,
             pending_events: VecDeque::default(),
             pending_socket_removal: VecDeque::default(),
         }
@@ -311,7 +321,7 @@ impl TurnClientProtocol {
         allocations: &mut [Allocation],
         allocation_transport: TransportType,
         address_families: &[AddressFamily],
-        pending_transmits: &mut VecDeque<Transmit<Data<'static>>>,
+        pending_transmits: &mut VecDeque<PendingTransmit>,
         msg: &Message<'_>,
         now: Instant,
     ) -> TurnProtocolRecv {
@@ -329,7 +339,10 @@ impl TurnClientProtocol {
                     address_families,
                     now,
                 );
-                pending_transmits.push_back(transmit);
+                pending_transmits.push_back(PendingTransmit {
+                    transmit,
+                    is_stun_request: true,
+                });
                 *state = AuthState::Authenticating(new_transaction_id);
                 stun_agent.handle_stun_message(msg, stun_agent.remote_addr().unwrap());
                 resent = true;
@@ -341,7 +354,10 @@ impl TurnClientProtocol {
                     info!("Received STALE_NONCE in response to REFRESH for transaction {pending}, resending");
                     let (transmit, transaction_id, lifetime) =
                         Self::send_refresh(stun_agent, stun_auth, 1800, now);
-                    pending_transmits.push_back(transmit);
+                    pending_transmits.push_back(PendingTransmit {
+                        transmit,
+                        is_stun_request: true,
+                    });
                     alloc.pending_refresh = Some((transaction_id, lifetime));
                     stun_agent.handle_stun_message(msg, stun_agent.remote_addr().unwrap());
                     resent = true;
@@ -363,7 +379,10 @@ impl TurnClientProtocol {
                     now,
                 );
                 *transaction_id = new_transaction_id;
-                pending_transmits.push_back(transmit);
+                pending_transmits.push_back(PendingTransmit {
+                    transmit,
+                    is_stun_request: true,
+                });
                 stun_agent.handle_stun_message(msg, stun_agent.remote_addr().unwrap());
                 channel_resent = Some(new_transaction_id);
                 resent = true;
@@ -383,7 +402,10 @@ impl TurnClientProtocol {
                         now,
                     );
                     channel.pending_refresh = Some(transaction_id);
-                    pending_transmits.push_back(transmit);
+                    pending_transmits.push_back(PendingTransmit {
+                        transmit,
+                        is_stun_request: true,
+                    });
                     stun_agent.handle_stun_message(msg, stun_agent.remote_addr().unwrap());
                     channel_resent = Some(transaction_id);
                     resent = true;
@@ -403,7 +425,10 @@ impl TurnClientProtocol {
                 let (transmit, new_transaction_id) =
                     Self::send_create_permission_request(stun_agent, stun_auth, peer_addr, now);
                 *transaction_id = new_transaction_id;
-                pending_transmits.push_back(transmit);
+                pending_transmits.push_back(PendingTransmit {
+                    transmit,
+                    is_stun_request: true,
+                });
                 stun_agent.handle_stun_message(msg, stun_agent.remote_addr().unwrap());
                 resent = true;
                 break 'outer;
@@ -422,7 +447,10 @@ impl TurnClientProtocol {
                     let (transmit, transaction_id) =
                         Self::send_create_permission_request(stun_agent, stun_auth, peer_addr, now);
                     permission.pending_refresh = Some(transaction_id);
-                    pending_transmits.push_back(transmit);
+                    pending_transmits.push_back(PendingTransmit {
+                        transmit,
+                        is_stun_request: true,
+                    });
                     stun_agent.handle_stun_message(msg, stun_agent.remote_addr().unwrap());
                     resent = true;
                     break 'outer;
@@ -463,7 +491,7 @@ impl TurnClientProtocol {
         allocations: &mut Vec<Allocation>,
         allocation_transport: TransportType,
         address_families: &[AddressFamily],
-        pending_transmits: &mut VecDeque<Transmit<Data<'static>>>,
+        pending_transmits: &mut VecDeque<PendingTransmit>,
         pending_events: &mut VecDeque<TurnEvent>,
         msg: Message<'_>,
         transport: TransportType,
@@ -556,7 +584,10 @@ impl TurnClientProtocol {
                     let transmit = stun_agent
                         .send(Data::from(msg.into_boxed_slice()), from, now)
                         .unwrap();
-                    pending_transmits.push_back(transmit);
+                    pending_transmits.push_back(PendingTransmit {
+                        transmit,
+                        is_stun_request: false,
+                    });
                     return TurnProtocolRecv::Handled;
                 };
                 let connection_id = connection_id.id();
@@ -566,7 +597,10 @@ impl TurnClientProtocol {
                     let transmit = stun_agent
                         .send(Data::from(msg.into_boxed_slice()), from, now)
                         .unwrap();
-                    pending_transmits.push_back(transmit);
+                    pending_transmits.push_back(PendingTransmit {
+                        transmit,
+                        is_stun_request: false,
+                    });
                     return TurnProtocolRecv::Handled;
                 };
                 let peer_addr = xor_peer_addr.addr(msg.transaction_id());
@@ -578,7 +612,10 @@ impl TurnClientProtocol {
                     let transmit = stun_agent
                         .send(Data::from(msg.into_boxed_slice()), from, now)
                         .unwrap();
-                    pending_transmits.push_back(transmit);
+                    pending_transmits.push_back(PendingTransmit {
+                        transmit,
+                        is_stun_request: false,
+                    });
                     return TurnProtocolRecv::Handled;
                 };
                 if allocation
@@ -602,7 +639,10 @@ impl TurnClientProtocol {
                     let transmit = stun_agent
                         .send(Data::from(msg.finish().into_boxed_slice()), from, now)
                         .unwrap();
-                    pending_transmits.push_back(transmit);
+                    pending_transmits.push_back(PendingTransmit {
+                        transmit,
+                        is_stun_request: false,
+                    });
                     return TurnProtocolRecv::Handled;
                 }
 
@@ -1169,7 +1209,10 @@ impl TurnClientProtocol {
                                     &self.families,
                                     now,
                                 );
-                                self.pending_transmits.push_back(transmit.into_owned());
+                                self.pending_transmits.push_back(PendingTransmit {
+                                    transmit: transmit.into_owned(),
+                                    is_stun_request: true,
+                                });
                                 self.state = AuthState::Authenticating(transaction_id);
                                 return TurnProtocolRecv::Handled;
                             }
@@ -1328,8 +1371,15 @@ impl TurnClientProtocol {
                             connection_id,
                             now,
                         );
-                        tcp.pending_transaction_id = Some((transaction_id, now, connection_id));
-                        self.pending_transmits.push_back(transmit);
+                        tcp.pending_transaction_id = Some((
+                            transaction_id,
+                            now + TCP_STUN_REQUEST_TIMEOUT,
+                            connection_id,
+                        ));
+                        self.pending_transmits.push_back(PendingTransmit {
+                            transmit,
+                            is_stun_request: true,
+                        });
                         return TurnProtocolRecv::Handled;
                     }
                     Err(_e) => failure = true,
@@ -1469,11 +1519,25 @@ impl TurnClientProtocol {
 
     #[tracing::instrument(name = "turn_client_poll", level = "trace", ret, skip(self))]
     pub(crate) fn poll(&mut self, now: Instant) -> TurnPollRet {
-        if !self.pending_events.is_empty() || !self.pending_transmits.is_empty() {
+        if !self.pending_events.is_empty() {
+            return TurnPollRet::WaitUntil(now);
+        }
+
+        let mut earliest_wait = now + Duration::from_secs(9999);
+        if let Some(last_send) = self.last_send_time {
+            for pending in self.pending_transmits.iter() {
+                if pending.is_stun_request {
+                    earliest_wait = earliest_wait.min(last_send + MIN_STUN_REQUEST_CADENCE);
+                } else {
+                    // a non-request was discovered, send immediately.
+                    return TurnPollRet::WaitUntil(now);
+                }
+            }
+        } else if !self.pending_transmits.is_empty() {
+            // send the first request immediately
             return TurnPollRet::WaitUntil(now);
         }
         let remote_addr = self.remote_addr();
-        let mut earliest_wait = now + Duration::from_secs(9999);
         let cancelled_transaction = match self.stun_agent.poll(now) {
             StunAgentPollRet::WaitUntil(wait) => {
                 earliest_wait = earliest_wait.min(wait);
@@ -1527,7 +1591,11 @@ impl TurnClientProtocol {
                             };
                         }
                     }
-                    let mut expires_at;
+                    let mut expires_at = if alloc.expired {
+                        earliest_wait
+                    } else {
+                        alloc.expires_at
+                    };
 
                     trace!(
                         "alloc {} {} refresh time in {:?}",
@@ -1554,8 +1622,6 @@ impl TurnClientProtocol {
                             );
                             remove_allocation_indices.push(idx);
                             continue;
-                        } else {
-                            expires_at = now;
                         }
                     } else if alloc.expires_at > now {
                         expires_at = alloc.refresh_time().max(now);
@@ -1744,6 +1810,7 @@ impl TurnClientProtocol {
                     // check for any cancelled tcp CONNECTION_BIND
                     for (idx, tcp) in alloc.pending_tcp_allocate.iter_mut().enumerate() {
                         if cancelled_transaction == tcp.request_transaction_id {
+                            info!("TCP allocate for {} was cancelled/timed-out", tcp.peer_addr);
                             self.pending_events
                                 .push_back(TurnEvent::TcpConnectFailed(tcp.peer_addr));
                             alloc.pending_tcp_allocate.swap_remove(idx);
@@ -1783,21 +1850,41 @@ impl TurnClientProtocol {
         skip(self)
     )]
     pub(crate) fn poll_transmit(&mut self, now: Instant) -> Option<Transmit<Data<'static>>> {
-        if let Some(transmit) = self.pending_transmits.pop_front() {
-            return Some(transmit);
-        }
         if let Some(transmit) = self
             .stun_agent
             .poll_transmit(now)
             .map(|transmit| transmit.reinterpret_data(|data| Data::from(data).into_owned()))
         {
+            self.last_send_time = Some(now);
             return Some(transmit);
+        }
+        if self
+            .last_send_time
+            .is_some_and(|last_send| last_send + MIN_STUN_REQUEST_CADENCE > now)
+        {
+            // if we are within the minimum time for requests, then only send any responses we have.
+            if let Some(transmit_idx) = self
+                .pending_transmits
+                .iter()
+                .position(|pending| !pending.is_stun_request)
+            {
+                return self
+                    .pending_transmits
+                    .remove(transmit_idx)
+                    .map(|pending| pending.transmit);
+            }
+            return None;
+        }
+        if let Some(transmit) = self.pending_transmits.pop_front() {
+            self.last_send_time = Some(now);
+            return Some(transmit.transmit);
         }
         match &mut self.state {
             AuthState::Error => None,
             AuthState::Initial => {
                 let (transmit, transaction_id) = self.send_initial_request(now);
                 self.state = AuthState::InitialSent(transaction_id);
+                self.last_send_time = Some(now);
                 Some(transmit)
             }
             AuthState::InitialSent(_transaction_id) => None,
@@ -1815,6 +1902,7 @@ impl TurnClientProtocol {
                             now,
                         );
                         alloc.pending_refresh = Some((transaction_id, lifetime));
+                        self.last_send_time = Some(now);
                         return Some(transmit);
                     }
 
@@ -1838,6 +1926,7 @@ impl TurnClientProtocol {
                                 now,
                             );
                             channel.pending_refresh = Some(transaction_id);
+                            self.last_send_time = Some(now);
                             return Some(transmit);
                         }
                     }
@@ -1859,6 +1948,7 @@ impl TurnClientProtocol {
                                 now,
                             );
                             permission.pending_refresh = Some(transaction_id);
+                            self.last_send_time = Some(now);
                             return Some(transmit);
                         }
                     }
@@ -1892,7 +1982,10 @@ impl TurnClientProtocol {
             alloc.expired = true;
             alloc.pending_refresh = Some((transaction_id, lifetime));
         }
-        self.pending_transmits.push_back(transmit.into_owned());
+        self.pending_transmits.push_back(PendingTransmit {
+            transmit: transmit.into_owned(),
+            is_stun_request: true,
+        });
         Ok(())
     }
 
@@ -1952,7 +2045,10 @@ impl TurnClientProtocol {
         allocation
             .pending_permissions
             .push_back((permission, transaction_id));
-        self.pending_transmits.push_back(transmit);
+        self.pending_transmits.push_back(PendingTransmit {
+            transmit,
+            is_stun_request: true,
+        });
         Ok(())
     }
 
@@ -2005,7 +2101,10 @@ impl TurnClientProtocol {
             transaction_id,
             peer_addr,
         });
-        self.pending_transmits.push_back(transmit.into_owned());
+        self.pending_transmits.push_back(PendingTransmit {
+            transmit: transmit.into_owned(),
+            is_stun_request: true,
+        });
         Ok(())
     }
 
@@ -2064,7 +2163,10 @@ impl TurnClientProtocol {
                     peer_addr,
                     Some(ErrorCode::CONNECTION_TIMEOUT_OR_FAILURE),
                 );
-                self.pending_transmits.push_back(transmit);
+                self.pending_transmits.push_back(PendingTransmit {
+                    transmit,
+                    is_stun_request: false,
+                });
             }
             return Ok(());
         };
@@ -2091,7 +2193,10 @@ impl TurnClientProtocol {
                 peer_addr,
                 None,
             );
-            self.pending_transmits.push_back(transmit);
+            self.pending_transmits.push_back(PendingTransmit {
+                transmit,
+                is_stun_request: false,
+            });
         }
         let connection_id = pending.connection_id;
 
@@ -2115,7 +2220,10 @@ impl TurnClientProtocol {
             peer_addr,
         });
 
-        self.pending_transmits.push_back(transmit);
+        self.pending_transmits.push_back(PendingTransmit {
+            transmit,
+            is_stun_request: true,
+        });
 
         Ok(())
     }
@@ -2252,7 +2360,10 @@ impl TurnClientProtocol {
         allocation
             .pending_channels
             .push_back((channel, transaction_id));
-        self.pending_transmits.push_back(transmit.into_owned());
+        self.pending_transmits.push_back(PendingTransmit {
+            transmit: transmit.into_owned(),
+            is_stun_request: true,
+        });
         Ok(())
     }
 
@@ -2797,6 +2908,7 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         let credentials = client_credentials(&client);
         let ret = allocate_response(
             &mut client,
@@ -2818,6 +2930,7 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         let credentials = client_credentials(&client);
         let ret = allocate_response(
             &mut client,
@@ -2839,6 +2952,7 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         let credentials = client_credentials(&client);
         let ret = allocate_response(
             &mut client,
@@ -2878,6 +2992,7 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         let credentials = client_credentials(&client);
         let ret = allocate_response(
             &mut client,
@@ -2897,6 +3012,7 @@ mod tests {
 
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         let credentials = client_credentials(&client);
         let ret = allocate_response(
             &mut client,
@@ -2980,6 +3096,7 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         let now = wait_advance(&mut client, now);
         check_closed(&mut client, now + EXPIRY_BUFFER + Duration::from_secs(1));
@@ -3001,8 +3118,10 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         let ret = allocate_response(&mut client, |msg| generate_stale_nonce(&msg), now);
         assert!(matches!(ret, TurnProtocolRecv::Handled));
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
     }
 
@@ -3012,6 +3131,7 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         let ret = allocate_response(
             &mut client,
             |msg| {
@@ -3028,6 +3148,7 @@ mod tests {
 
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         let ret = allocate_response(
             &mut client,
             |msg| {
@@ -3042,6 +3163,7 @@ mod tests {
 
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         let ret = allocate_response(
             &mut client,
             |msg| {
@@ -3067,6 +3189,7 @@ mod tests {
             &[AddressFamily::IPV6],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         let credentials = client_credentials(&client);
         let ret = allocate_response(
             &mut client,
@@ -3110,6 +3233,7 @@ mod tests {
             &[AddressFamily::IPV4, AddressFamily::IPV6],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         let credentials = client_credentials(&client);
         let ret = allocate_response(
             &mut client,
@@ -3135,6 +3259,7 @@ mod tests {
             unreachable!();
         };
         assert_eq!(client.relayed_addresses().count(), 0);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate_with_address(
             &mut client,
             &[generate_ipv6_xor_relayed_address()],
@@ -3152,6 +3277,7 @@ mod tests {
             &[AddressFamily::IPV4, AddressFamily::IPV6],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate_with_address(
             &mut client,
             &[
@@ -3168,6 +3294,7 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         let mut now = wait_advance(&mut client, now);
         let _transmit = client.poll_transmit(now).unwrap();
@@ -3184,6 +3311,7 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         let now = wait_advance(&mut client, now);
         let credentials = client_credentials(&client);
@@ -3215,6 +3343,7 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         let now = wait_advance(&mut client, now);
         let credentials = client_credentials(&client);
@@ -3272,10 +3401,12 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         let now = wait_advance(&mut client, now);
         let ret = refresh_response(&mut client, |msg| generate_stale_nonce(&msg), now);
         assert!(matches!(ret, TurnProtocolRecv::Handled));
+        let now = wait_advance(&mut client, now);
         refresh(&mut client, now);
         let TurnPollRet::WaitUntil(_now) =
             client.poll(now + EXPIRY_BUFFER + Duration::from_secs(1))
@@ -3291,11 +3422,13 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         let now = wait_advance(&mut client, now);
         let ret = refresh_response(&mut client, |msg| generate_stale_nonce(&msg), now);
         assert!(matches!(ret, TurnProtocolRecv::Handled));
         // drop the re-REFRESH
+        let now = wait_advance(&mut client, now);
         let _transmit = client.poll_transmit(now).unwrap();
         check_closed(&mut client, now + EXPIRY_BUFFER + Duration::from_secs(1));
     }
@@ -3306,10 +3439,12 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
-        authenticated_allocate(&mut client, now);
         let now = wait_advance(&mut client, now);
+        authenticated_allocate(&mut client, now);
         client.delete(now).unwrap();
+        let now = wait_advance(&mut client, now);
         let ret = refresh_response(&mut client, |msg| generate_stale_nonce(&msg), now);
+        let now = wait_advance(&mut client, now);
         assert!(matches!(ret, TurnProtocolRecv::Handled));
         let credentials = client_credentials(&client);
         let ret = refresh_response(
@@ -3327,6 +3462,7 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         let now = wait_advance(&mut client, now);
         client.delete(now).unwrap();
@@ -3356,9 +3492,10 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_channel_bind_timeout() {
         let _log = crate::tests::test_init_log();
-        let mut now = Instant::ZERO;
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let mut now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         client
             .bind_channel(TransportType::Udp, generate_xor_peer_address(), now)
@@ -3413,7 +3550,9 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         client
             .bind_channel(TransportType::Udp, generate_xor_peer_address(), now)
             .unwrap();
@@ -3471,41 +3610,48 @@ mod tests {
         ret
     }
 
-    fn channel_bind(client: &mut TurnClientProtocol, now: Instant) -> u16 {
+    fn channel_bind(client: &mut TurnClientProtocol, now: Instant) {
         channel_bind_with_address(client, generate_xor_peer_address(), now)
     }
 
-    fn channel_bind_with_address(
-        client: &mut TurnClientProtocol,
-        peer: SocketAddr,
-        now: Instant,
-    ) -> u16 {
+    fn channel_bind_with_address(client: &mut TurnClientProtocol, peer: SocketAddr, now: Instant) {
         client.bind_channel(TransportType::Udp, peer, now).unwrap();
-        channel_bind_success_response(client, now)
     }
 
     #[test]
     fn test_turn_client_protocol_channel_bind_refresh_timeout() {
         let _log = crate::tests::test_init_log();
-        let mut now = Instant::ZERO;
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         channel_bind(&mut client, now);
+        let mut now = wait_advance(&mut client, now);
+        channel_bind_success_response(&mut client, now);
         while let TurnPollRet::WaitUntil(new_now) = client.poll(now) {
             if now == new_now {
                 break;
             }
+            let old_now = now;
             now = new_now;
             if let Some(transmit) = client.poll_transmit(now) {
                 let hdr = MessageHeader::from_bytes(&transmit.data).unwrap();
                 match hdr.get_type().method() {
                     CREATE_PERMISSION => {
-                        client.pending_transmits.push_front(transmit);
-                        create_permission_success_response(&mut client, now);
+                        client.pending_transmits.push_front(PendingTransmit {
+                            transmit,
+                            is_stun_request: true,
+                        });
+                        client.last_send_time = Some(old_now);
+                        create_permission_refresh_success_response(&mut client, now);
                     }
                     REFRESH => {
-                        client.pending_transmits.push_front(transmit);
+                        client.pending_transmits.push_front(PendingTransmit {
+                            transmit,
+                            is_stun_request: true,
+                        });
+                        client.last_send_time = Some(old_now);
                         refresh(&mut client, now);
                     }
                     _ => (),
@@ -3520,12 +3666,15 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         client
             .bind_channel(TransportType::Udp, generate_xor_peer_address(), now)
             .unwrap();
+        let now = wait_advance(&mut client, now);
         let ret = channel_bind_response(&mut client, |msg| generate_stale_nonce(&msg), now);
         assert!(matches!(ret, TurnProtocolRecv::Handled));
+        let now = wait_advance(&mut client, now);
         channel_bind_success_response(&mut client, now);
     }
 
@@ -3535,21 +3684,25 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         channel_bind(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        channel_bind_success_response(&mut client, now);
         let TurnPollRet::WaitUntil(now) = client.poll(now) else {
             unreachable!();
         };
-        create_permission_success_response(&mut client, now);
+        create_permission_refresh_success_response(&mut client, now);
         let TurnPollRet::WaitUntil(now) = client.poll(now) else {
             unreachable!();
         };
-        create_permission_success_response(&mut client, now);
+        create_permission_refresh_success_response(&mut client, now);
         let TurnPollRet::WaitUntil(now) = client.poll(now) else {
             unreachable!();
         };
         let ret = channel_bind_response(&mut client, |msg| generate_stale_nonce(&msg), now);
         assert!(matches!(ret, TurnProtocolRecv::Handled));
+        let now = wait_advance(&mut client, now);
         channel_bind_refresh_success_response(&mut client, now);
     }
 
@@ -3563,6 +3716,7 @@ mod tests {
             &[AddressFamily::IPV4, AddressFamily::IPV6],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate_with_address(
             &mut client,
             &[
@@ -3572,7 +3726,11 @@ mod tests {
             now,
         );
         channel_bind_with_address(&mut client, generate_xor_peer_address(), now);
+        let now = wait_advance(&mut client, now);
+        channel_bind_success_response(&mut client, now);
         channel_bind_with_address(&mut client, generate_ipv6_xor_peer_address(), now);
+        let now = wait_advance(&mut client, now);
+        channel_bind_success_response(&mut client, now);
     }
 
     #[test]
@@ -3585,6 +3743,7 @@ mod tests {
             &[AddressFamily::IPV4, AddressFamily::IPV6],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         assert!(matches!(
             client.bind_channel(TransportType::Udp, generate_ipv6_xor_peer_address(), now),
@@ -3595,27 +3754,39 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_channel_bind_protected_window() {
         let _log = crate::tests::test_init_log();
-        let mut now = Instant::ZERO;
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         channel_bind(&mut client, now);
+        let mut now = wait_advance(&mut client, now);
+        channel_bind_success_response(&mut client, now);
 
         // wait for the channel to expire
         while let TurnPollRet::WaitUntil(new_now) = client.poll(now) {
             if now == new_now {
                 break;
             }
+            let old_now = now;
             now = new_now;
             if let Some(transmit) = client.poll_transmit(now) {
                 let hdr = MessageHeader::from_bytes(&transmit.data).unwrap();
                 match hdr.get_type().method() {
                     CREATE_PERMISSION => {
-                        client.pending_transmits.push_front(transmit);
-                        create_permission_success_response(&mut client, now);
+                        client.pending_transmits.push_front(PendingTransmit {
+                            transmit,
+                            is_stun_request: true,
+                        });
+                        client.last_send_time = Some(old_now);
+                        create_permission_refresh_success_response(&mut client, now);
                     }
                     REFRESH => {
-                        client.pending_transmits.push_front(transmit);
+                        client.pending_transmits.push_front(PendingTransmit {
+                            transmit,
+                            is_stun_request: true,
+                        });
+                        client.last_send_time = Some(old_now);
                         refresh(&mut client, now);
                     }
                     _ => (),
@@ -3626,7 +3797,9 @@ mod tests {
             client.poll_event(),
             Some(TurnEvent::ChannelCreateFailed(TransportType::Udp, _))
         ));
-        assert!(now.duration_since(Instant::ZERO) == CHANNEL_DURATION);
+        assert!(
+            now.duration_since(Instant::ZERO) == CHANNEL_DURATION + 2 * MIN_STUN_REQUEST_CADENCE
+        );
         let channel_reuse_time = now + CHANNEL_REMOVE_DURATION;
         let mut now = now + Duration::from_secs(1);
         client.poll(now);
@@ -3647,16 +3820,25 @@ mod tests {
             if now > channel_reuse_time {
                 break;
             }
+            let old_now = now;
             now = new_now;
             if let Some(transmit) = client.poll_transmit(now) {
                 let hdr = MessageHeader::from_bytes(&transmit.data).unwrap();
                 match hdr.get_type().method() {
                     CREATE_PERMISSION => {
-                        client.pending_transmits.push_front(transmit);
-                        create_permission_success_response(&mut client, now);
+                        client.pending_transmits.push_front(PendingTransmit {
+                            transmit,
+                            is_stun_request: true,
+                        });
+                        client.last_send_time = Some(old_now);
+                        create_permission_refresh_success_response(&mut client, now);
                     }
                     REFRESH => {
-                        client.pending_transmits.push_front(transmit);
+                        client.pending_transmits.push_front(PendingTransmit {
+                            transmit,
+                            is_stun_request: true,
+                        });
+                        client.last_send_time = Some(old_now);
                         refresh(&mut client, now);
                     }
                     _ => (),
@@ -3667,6 +3849,7 @@ mod tests {
         client
             .bind_channel(TransportType::Udp, generate_xor_peer_address(), now)
             .unwrap();
+        let now = wait_advance(&mut client, now);
         channel_bind_refresh_success_response(&mut client, now);
         assert!(matches!(
             client.poll_event(),
@@ -3677,13 +3860,15 @@ mod tests {
     #[test]
     fn test_turn_client_protocol_create_permission_timeout() {
         let _log = crate::tests::test_init_log();
-        let mut now = Instant::ZERO;
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         client
             .create_permission(TransportType::Udp, generate_xor_peer_address().ip(), now)
             .unwrap();
+        let mut now = wait_advance(&mut client, now);
         let _transmit = client.poll_transmit(now);
         while let TurnPollRet::WaitUntil(new_now) = client.poll(now) {
             let (transport, relayed) = client.relayed_addresses().next().unwrap();
@@ -3714,7 +3899,9 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         client
             .create_permission(TransportType::Udp, generate_xor_peer_address().ip(), now)
             .unwrap();
@@ -3736,7 +3923,7 @@ mod tests {
         check_permission_create_failed(&mut client, ret);
     }
 
-    fn create_permission_success_response(client: &mut TurnClientProtocol, now: Instant) {
+    fn create_permission_refresh_success_response(client: &mut TurnClientProtocol, now: Instant) {
         let credentials = client_credentials(client);
         assert!(matches!(
             create_permission_response(
@@ -3754,6 +3941,20 @@ mod tests {
         ));
     }
 
+    fn create_permission_success_response(
+        client: &mut TurnClientProtocol,
+        peer: IpAddr,
+        now: Instant,
+    ) {
+        create_permission_refresh_success_response(client, now);
+        let (transport, _relayed) = client.relayed_addresses().next().unwrap();
+        assert!(matches!(
+            client.poll_event(),
+            Some(TurnEvent::PermissionCreated(_, _))
+        ));
+        assert!(client.have_permission(transport, peer));
+    }
+
     fn create_permission(client: &mut TurnClientProtocol, now: Instant) {
         create_permission_with_address(client, generate_xor_peer_address(), now);
     }
@@ -3766,23 +3967,19 @@ mod tests {
         client
             .create_permission(client.allocation_transport, peer.ip(), now)
             .unwrap();
-        create_permission_success_response(client, now);
-        let (transport, _relayed) = client.relayed_addresses().next().unwrap();
-        assert!(matches!(
-            client.poll_event(),
-            Some(TurnEvent::PermissionCreated(_, _))
-        ));
-        assert!(client.have_permission(transport, peer.ip()));
     }
 
     #[test]
     fn test_turn_client_protocol_create_permission_refresh_timeout() {
         let _log = crate::tests::test_init_log();
-        let mut now = Instant::ZERO;
+        let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         create_permission(&mut client, now);
+        let mut now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
         while let TurnPollRet::WaitUntil(new_now) = client.poll(now) {
             if now == new_now {
                 break;
@@ -3802,13 +3999,16 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         client
             .create_permission(TransportType::Udp, generate_xor_peer_address().ip(), now)
             .unwrap();
+        let now = wait_advance(&mut client, now);
         let ret = create_permission_response(&mut client, |msg| generate_stale_nonce(&msg), now);
         assert!(matches!(ret, TurnProtocolRecv::Handled));
-        create_permission_success_response(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
     }
 
     #[test]
@@ -3817,14 +4017,14 @@ mod tests {
         let now = Instant::ZERO;
         let mut client = new_protocol();
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         create_permission(&mut client, now);
-        let TurnPollRet::WaitUntil(now) = client.poll(now) else {
-            unreachable!();
-        };
+        let now = wait_advance(&mut client, now);
         let ret = create_permission_response(&mut client, |msg| generate_stale_nonce(&msg), now);
         assert!(matches!(ret, TurnProtocolRecv::Handled));
-        create_permission_success_response(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
     }
 
     #[test]
@@ -3837,6 +4037,7 @@ mod tests {
             &[AddressFamily::IPV4, AddressFamily::IPV6],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate_with_address(
             &mut client,
             &[
@@ -3846,7 +4047,11 @@ mod tests {
             now,
         );
         create_permission_with_address(&mut client, generate_xor_peer_address(), now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
         create_permission_with_address(&mut client, generate_ipv6_xor_peer_address(), now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_ipv6_xor_peer_address().ip(), now);
     }
 
     #[test]
@@ -3859,6 +4064,7 @@ mod tests {
             &[AddressFamily::IPV4, AddressFamily::IPV6],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         assert!(matches!(
             client.create_permission(
@@ -3888,6 +4094,7 @@ mod tests {
             &[AddressFamily::IPV4],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
 
         let msg = generate_icmp_message(generate_xor_peer_address());
@@ -3916,8 +4123,11 @@ mod tests {
             &[AddressFamily::IPV4],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         create_permission(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
         let msg = generate_icmp_message(generate_xor_peer_address());
         let msg = Message::from_bytes(&msg).unwrap();
         let TurnProtocolRecv::PeerIcmp {
@@ -4036,6 +4246,7 @@ mod tests {
             &[AddressFamily::IPV4],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         assert!(matches!(
             client.tcp_connect(generate_xor_peer_address(), now),
@@ -4053,8 +4264,11 @@ mod tests {
             &[AddressFamily::IPV4],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         create_permission(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
         client
             .tcp_connect(generate_xor_peer_address(), now)
             .unwrap();
@@ -4075,11 +4289,15 @@ mod tests {
             &[AddressFamily::IPV4],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         create_permission(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
         client
             .tcp_connect(generate_xor_peer_address(), now)
             .unwrap();
+        let now = wait_advance(&mut client, now);
         connect_success_response(&mut client, 1, now);
         assert!(matches!(
             client.tcp_connect(generate_xor_peer_address(), now),
@@ -4097,11 +4315,15 @@ mod tests {
             &[AddressFamily::IPV4],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         create_permission(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
         client
             .tcp_connect(generate_xor_peer_address(), now)
             .unwrap();
+        let now = wait_advance(&mut client, now);
         connect_success_response(&mut client, 1, now);
         client
             .allocated_tcp_socket(
@@ -4132,11 +4354,15 @@ mod tests {
             &[AddressFamily::IPV4],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         create_permission(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
         client
             .tcp_connect(generate_xor_peer_address(), now)
             .unwrap();
+        let now = wait_advance(&mut client, now);
 
         let transmit = client.poll_transmit(now).unwrap();
         let msg = Message::from_bytes(&transmit.data).unwrap();
@@ -4161,11 +4387,15 @@ mod tests {
             &[AddressFamily::IPV4],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         create_permission(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
         client
             .tcp_connect(generate_xor_peer_address(), now)
             .unwrap();
+        let now = wait_advance(&mut client, now);
         connect_success_response(&mut client, 1, now);
         client
             .allocated_tcp_socket(
@@ -4181,6 +4411,7 @@ mod tests {
             )
             .unwrap();
 
+        let now = wait_advance(&mut client, now);
         let transmit = client.poll_transmit(now).unwrap();
         let msg = Message::from_bytes(&transmit.data).unwrap();
         assert!(msg.has_method(CONNECTION_BIND));
@@ -4213,11 +4444,15 @@ mod tests {
             &[AddressFamily::IPV4],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         create_permission(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
         client
             .tcp_connect(generate_xor_peer_address(), now)
             .unwrap();
+        let now = wait_advance(&mut client, now);
         connect_success_response(&mut client, 1, now);
         client
             .allocated_tcp_socket(
@@ -4232,11 +4467,13 @@ mod tests {
                 now,
             )
             .unwrap();
+        let now = wait_advance(&mut client, now);
         assert!(matches!(
             connection_bind_response(&mut client, |msg| generate_stale_nonce(&msg), now,),
             TurnProtocolRecv::Handled
         ));
 
+        let now = wait_advance(&mut client, now);
         connection_bind_success_response(&mut client, generate_xor_peer_address(), now);
         let data = [4; 9];
         let transmit = client
@@ -4258,11 +4495,15 @@ mod tests {
             &[AddressFamily::IPV4],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         create_permission(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
         client
             .tcp_connect(generate_xor_peer_address(), now)
             .unwrap();
+        let now = wait_advance(&mut client, now);
         connect_success_response(&mut client, 1, now);
         client
             .allocated_tcp_socket(
@@ -4277,6 +4518,7 @@ mod tests {
                 now,
             )
             .unwrap();
+        let now = wait_advance(&mut client, now);
         connection_bind_success_response(&mut client, generate_xor_peer_address(), now);
         let data = [4; 9];
         let transmit = client
@@ -4298,11 +4540,15 @@ mod tests {
             &[AddressFamily::IPV4],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         create_permission(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
         client
             .tcp_connect(generate_xor_peer_address(), now)
             .unwrap();
+        let now = wait_advance(&mut client, now);
         connect_success_response(&mut client, 1, now);
         client
             .allocated_tcp_socket(
@@ -4318,6 +4564,7 @@ mod tests {
             )
             .unwrap();
         let credentials = client_credentials(&client);
+        let now = wait_advance(&mut client, now);
         assert!(matches!(
             connection_bind_response(
                 &mut client,
@@ -4363,11 +4610,15 @@ mod tests {
             &[AddressFamily::IPV4],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         create_permission(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
         client
             .tcp_connect(generate_xor_peer_address(), now)
             .unwrap();
+        let now = wait_advance(&mut client, now);
         connect_success_response(&mut client, 1, now);
         client
             .allocated_tcp_socket(
@@ -4387,6 +4638,7 @@ mod tests {
             .credentials()
             .unwrap()
             .to_key("wrong-realm".to_string());
+        let now = wait_advance(&mut client, now);
         assert!(matches!(
             connection_bind_response(
                 &mut client,
@@ -4425,11 +4677,15 @@ mod tests {
             &[AddressFamily::IPV4],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         create_permission(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
         client
             .tcp_connect(generate_xor_peer_address(), now)
             .unwrap();
+        let now = wait_advance(&mut client, now);
         connect_success_response(&mut client, 1, now);
         client
             .allocated_tcp_socket(
@@ -4445,6 +4701,7 @@ mod tests {
             )
             .unwrap();
         let credentials = client_credentials(&client);
+        let now = wait_advance(&mut client, now);
         assert!(matches!(
             connection_bind_response(
                 &mut client,
@@ -4534,6 +4791,8 @@ mod tests {
             .unwrap();
 
         let transmit = client.poll_transmit(now).unwrap();
+        let msg = Message::from_bytes(&transmit.data).unwrap();
+        tracing::error!("{msg}");
         assert_eq!(transmit.transport, TransportType::Tcp);
         assert_eq!(transmit.from, client.local_addr());
         assert_eq!(transmit.to, client.remote_addr());
@@ -4556,8 +4815,11 @@ mod tests {
             &[AddressFamily::IPV4],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         create_permission(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
 
         let credentials = client_credentials(&client);
         server_connection_attempt_success(
@@ -4574,6 +4836,7 @@ mod tests {
             client.send_to(TransportType::Tcp, generate_xor_peer_address(), data, now),
             Err(SendError::NoTcpSocket)
         ));
+        let now = wait_advance(&mut client, now);
         connection_bind_success_response(&mut client, generate_xor_peer_address(), now);
 
         let transmit = client
@@ -4595,8 +4858,11 @@ mod tests {
             &[AddressFamily::IPV4],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         create_permission(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
 
         let credentials = client_credentials(&client);
         server_connection_attempt_success(
@@ -4626,8 +4892,11 @@ mod tests {
                 &[AddressFamily::IPV4],
             );
             initial_allocate(&mut client, now);
+            let now = wait_advance(&mut client, now);
             authenticated_allocate(&mut client, now);
             create_permission(&mut client, now);
+            let now = wait_advance(&mut client, now);
+            create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
 
             let credentials = client_credentials(&client);
             let mut request = Message::builder_request(CONNECTION_ATTEMPT, MessageWriteVec::new());
@@ -4677,8 +4946,11 @@ mod tests {
             &[AddressFamily::IPV4],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         create_permission(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
 
         let credentials = client_credentials(&client);
         let request = server_connection_attempt_message(
@@ -4717,8 +4989,11 @@ mod tests {
             &[AddressFamily::IPV4],
         );
         initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
         authenticated_allocate(&mut client, now);
         create_permission(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
 
         let credentials = client_credentials(&client);
         server_connection_attempt_success(
@@ -4729,6 +5004,7 @@ mod tests {
             Some(generate_tcp_local_address()),
             now,
         );
+        let now = wait_advance(&mut client, now);
         connection_bind_success_response(&mut client, generate_xor_peer_address(), now);
 
         let request =

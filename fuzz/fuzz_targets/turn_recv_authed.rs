@@ -26,11 +26,11 @@ fuzz_target!(|data: &[u8]| {
     let now = Instant::ZERO;
     debug_init();
     let mut test = TestClient::new();
-    test.allocate();
+    let now = test.allocate(now);
     let peer_addr_ipv4 = "10.0.0.4:44444".parse().unwrap();
-    test.create_permission(peer_addr_ipv4);
+    let now = test.create_permission(peer_addr_ipv4, now);
     let peer_addr_ipv6 = "[fe80::1]:44444".parse().unwrap();
-    test.create_permission(peer_addr_ipv6);
+    let now = test.create_permission(peer_addr_ipv6, now);
 
     if let Some(transmit) = test.server.recv(
         Transmit::new(data, TransportType::Udp, peer_addr_ipv6, test.relayed_ipv6),
