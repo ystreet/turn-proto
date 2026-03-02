@@ -1606,7 +1606,8 @@ impl TurnClientProtocol {
                     }
 
                     // refresh TURN channel allocation
-                    for channel in alloc.channels.iter_mut() {
+                    let mut remove_chan_idx = None;
+                    for (chan_idx, channel) in alloc.channels.iter().enumerate() {
                         trace!(
                             "channel {} {} {} refresh time in {:?}",
                             channel.id,
@@ -1619,11 +1620,7 @@ impl TurnClientProtocol {
                                 // TODO: need to eventually fail when the permission times out.
                                 warn!("{} channel {} from {} to {} refresh timed out or was cancelled", alloc.transport, channel.id, alloc.relayed_address, channel.peer_addr);
                                 expires_at = channel.expires_at;
-                                self.pending_events
-                                    .push_back(TurnEvent::ChannelCreateFailed(
-                                        alloc.transport,
-                                        channel.peer_addr,
-                                    ));
+                                remove_chan_idx = Some(chan_idx);
                             } else if channel.expires_at <= now {
                                 info!(
                                     "{} channel {} from {} to {} has expired",
@@ -1632,11 +1629,7 @@ impl TurnClientProtocol {
                                     alloc.relayed_address,
                                     channel.peer_addr
                                 );
-                                self.pending_events
-                                    .push_back(TurnEvent::ChannelCreateFailed(
-                                        alloc.transport,
-                                        channel.peer_addr,
-                                    ));
+                                remove_chan_idx = Some(chan_idx);
                             } else {
                                 expires_at = expires_at.min(channel.expires_at);
                             }
@@ -1644,6 +1637,26 @@ impl TurnClientProtocol {
                             expires_at = expires_at.min(channel.refresh_time().max(now));
                         }
                     }
+                    if let Some(chan_idx) = remove_chan_idx {
+                        let mut channel = alloc.channels.swap_remove(chan_idx);
+                        let peer_addr = channel.peer_addr;
+                        channel.pending_refresh.take();
+                        alloc.expired_channels.push(channel);
+                        self.pending_events
+                            .push_back(TurnEvent::ChannelCreateFailed(alloc.transport, peer_addr));
+                    }
+                    alloc.expired_channels.retain(|expired| {
+                        if expired.expires_at + CHANNEL_REMOVE_DURATION >= now {
+                            trace!(
+                                "removing expired channel {} for peer {}",
+                                expired.id,
+                                expired.peer_addr
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    });
 
                     // refresh TURN permission if necessary
                     for permission in alloc.permissions.iter_mut() {
@@ -2174,6 +2187,13 @@ impl TurnClientProtocol {
         {
             return Err(BindChannelError::AlreadyExists);
         }
+        if let Some(expired) = allocation.expired_channels.iter().find(|channel| {
+            channel.peer_addr == peer_addr && channel.expires_at + CHANNEL_REMOVE_DURATION >= now
+        }) {
+            return Err(BindChannelError::ExpiredChannelExists(
+                expired.expires_at + CHANNEL_REMOVE_DURATION,
+            ));
+        }
 
         if !matches!(self.state, AuthState::Authenticated) {
             return Err(BindChannelError::NoAllocation);
@@ -2193,7 +2213,7 @@ impl TurnClientProtocol {
                 )
                 .chain(allocation.expired_channels.iter())
                 .any(|channel| {
-                    channel.expires_at + CHANNEL_REMOVE_DURATION <= now && channel.id == channel_id
+                    channel.expires_at + CHANNEL_REMOVE_DURATION > now && channel.id == channel_id
                 })
             {
                 continue;
@@ -3415,12 +3435,14 @@ mod tests {
         check_channel_bind_failed(&mut client, ret);
     }
 
-    fn channel_bind_refresh_success_response(client: &mut TurnClientProtocol, now: Instant) {
+    fn channel_bind_refresh_success_response(client: &mut TurnClientProtocol, now: Instant) -> u16 {
         let credentials = client_credentials(client);
+        let mut channel_id = None;
         assert!(matches!(
             channel_bind_response(
                 client,
                 |msg| {
+                    channel_id = Some(msg.attribute::<ChannelNumber>().unwrap().channel());
                     let mut reply = Message::builder_success(&msg, MessageWriteVec::new());
                     reply
                         .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
@@ -3433,10 +3455,11 @@ mod tests {
         ));
         let (transport, _relayed) = client.relayed_addresses().next().unwrap();
         assert!(client.have_permission(transport, generate_xor_peer_address().ip()));
+        channel_id.unwrap()
     }
 
-    fn channel_bind_success_response(client: &mut TurnClientProtocol, now: Instant) {
-        channel_bind_refresh_success_response(client, now);
+    fn channel_bind_success_response(client: &mut TurnClientProtocol, now: Instant) -> u16 {
+        let ret = channel_bind_refresh_success_response(client, now);
         assert!(matches!(
             client.poll_event(),
             Some(TurnEvent::PermissionCreated(_, _))
@@ -3445,15 +3468,20 @@ mod tests {
             client.poll_event(),
             Some(TurnEvent::ChannelCreated(_, _))
         ));
+        ret
     }
 
-    fn channel_bind(client: &mut TurnClientProtocol, now: Instant) {
-        channel_bind_with_address(client, generate_xor_peer_address(), now);
+    fn channel_bind(client: &mut TurnClientProtocol, now: Instant) -> u16 {
+        channel_bind_with_address(client, generate_xor_peer_address(), now)
     }
 
-    fn channel_bind_with_address(client: &mut TurnClientProtocol, peer: SocketAddr, now: Instant) {
+    fn channel_bind_with_address(
+        client: &mut TurnClientProtocol,
+        peer: SocketAddr,
+        now: Instant,
+    ) -> u16 {
         client.bind_channel(TransportType::Udp, peer, now).unwrap();
-        channel_bind_success_response(client, now);
+        channel_bind_success_response(client, now)
     }
 
     #[test]
@@ -3561,6 +3589,88 @@ mod tests {
         assert!(matches!(
             client.bind_channel(TransportType::Udp, generate_ipv6_xor_peer_address(), now),
             Err(BindChannelError::NoAllocation)
+        ));
+    }
+
+    #[test]
+    fn test_turn_client_protocol_channel_bind_protected_window() {
+        let _log = crate::tests::test_init_log();
+        let mut now = Instant::ZERO;
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        channel_bind(&mut client, now);
+
+        // wait for the channel to expire
+        while let TurnPollRet::WaitUntil(new_now) = client.poll(now) {
+            if now == new_now {
+                break;
+            }
+            now = new_now;
+            if let Some(transmit) = client.poll_transmit(now) {
+                let hdr = MessageHeader::from_bytes(&transmit.data).unwrap();
+                match hdr.get_type().method() {
+                    CREATE_PERMISSION => {
+                        client.pending_transmits.push_front(transmit);
+                        create_permission_success_response(&mut client, now);
+                    }
+                    REFRESH => {
+                        client.pending_transmits.push_front(transmit);
+                        refresh(&mut client, now);
+                    }
+                    _ => (),
+                }
+            }
+        }
+        assert!(matches!(
+            client.poll_event(),
+            Some(TurnEvent::ChannelCreateFailed(TransportType::Udp, _))
+        ));
+        assert!(now.duration_since(Instant::ZERO) == CHANNEL_DURATION);
+        let channel_reuse_time = now + CHANNEL_REMOVE_DURATION;
+        let mut now = now + Duration::from_secs(1);
+        client.poll(now);
+
+        // binding a channel to the same peer address within the delete protection window should
+        // error
+        assert!(matches!(
+            client
+                .bind_channel(
+                    TransportType::Udp,
+                    generate_xor_peer_address(),
+                    now
+                ),
+            Err(BindChannelError::ExpiredChannelExists(expire_time))
+                if expire_time == channel_reuse_time
+        ));
+        while let TurnPollRet::WaitUntil(new_now) = client.poll(now) {
+            if now > channel_reuse_time {
+                break;
+            }
+            now = new_now;
+            if let Some(transmit) = client.poll_transmit(now) {
+                let hdr = MessageHeader::from_bytes(&transmit.data).unwrap();
+                match hdr.get_type().method() {
+                    CREATE_PERMISSION => {
+                        client.pending_transmits.push_front(transmit);
+                        create_permission_success_response(&mut client, now);
+                    }
+                    REFRESH => {
+                        client.pending_transmits.push_front(transmit);
+                        refresh(&mut client, now);
+                    }
+                    _ => (),
+                }
+            }
+        }
+        assert!(client.allocations[0].expired_channels.is_empty());
+        client
+            .bind_channel(TransportType::Udp, generate_xor_peer_address(), now)
+            .unwrap();
+        channel_bind_refresh_success_response(&mut client, now);
+        assert!(matches!(
+            client.poll_event(),
+            Some(TurnEvent::ChannelCreated(_, _))
         ));
     }
 
