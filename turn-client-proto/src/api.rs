@@ -257,6 +257,9 @@ pub enum BindChannelError {
     /// The channel identifier already exists and cannot be recreated.
     #[error("The channel identifier already exists and cannot be recreated.")]
     AlreadyExists,
+    /// The channel for requested peer address has expired and cannot be recreated yet.
+    #[error("The channel for requested peer address has expired and cannot be recreated until {}.", .0)]
+    ExpiredChannelExists(Instant),
     /// There is no connection to the TURN server that can handle this channel.
     #[error("There is no connection to the TURN server that can handle this channel.")]
     NoAllocation,
