@@ -454,7 +454,7 @@ pub(crate) mod tests {
     use core::time::Duration;
     use std::println;
 
-    use crate::protocol::{EXPIRY_BUFFER, PERMISSION_DURATION};
+    use crate::protocol::{EXPIRY_BUFFER, MIN_STUN_REQUEST_CADENCE, PERMISSION_DURATION};
 
     use super::*;
     use tracing::trace;
@@ -705,7 +705,16 @@ pub(crate) mod tests {
             }
         }
 
-        pub(crate) fn allocate(&mut self, now: Instant) {
+        pub(crate) fn client_advance(&mut self, now: Instant) -> Instant {
+            let TurnPollRet::WaitUntil(expiry) = self.client.poll(now) else {
+                unreachable!();
+            };
+            assert!(expiry > now);
+            trace!("advancing time to {expiry}");
+            expiry
+        }
+
+        pub(crate) fn allocate(&mut self, now: Instant) -> Instant {
             // initial allocate
             let transmit = self.client.poll_transmit(now).unwrap();
             let msg = Message::from_bytes(&transmit.data).unwrap();
@@ -732,6 +741,7 @@ pub(crate) mod tests {
             ));
 
             // authenticated allocate
+            let now = self.client_advance(now);
             let transmit = self.client.poll_transmit(now).unwrap();
             let msg = Message::from_bytes(&transmit.data).unwrap();
             assert!(msg.has_method(ALLOCATE));
@@ -787,10 +797,11 @@ pub(crate) mod tests {
                 .any(
                     |(transport, relayed)| transport == self.allocation_transport
                         && relayed == self.turn_alloc_addr
-                ))
+                ));
+            now
         }
 
-        fn refresh(&mut self, now: Instant) {
+        fn refresh(&mut self, now: Instant) -> Instant {
             let TurnPollRet::WaitUntil(expiry) = self.client.poll(now) else {
                 unreachable!()
             };
@@ -807,8 +818,7 @@ pub(crate) mod tests {
             // ok reply
             let transmit = self.server.recv(transmit, now).unwrap().build();
             let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
-                self.refresh(now);
-                return;
+                return self.refresh(now + MIN_STUN_REQUEST_CADENCE);
             };
             let msg = Message::from_bytes(&transmit.data).unwrap();
             assert!(msg.has_method(REFRESH));
@@ -825,20 +835,22 @@ pub(crate) mod tests {
                 .any(
                     |(transport, relayed)| transport == self.allocation_transport
                         && relayed == self.turn_alloc_addr
-                ))
+                ));
+            now
         }
 
-        fn delete_allocation(&mut self, now: Instant) {
+        fn delete_allocation(&mut self, now: Instant) -> Instant {
             self.client.delete(now).unwrap();
+            let now = self.client_advance(now);
             let transmit = self.client.poll_transmit(now).unwrap();
-            self.handle_delete_allocation(transmit, now);
+            self.handle_delete_allocation(transmit, now)
         }
 
         fn handle_delete_allocation<T: AsRef<[u8]> + core::fmt::Debug>(
             &mut self,
             transmit: Transmit<T>,
             now: Instant,
-        ) {
+        ) -> Instant {
             let msg = Message::from_bytes(transmit.data.as_ref()).unwrap();
             assert!(msg.has_method(REFRESH));
             assert!(msg.has_class(stun_proto::types::message::MessageClass::Request));
@@ -850,9 +862,10 @@ pub(crate) mod tests {
             // ok reply
             let transmit = self.server.recv(transmit, now).unwrap().build();
             let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
+                let now = self.client_advance(now);
                 let transmit = self.client.poll_transmit(now).unwrap();
                 self.handle_delete_allocation(transmit, now);
-                return;
+                return now;
             };
             let msg = Message::from_bytes(&transmit.data).unwrap();
             assert!(msg.has_method(REFRESH));
@@ -869,22 +882,24 @@ pub(crate) mod tests {
                 .any(
                     |(transport, relayed)| transport == self.allocation_transport
                         && relayed == self.turn_alloc_addr
-                ))
+                ));
+            now
         }
 
-        pub(crate) fn create_permission(&mut self, now: Instant) {
+        pub(crate) fn create_permission(&mut self, now: Instant) -> Instant {
             self.client
                 .create_permission(self.allocation_transport, self.peer_addr.ip(), now)
                 .unwrap();
+            let now = self.client_advance(now);
             let transmit = self.client.poll_transmit(now).unwrap();
-            self.handle_create_permission(transmit, now);
+            self.handle_create_permission(transmit, now)
         }
 
         fn handle_create_permission<T: AsRef<[u8]> + core::fmt::Debug>(
             &mut self,
             transmit: Transmit<T>,
             now: Instant,
-        ) {
+        ) -> Instant {
             let msg = Message::from_bytes(transmit.data.as_ref()).unwrap();
             assert!(msg.has_method(CREATE_PERMISSION));
             assert!(msg.has_class(stun_proto::types::message::MessageClass::Request));
@@ -892,15 +907,17 @@ pub(crate) mod tests {
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
             let transmit = self.server.recv(transmit, now).unwrap().build();
             let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
+                let now = self.client_advance(now);
                 let transmit = self.client.poll_transmit(now).unwrap();
                 self.handle_create_permission(transmit, now);
-                return;
+                return now;
             };
             assert!(matches!(
                 self.client_recv(transmit, now),
                 TurnRecvRet::Handled
             ));
             self.validate_client_permission_state();
+            now
         }
 
         fn maybe_handles_stale_nonce<T: AsRef<[u8]> + core::fmt::Debug>(
@@ -929,19 +946,20 @@ pub(crate) mod tests {
                 .any(|perm_addr| perm_addr == self.peer_addr.ip()));
         }
 
-        fn bind_channel(&mut self, now: Instant) {
+        fn bind_channel(&mut self, now: Instant) -> Instant {
             self.client
                 .bind_channel(self.allocation_transport, self.peer_addr, now)
                 .unwrap();
+            let now = self.client_advance(now);
             let transmit = self.client.poll_transmit(now).unwrap();
-            self.handle_bind_channel(transmit, now);
+            self.handle_bind_channel(transmit, now)
         }
 
         fn handle_bind_channel<T: AsRef<[u8]> + core::fmt::Debug>(
             &mut self,
             transmit: Transmit<T>,
             now: Instant,
-        ) {
+        ) -> Instant {
             let msg = Message::from_bytes(transmit.data.as_ref()).unwrap();
             assert!(msg.has_method(CHANNEL_BIND));
             assert!(msg.has_class(stun_proto::types::message::MessageClass::Request));
@@ -949,9 +967,10 @@ pub(crate) mod tests {
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
             let transmit = self.server.recv(transmit, now).unwrap().build();
             let Some(transmit) = self.maybe_handles_stale_nonce(transmit, now) else {
+                let now = self.client_advance(now);
                 let transmit = self.client.poll_transmit(now).unwrap();
                 self.handle_create_permission(transmit, now);
-                return;
+                return now;
             };
             assert!(matches!(
                 self.client_recv(transmit, now),
@@ -959,7 +978,8 @@ pub(crate) mod tests {
             ));
             assert!(self
                 .client
-                .have_permission(self.allocation_transport, self.peer_addr.ip()))
+                .have_permission(self.allocation_transport, self.peer_addr.ip()));
+            now
         }
 
         fn sendrecv_data(&mut self, now: Instant) {
@@ -1078,8 +1098,9 @@ pub(crate) mod tests {
             assert!(self.client.poll_recv(now).is_none());
         }
 
-        pub(crate) fn tcp_connect(&mut self, now: Instant) -> u32 {
+        pub(crate) fn tcp_connect(&mut self, now: Instant) -> (Instant, u32) {
             self.client.tcp_connect(self.peer_addr, now).unwrap();
+            let now = self.client_advance(now);
             let transmit = self.client.poll_transmit(now).unwrap();
             assert_eq!(transmit.transport, self.client.transport());
             assert_eq!(transmit.from, self.client.local_addr());
@@ -1119,10 +1140,10 @@ pub(crate) mod tests {
                 self.client_recv(transmit, now),
                 TurnRecvRet::Handled
             ));
-            connection_id
+            (now, connection_id)
         }
 
-        pub(crate) fn tcp_connection_bind(&mut self, connection_id: u32, now: Instant) {
+        pub(crate) fn tcp_connection_bind(&mut self, connection_id: u32, now: Instant) -> Instant {
             let TurnPollRet::AllocateTcpSocket {
                 id,
                 socket,
@@ -1139,6 +1160,7 @@ pub(crate) mod tests {
             self.client
                 .allocated_tcp_socket(id, socket, peer_addr, Some(self.local_tcp_socket), now)
                 .unwrap();
+            let now = self.client_advance(now);
             let transmit = self.client.poll_transmit(now).unwrap();
             assert_eq!(transmit.transport, TransportType::Tcp);
             assert_eq!(transmit.from, self.local_tcp_socket);
@@ -1159,6 +1181,7 @@ pub(crate) mod tests {
                 self.client.poll_event().unwrap(),
                 TurnEvent::TcpConnected(_peer_addr)
             ));
+            now
         }
 
         fn tcp_alloc_sendrecv_data(&mut self, now: Instant) {
@@ -1214,8 +1237,8 @@ pub(crate) mod tests {
     pub(crate) fn turn_allocate_permission<A: TurnClientApi, S: TurnServerApi>(
         test: &mut TurnTest<A, S>,
         now: Instant,
-    ) {
-        test.allocate(now);
+    ) -> Instant {
+        let now = test.allocate(now);
         let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
             test.client.poll_event()
         else {
@@ -1223,7 +1246,7 @@ pub(crate) mod tests {
         };
         assert_eq!(transport, test.allocation_transport);
         assert_eq!(relayed_address, test.turn_alloc_addr);
-        test.create_permission(now);
+        let now = test.create_permission(now);
         let Some(TurnEvent::PermissionCreated(transport, permission_ip)) = test.client.poll_event()
         else {
             unreachable!();
@@ -1232,12 +1255,13 @@ pub(crate) mod tests {
         assert_eq!(permission_ip, test.peer_addr.ip());
 
         if test.allocation_transport == TransportType::Tcp {
-            let connection_id = test.tcp_connect(now);
-            test.tcp_connection_bind(connection_id, now);
+            let (now, connection_id) = test.tcp_connect(now);
+            let now = test.tcp_connection_bind(connection_id, now);
             test.tcp_alloc_sendrecv_data(now);
+            now
         } else {
             test.sendrecv_data(now);
-            test.bind_channel(now);
+            let now = test.bind_channel(now);
             let Some(TurnEvent::ChannelCreated(transport, channel_addr)) = test.client.poll_event()
             else {
                 unreachable!();
@@ -1245,6 +1269,7 @@ pub(crate) mod tests {
             assert_eq!(transport, test.allocation_transport);
             assert_eq!(channel_addr, test.peer_addr);
             test.sendrecv_data_channel(now);
+            now
         }
     }
 
@@ -1266,6 +1291,7 @@ pub(crate) mod tests {
         test.client
             .create_permission(test.allocation_transport, test.peer_addr.ip(), now)
             .unwrap();
+        let now = test.client_advance(now);
         let transmit = test.client.poll_transmit(now).unwrap();
         let now = now + Duration::from_secs(3000);
         let transmit = test.server.recv(transmit, now).unwrap().build();
@@ -1285,7 +1311,7 @@ pub(crate) mod tests {
         test: &mut TurnTest<A, S>,
         now: Instant,
     ) {
-        test.allocate(now);
+        let now = test.allocate(now);
         let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
             test.client.poll_event()
         else {
@@ -1309,7 +1335,7 @@ pub(crate) mod tests {
         test: &mut TurnTest<A, S>,
         now: Instant,
     ) {
-        test.allocate(now);
+        let now = test.allocate(now);
         let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
             test.client.poll_event()
         else {
@@ -1324,7 +1350,7 @@ pub(crate) mod tests {
         trace!("expiry: {expiry:?}");
         assert!(expiry > now + Duration::from_secs(1000));
 
-        test.refresh(expiry);
+        let expiry = test.refresh(expiry);
         test.create_permission(expiry);
         let Some(TurnEvent::PermissionCreated(transport, permission_ip)) = test.client.poll_event()
         else {
@@ -1339,7 +1365,12 @@ pub(crate) mod tests {
         test: &mut TurnTest<A, S>,
         now: Instant,
     ) {
-        test.allocate(now);
+        let now = test.allocate(now);
+        let Some(TurnEvent::AllocationCreated(_transport, _relayed_address)) =
+            test.client.poll_event()
+        else {
+            unreachable!();
+        };
         test.delete_allocation(now);
         assert!(
             matches!(test.server.poll(now), TurnServerPollRet::SocketClose { transport, listen_addr } if transport == test.allocation_transport && listen_addr == test.turn_alloc_addr)
@@ -1357,7 +1388,7 @@ pub(crate) mod tests {
         test: &mut TurnTest<A, S>,
         now: Instant,
     ) {
-        test.allocate(now);
+        let now = test.allocate(now);
         let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
             test.client.poll_event()
         else {
@@ -1365,7 +1396,7 @@ pub(crate) mod tests {
         };
         assert_eq!(transport, test.allocation_transport);
         assert_eq!(relayed_address, test.turn_alloc_addr);
-        test.bind_channel(now);
+        let now = test.bind_channel(now);
         let Some(TurnEvent::PermissionCreated(transport, permission_ip)) = test.client.poll_event()
         else {
             unreachable!();
@@ -1380,7 +1411,7 @@ pub(crate) mod tests {
         now: Instant,
     ) {
         // tests that sending stun messages can be passed through the turn server
-        test.allocate(now);
+        let now = test.allocate(now);
         let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
             test.client.poll_event()
         else {
@@ -1388,7 +1419,7 @@ pub(crate) mod tests {
         };
         assert_eq!(transport, test.allocation_transport);
         assert_eq!(relayed_address, test.turn_alloc_addr);
-        test.bind_channel(now);
+        let now = test.bind_channel(now);
         let Some(TurnEvent::PermissionCreated(transport, permission_ip)) = test.client.poll_event()
         else {
             unreachable!();
@@ -1414,7 +1445,7 @@ pub(crate) mod tests {
         test: &mut TurnTest<A, S>,
         now: Instant,
     ) {
-        test.allocate(now);
+        let now = test.allocate(now);
         let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
             test.client.poll_event()
         else {
@@ -1423,7 +1454,7 @@ pub(crate) mod tests {
         assert_eq!(transport, test.allocation_transport);
         assert_eq!(relayed_address, test.turn_alloc_addr);
 
-        test.create_permission(now);
+        let now = test.create_permission(now);
         let Some(TurnEvent::PermissionCreated(transport, permission_ip)) = test.client.poll_event()
         else {
             unreachable!();
@@ -1435,7 +1466,7 @@ pub(crate) mod tests {
             unreachable!()
         };
         assert_eq!(expiry, now + PERMISSION_DURATION - EXPIRY_BUFFER);
-        let TurnPollRet::WaitUntil(now) = test.client.poll(expiry) else {
+        let TurnPollRet::WaitUntil(mut now) = test.client.poll(expiry) else {
             unreachable!()
         };
         assert_eq!(now, expiry);
@@ -1451,6 +1482,7 @@ pub(crate) mod tests {
         let transmit = if let Some(transmit) = test.maybe_handles_stale_nonce(transmit, now) {
             transmit
         } else {
+            now = test.client_advance(now);
             create_permission(test, now)
         };
         assert!(matches!(
@@ -1466,7 +1498,7 @@ pub(crate) mod tests {
         test: &mut TurnTest<A, S>,
         now: Instant,
     ) {
-        test.allocate(now);
+        let now = test.allocate(now);
         let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
             test.client.poll_event()
         else {
@@ -1475,7 +1507,7 @@ pub(crate) mod tests {
         assert_eq!(transport, test.allocation_transport);
         assert_eq!(relayed_address, test.turn_alloc_addr);
 
-        test.create_permission(now);
+        let now = test.create_permission(now);
         let Some(TurnEvent::PermissionCreated(transport, permission_ip)) = test.client.poll_event()
         else {
             unreachable!();
@@ -1528,7 +1560,7 @@ pub(crate) mod tests {
         test: &mut TurnTest<A, S>,
         now: Instant,
     ) {
-        test.allocate(now);
+        let now = test.allocate(now);
         let Some(TurnEvent::AllocationCreated(transport, relayed_address)) =
             test.client.poll_event()
         else {
@@ -1537,7 +1569,7 @@ pub(crate) mod tests {
         assert_eq!(transport, test.allocation_transport);
         assert_eq!(relayed_address, test.turn_alloc_addr);
 
-        test.bind_channel(now);
+        let now = test.bind_channel(now);
         let Some(TurnEvent::PermissionCreated(transport, permission_ip)) = test.client.poll_event()
         else {
             unreachable!();
@@ -1555,11 +1587,9 @@ pub(crate) mod tests {
         let mut permissions_done = now;
         for _i in 0..2 {
             let now = permissions_done;
-            let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
-                unreachable!()
-            };
+            let expiry = test.client_advance(now);
             assert_eq!(expiry, now + PERMISSION_DURATION - EXPIRY_BUFFER);
-            let TurnPollRet::WaitUntil(now) = test.client.poll(expiry) else {
+            let TurnPollRet::WaitUntil(mut now) = test.client.poll(expiry) else {
                 unreachable!()
             };
             assert_eq!(now, expiry);
@@ -1576,6 +1606,7 @@ pub(crate) mod tests {
             let transmit = if let Some(transmit) = test.maybe_handles_stale_nonce(transmit, now) {
                 transmit
             } else {
+                now = test.client_advance(now);
                 create_permission(test, now)
             };
             assert!(matches!(
@@ -1590,7 +1621,10 @@ pub(crate) mod tests {
         let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
             unreachable!()
         };
-        assert_eq!(expiry, now + Duration::from_secs(60));
+        assert_eq!(
+            expiry,
+            now + Duration::from_secs(60) - 2 * MIN_STUN_REQUEST_CADENCE
+        );
         let TurnPollRet::WaitUntil(now) = test.client.poll(expiry) else {
             unreachable!()
         };
@@ -1612,7 +1646,7 @@ pub(crate) mod tests {
         test: &mut TurnTest<A, S>,
         now: Instant,
     ) {
-        turn_allocate_permission(test, now);
+        let now = turn_allocate_permission(test, now);
         let data = Message::builder(
             MessageType::from_class_method(
                 turn_types::stun::message::MessageClass::Error,
@@ -1638,7 +1672,7 @@ pub(crate) mod tests {
         test: &mut TurnTest<A, S>,
         now: Instant,
     ) {
-        turn_allocate_permission(test, now);
+        let now = turn_allocate_permission(test, now);
         let data = [1; 4];
         let transmit = Transmit::new(
             data,

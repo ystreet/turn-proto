@@ -792,6 +792,8 @@ mod tests {
 
     fn allocate<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
         complete_io(test, now);
+        let now = test.client_advance(now);
+        complete_io(test, now);
         test.server.allocated_socket(
             test.client.transport(),
             test.client.remote_addr(),
@@ -813,10 +815,11 @@ mod tests {
     fn create_permission<A: TurnClientApi, S: TurnServerApi>(
         test: &mut TurnTest<A, S>,
         now: Instant,
-    ) {
+    ) -> Instant {
         test.client
             .create_permission(test.allocation_transport, test.peer_addr.ip(), now)
             .unwrap();
+        let now = test.client_advance(now);
         complete_io(test, now);
 
         let event = test.client.poll_event().unwrap();
@@ -827,6 +830,7 @@ mod tests {
             .permissions(transport, relayed)
             .any(|perm_ip| perm_ip == test.peer_addr.ip()));
         assert!(test.client.have_permission(transport, test.peer_addr.ip()));
+        now
     }
 
     fn delete<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
@@ -835,10 +839,14 @@ mod tests {
         assert_eq!(test.client.relayed_addresses().count(), 0);
     }
 
-    fn channel_bind<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
+    fn channel_bind<A: TurnClientApi, S: TurnServerApi>(
+        test: &mut TurnTest<A, S>,
+        now: Instant,
+    ) -> Instant {
         test.client
             .bind_channel(test.allocation_transport, test.peer_addr, now)
             .unwrap();
+        let now = test.client_advance(now);
         complete_io(test, now);
 
         if let Some(event) = test.client.poll_event() {
@@ -850,6 +858,7 @@ mod tests {
             .permissions(transport, relayed)
             .any(|perm_ip| perm_ip == test.peer_addr.ip()));
         assert!(test.client.have_permission(transport, test.peer_addr.ip()));
+        now
     }
 
     fn sendrecv_data<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
@@ -904,7 +913,7 @@ mod tests {
             let now = Instant::ZERO;
             let mut test = create_test(transport);
             allocate(&mut test, now);
-            create_permission(&mut test, now);
+            let now = create_permission(&mut test, now);
             sendrecv_data(&mut test, now);
         }
     }
@@ -916,14 +925,14 @@ mod tests {
             let now = Instant::ZERO;
             let mut test = create_test(transport);
             allocate(&mut test, now);
-            let TurnPollRet::WaitUntil(expiry) = test.client.poll(now) else {
-                unreachable!();
-            };
+            let expiry = test.client_advance(now);
             assert!(now + Duration::from_secs(1000) < expiry);
-            // TODO: removing this (REFRESH handling) produces multiple messages in a single TCP
-            // transmit which the server currently does not like.
+            // stale nonce for REFRESH.
             complete_io(&mut test, expiry);
-            create_permission(&mut test, expiry);
+            let expiry = test.client_advance(expiry);
+            // REFRESH with corrected nonce.
+            complete_io(&mut test, expiry);
+            let expiry = create_permission(&mut test, expiry);
             sendrecv_data(&mut test, expiry);
         }
     }
@@ -946,7 +955,7 @@ mod tests {
             let now = Instant::ZERO;
             let mut test = create_test(transport);
             allocate(&mut test, now);
-            channel_bind(&mut test, now);
+            let now = channel_bind(&mut test, now);
             sendrecv_data(&mut test, now);
         }
     }
@@ -958,7 +967,7 @@ mod tests {
         for transport in [TransportType::Udp, TransportType::Tcp] {
             let mut test = create_test(transport);
             allocate(&mut test, now);
-            create_permission(&mut test, now);
+            let now = create_permission(&mut test, now);
             let data = Message::builder(
                 MessageType::from_class_method(
                     turn_types::stun::message::MessageClass::Error,
@@ -987,8 +996,12 @@ mod tests {
             .build(turn_tcp_openssl_new, turn_tcp_server_openssl_new)
     }
 
-    fn tcp_connect<A: TurnClientApi, S: TurnServerApi>(test: &mut TurnTest<A, S>, now: Instant) {
+    fn tcp_connect<A: TurnClientApi, S: TurnServerApi>(
+        test: &mut TurnTest<A, S>,
+        now: Instant,
+    ) -> Instant {
         test.client.tcp_connect(test.peer_addr, now).unwrap();
+        let now = test.client_advance(now);
         let transmit = test.client.poll_transmit(now).unwrap();
         assert_eq!(transmit.transport, test.client.transport());
         assert_eq!(transmit.from, test.client.local_addr());
@@ -1037,12 +1050,14 @@ mod tests {
         test.client
             .allocated_tcp_socket(id, socket, peer_addr, Some(test.local_tcp_socket), now)
             .unwrap();
+        let now = test.client_advance(now);
         complete_io(test, now);
 
         assert!(matches!(
             test.client.poll_event().unwrap(),
             TurnEvent::TcpConnected(_peer_addr)
         ));
+        now
     }
 
     fn tcp_sendrecv_data<A: TurnClientApi, S: TurnServerApi>(
@@ -1101,8 +1116,8 @@ mod tests {
         let now = Instant::ZERO;
         let mut test = create_test_tcp_allocation();
         allocate(&mut test, now);
-        create_permission(&mut test, now);
-        tcp_connect(&mut test, now);
+        let now = create_permission(&mut test, now);
+        let now = tcp_connect(&mut test, now);
         tcp_sendrecv_data(&mut test, now);
         assert!(test.client.poll_transmit(now).is_none());
         assert!(test.client.poll_event().is_none());
@@ -1151,8 +1166,8 @@ mod tests {
         let now = Instant::ZERO;
         let mut test = create_test_tcp_allocation();
         allocate(&mut test, now);
-        create_permission(&mut test, now);
-        tcp_connect(&mut test, now);
+        let now = create_permission(&mut test, now);
+        let now = tcp_connect(&mut test, now);
         tcp_sendrecv_data(&mut test, now);
         assert!(test.client.poll_transmit(now).is_none());
         assert!(test.client.poll_event().is_none());

@@ -917,7 +917,7 @@ mod tests {
             else {
                 unreachable!();
             };
-            let connection_id = test.tcp_connect(now);
+            let (now, connection_id) = test.tcp_connect(now);
             let TurnPollRet::AllocateTcpSocket {
                 id,
                 socket,
@@ -946,6 +946,7 @@ mod tests {
                 )
                 .is_none());
 
+            let now = test.client_advance(now);
             let transmit = test.client.poll_transmit(now).unwrap();
             let reply = test.server.recv(transmit, now).unwrap().build();
             let reply2 = test.server.poll_transmit(now).unwrap();
@@ -986,7 +987,7 @@ mod tests {
             else {
                 unreachable!();
             };
-            let connection_id = test.tcp_connect(now);
+            let (now, connection_id) = test.tcp_connect(now);
             let TurnPollRet::AllocateTcpSocket {
                 id,
                 socket,
@@ -1015,6 +1016,7 @@ mod tests {
                 )
                 .is_none());
 
+            let now = test.client_advance(now);
             let transmit = test.client.poll_transmit(now).unwrap();
             let reply = test.server.recv(transmit, now).unwrap().build();
             let reply2 = test.server.poll_transmit(now).unwrap();

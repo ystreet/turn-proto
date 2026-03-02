@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use core::net::SocketAddr;
 use stun_types::TransportType;
-use turn_client_proto::api::TurnClientApi;
+use turn_client_proto::api::{TurnClientApi, TurnEvent, TurnPollRet};
 use turn_client_proto::client::TurnClient;
 use turn_client_proto::stun::Instant;
 use turn_client_proto::udp::TurnClientUdp;
@@ -48,13 +48,22 @@ impl TestClient {
         }
     }
 
-    fn allocate(&mut self) {
-        let now = Instant::ZERO;
+    fn client_advance(&mut self, now: Instant) -> Instant {
+        let TurnPollRet::WaitUntil(expiry) = self.client.poll(now) else {
+            unreachable!();
+        };
+        assert!(expiry > now);
+        expiry
+    }
+
+    fn allocate(&mut self, now: Instant) -> Instant {
         // Initial allocate
         let transmit = self.client.poll_transmit(now).unwrap();
         let transmit = self.server.recv(transmit, now).unwrap().build();
         self.client.recv(transmit, now);
         // authenticated allocate
+
+        let now = self.client_advance(now);
         let transmit = self.client.poll_transmit(now).unwrap();
         self.server.recv(transmit, now);
         for _ in 0..2 {
@@ -91,15 +100,32 @@ impl TestClient {
         }
         let transmit = self.server.poll_transmit(now).unwrap();
         self.client.recv(transmit, now);
+        let Some(TurnEvent::AllocationCreated(_transport, _relayed_address)) =
+            self.client.poll_event()
+        else {
+            unreachable!();
+        };
+        let Some(TurnEvent::AllocationCreated(_transport, _relayed_address)) =
+            self.client.poll_event()
+        else {
+            unreachable!();
+        };
+        now
     }
 
-    fn create_permission(&mut self, addr: SocketAddr) {
-        let now = Instant::ZERO;
+    fn create_permission(&mut self, addr: SocketAddr, now: Instant) -> Instant {
         self.client
             .create_permission(TransportType::Udp, addr.ip(), now)
             .unwrap();
+        let now = self.client_advance(now);
         let transmit = self.client.poll_transmit(now).unwrap();
         let transmit = self.server.recv(transmit, now).unwrap().build();
         self.client.recv(transmit, now);
+        let Some(TurnEvent::PermissionCreated(_transport, _permission_ip)) =
+            self.client.poll_event()
+        else {
+            unreachable!();
+        };
+        now
     }
 }
