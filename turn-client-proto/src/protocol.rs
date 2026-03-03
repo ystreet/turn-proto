@@ -538,7 +538,10 @@ impl TurnClientProtocol {
                                 data = AData::from_raw(attr).ok().map(|data| (offset, data))
                             }
                             Icmp::TYPE => icmp = Icmp::from_raw(attr).ok(),
-                            _atype => return TurnProtocolRecv::Ignored,
+                            atype if atype.comprehension_required() => {
+                                return TurnProtocolRecv::Ignored
+                            }
+                            _atype => (),
                         }
                     }
                     let Some(peer_addr) = peer_addr else {
@@ -4215,6 +4218,56 @@ mod tests {
         let now = wait_advance(&mut client, now);
         create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
         let msg = generate_icmp_message(generate_xor_peer_address());
+        let msg = Message::from_bytes(&msg).unwrap();
+        let TurnProtocolRecv::PeerIcmp {
+            transport,
+            peer,
+            icmp_type,
+            icmp_code,
+            icmp_data,
+        } = client.handle_message(
+            Transmit::new(
+                msg,
+                client.transport(),
+                client.remote_addr(),
+                client.local_addr(),
+            ),
+            now,
+        )
+        else {
+            unreachable!();
+        };
+        assert_eq!(transport, TransportType::Udp);
+        assert_eq!(peer, generate_xor_peer_address());
+        assert_eq!(icmp_type, 0x1);
+        assert_eq!(icmp_code, 0x2);
+        assert_eq!(icmp_data, 0x3);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_icmp_with_optional_attribute() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol_with_families(
+            TransportType::Udp,
+            TransportType::Udp,
+            &[AddressFamily::IPV4],
+        );
+        initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        create_permission(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
+        let mut msg = Message::builder_indication(DATA, MessageWriteVec::new());
+        msg.add_attribute(&XorPeerAddress::new(
+            generate_xor_peer_address(),
+            msg.transaction_id(),
+        ))
+        .unwrap();
+        msg.add_attribute(&Icmp::new(0x1, 0x2, 0x3)).unwrap();
+        msg.add_fingerprint().unwrap();
+        let msg = msg.finish();
         let msg = Message::from_bytes(&msg).unwrap();
         let TurnProtocolRecv::PeerIcmp {
             transport,
