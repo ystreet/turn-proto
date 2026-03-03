@@ -58,6 +58,8 @@ pub(crate) static CHANNEL_REMOVE_DURATION: Duration = Duration::from_secs(300);
 pub(crate) static TCP_STUN_REQUEST_TIMEOUT: Duration = Duration::from_millis(39500);
 /// The minimum amount of time to send consecutive requests.
 pub(crate) static MIN_STUN_REQUEST_CADENCE: Duration = Duration::from_millis(50);
+/// The maximum number of stale nonce values that can be received in a row.
+static MAX_STALE_NONCE_REPLIES: usize = 8;
 
 #[derive(Debug)]
 pub(crate) struct TurnClientProtocol {
@@ -73,6 +75,8 @@ pub(crate) struct TurnClientProtocol {
 
     pending_events: VecDeque<TurnEvent>,
     pending_socket_removal: VecDeque<Socket5Tuple>,
+
+    request_count: usize,
 }
 
 #[derive(Debug)]
@@ -117,6 +121,7 @@ impl TurnClientProtocol {
             last_send_time: None,
             pending_events: VecDeque::default(),
             pending_socket_removal: VecDeque::default(),
+            request_count: 0,
         }
     }
 
@@ -239,7 +244,7 @@ impl TurnClientProtocol {
                         .pending_permissions
                         .iter()
                         .position(|(_permission, transaction_id)| {
-                            transaction_id == &msg.transaction_id()
+                            transaction_id.contains(&msg.transaction_id())
                         })
                         .map(|pending_idx| (idx, pending_idx))
                 })
@@ -255,7 +260,7 @@ impl TurnClientProtocol {
                 );
                 permission.expired = true;
                 permission.expires_at = now;
-                permission.pending_refresh = None;
+                permission.pending_refresh.clear();
                 pending_events.push_front(TurnEvent::PermissionCreateFailed(
                     allocations[alloc_idx].transport,
                     permission.ip,
@@ -281,9 +286,10 @@ impl TurnClientProtocol {
                         .iter()
                         .enumerate()
                         .find_map(|(idx, existing_permission)| {
-                            if existing_permission.pending_refresh.is_some_and(
-                                |refresh_transaction| refresh_transaction == msg.transaction_id(),
-                            ) {
+                            if existing_permission
+                                .pending_refresh
+                                .contains(&msg.transaction_id())
+                            {
                                 Some(idx)
                             } else {
                                 None
@@ -294,7 +300,7 @@ impl TurnClientProtocol {
         {
             let transport = allocations[alloc_idx].transport;
             let permission = &mut allocations[alloc_idx].permissions[existing_idx];
-            permission.pending_refresh = None;
+            permission.pending_refresh.clear();
             if msg.has_class(stun_proto::types::message::MessageClass::Error) {
                 warn!(
                     "Received error response to create permission request for {}",
@@ -322,16 +328,26 @@ impl TurnClientProtocol {
         allocation_transport: TransportType,
         address_families: &[AddressFamily],
         pending_transmits: &mut VecDeque<PendingTransmit>,
+        pending_events: &mut VecDeque<TurnEvent>,
+        request_count: &mut usize,
         msg: &Message<'_>,
         now: Instant,
     ) -> TurnProtocolRecv {
         // only handle STALE_NONCE errors here as that is the only unvalidated case that we have.
         let mut resent = false;
-        debug!("state: {:?}", state);
+        if *request_count > MAX_STALE_NONCE_REPLIES {
+            warn!("Too many STALE NONCE replies received, bailing");
+            for fam in address_families.iter().cloned() {
+                pending_events.push_front(TurnEvent::AllocationCreateFailed(fam));
+            }
+            // TODO: produce error?
+            *state = AuthState::Error;
+            return TurnProtocolRecv::Handled;
+        }
         if let AuthState::Authenticating(transaction_id) | AuthState::InitialSent(transaction_id) =
             state
         {
-            if msg.transaction_id() == *transaction_id {
+            if transaction_id.contains(&msg.transaction_id()) {
                 let (transmit, new_transaction_id) = Self::send_authenticating_request(
                     stun_agent,
                     stun_auth,
@@ -343,31 +359,37 @@ impl TurnClientProtocol {
                     transmit,
                     is_stun_request: true,
                 });
-                *state = AuthState::Authenticating(new_transaction_id);
+                transaction_id.push(new_transaction_id);
+                *state = AuthState::Authenticating(transaction_id.clone());
                 stun_agent.handle_stun_message(msg, stun_agent.remote_addr().unwrap());
                 resent = true;
             }
         }
         'outer: for alloc in allocations.iter_mut() {
-            if let Some((pending, _lifetime)) = alloc.pending_refresh {
-                if pending == msg.transaction_id() {
-                    info!("Received STALE_NONCE in response to REFRESH for transaction {pending}, resending");
-                    let (transmit, transaction_id, lifetime) =
-                        Self::send_refresh(stun_agent, stun_auth, 1800, now);
-                    pending_transmits.push_back(PendingTransmit {
-                        transmit,
-                        is_stun_request: true,
-                    });
-                    alloc.pending_refresh = Some((transaction_id, lifetime));
-                    stun_agent.handle_stun_message(msg, stun_agent.remote_addr().unwrap());
-                    resent = true;
-                    break 'outer;
-                }
+            if alloc
+                .pending_refresh
+                .iter()
+                .any(|(trans, _lifetime)| *trans == msg.transaction_id())
+            {
+                info!(
+                    "Received STALE_NONCE in response to REFRESH for transaction {}, resending",
+                    msg.transaction_id()
+                );
+                let (transmit, transaction_id, lifetime) =
+                    Self::send_refresh(stun_agent, stun_auth, 1800, now);
+                pending_transmits.push_back(PendingTransmit {
+                    transmit,
+                    is_stun_request: true,
+                });
+                alloc.pending_refresh.push((transaction_id, lifetime));
+                stun_agent.handle_stun_message(msg, stun_agent.remote_addr().unwrap());
+                resent = true;
+                break 'outer;
             }
 
             let mut channel_resent = None;
             for (channel, transaction_id) in alloc.pending_channels.iter_mut() {
-                if *transaction_id != msg.transaction_id() {
+                if !transaction_id.contains(&msg.transaction_id()) {
                     continue;
                 }
                 info!("Received STALE_NONCE in response to BIND_CHANNEL {} for transaction {}, resending", channel.peer_addr, msg.transaction_id());
@@ -378,7 +400,7 @@ impl TurnClientProtocol {
                     channel.peer_addr,
                     now,
                 );
-                *transaction_id = new_transaction_id;
+                transaction_id.push(new_transaction_id);
                 pending_transmits.push_back(PendingTransmit {
                     transmit,
                     is_stun_request: true,
@@ -389,10 +411,7 @@ impl TurnClientProtocol {
                 break;
             }
             for channel in alloc.channels.iter_mut() {
-                if channel
-                    .pending_refresh
-                    .is_some_and(|pending| pending == msg.transaction_id())
-                {
+                if channel.pending_refresh.contains(&msg.transaction_id()) {
                     info!("Received STALE_NONCE in response to BIND_CHANNEL {} for transaction {}, resending", channel.peer_addr, msg.transaction_id());
                     let (transmit, transaction_id) = Self::send_channel_bind_request(
                         stun_agent,
@@ -401,7 +420,7 @@ impl TurnClientProtocol {
                         channel.peer_addr,
                         now,
                     );
-                    channel.pending_refresh = Some(transaction_id);
+                    channel.pending_refresh.push(transaction_id);
                     pending_transmits.push_back(PendingTransmit {
                         transmit,
                         is_stun_request: true,
@@ -413,18 +432,18 @@ impl TurnClientProtocol {
                 }
             }
             for (permission, transaction_id) in alloc.pending_permissions.iter_mut() {
-                if *transaction_id != msg.transaction_id() {
+                if !transaction_id.contains(&msg.transaction_id()) {
                     continue;
                 }
                 if let Some(new_transaction_id) = channel_resent {
-                    *transaction_id = new_transaction_id;
+                    transaction_id.push(new_transaction_id);
                     break 'outer;
                 }
                 info!("Received STALE_NONCE in response to CREATE_PERMISSION {} for transaction {}, resending", permission.ip, msg.transaction_id());
                 let peer_addr = permission.ip;
                 let (transmit, new_transaction_id) =
                     Self::send_create_permission_request(stun_agent, stun_auth, peer_addr, now);
-                *transaction_id = new_transaction_id;
+                transaction_id.push(new_transaction_id);
                 pending_transmits.push_back(PendingTransmit {
                     transmit,
                     is_stun_request: true,
@@ -434,19 +453,16 @@ impl TurnClientProtocol {
                 break 'outer;
             }
             for permission in alloc.permissions.iter_mut() {
-                if permission
-                    .pending_refresh
-                    .is_some_and(|pending| pending == msg.transaction_id())
-                {
+                if permission.pending_refresh.contains(&msg.transaction_id()) {
                     if let Some(new_transaction_id) = channel_resent {
-                        permission.pending_refresh = Some(new_transaction_id);
+                        permission.pending_refresh.push(new_transaction_id);
                         break 'outer;
                     }
                     info!("Received STALE_NONCE in response to CREATE_PERMISSION {} for transaction {}, resending", permission.ip, msg.transaction_id());
                     let peer_addr = permission.ip;
                     let (transmit, transaction_id) =
                         Self::send_create_permission_request(stun_agent, stun_auth, peer_addr, now);
-                    permission.pending_refresh = Some(transaction_id);
+                    permission.pending_refresh.push(transaction_id);
                     pending_transmits.push_back(PendingTransmit {
                         transmit,
                         is_stun_request: true,
@@ -463,6 +479,7 @@ impl TurnClientProtocol {
                 "resending request {} as a new transaction",
                 msg.transaction_id()
             );
+            *request_count += 1;
             TurnProtocolRecv::Handled
         } else {
             TurnProtocolRecv::Ignored
@@ -493,6 +510,7 @@ impl TurnClientProtocol {
         address_families: &[AddressFamily],
         pending_transmits: &mut VecDeque<PendingTransmit>,
         pending_events: &mut VecDeque<TurnEvent>,
+        request_count: &mut usize,
         msg: Message<'_>,
         transport: TransportType,
         from: SocketAddr,
@@ -568,6 +586,8 @@ impl TurnClientProtocol {
                     allocation_transport,
                     address_families,
                     pending_transmits,
+                    pending_events,
+                    request_count,
                     &msg,
                     now,
                 );
@@ -670,15 +690,17 @@ impl TurnClientProtocol {
                     let mut remove_allocations = false;
                     let mut handled = false;
                     for alloc in allocations.iter_mut() {
-                        let (transaction_id, requested_lifetime) = if alloc
+                        let Some(&(transaction_id, requested_lifetime)) = alloc
                             .pending_refresh
-                            .is_some_and(|(transaction_id, _requested_lifetime)| {
-                                transaction_id == msg.transaction_id()
-                            }) {
-                            alloc.pending_refresh.take().unwrap()
-                        } else {
+                            .iter()
+                            .find(|(transaction_id, _requested_lifetime)| {
+                                *transaction_id == msg.transaction_id()
+                            })
+                        else {
                             continue;
                         };
+                        alloc.pending_refresh.clear();
+                        *request_count = 0;
                         debug!("removed pending REFRESH transaction {transaction_id}");
                         if is_success {
                             if requested_lifetime == 0 {
@@ -709,6 +731,7 @@ impl TurnClientProtocol {
                 }
                 CREATE_PERMISSION => {
                     if Self::update_permission_state(allocations, pending_events, &msg, now) {
+                        *request_count = 0;
                         TurnProtocolRecv::Handled
                     } else {
                         TurnProtocolRecv::Ignored
@@ -724,7 +747,7 @@ impl TurnClientProtocol {
                                     .pending_channels
                                     .iter()
                                     .position(|(_channel, transaction_id)| {
-                                        transaction_id == &msg.transaction_id()
+                                        transaction_id.contains(&msg.transaction_id())
                                     })
                                     .map(|channel_idx| (idx, channel_idx))
                             })
@@ -733,6 +756,7 @@ impl TurnClientProtocol {
                             .pending_channels
                             .swap_remove_back(channel_idx)
                             .unwrap();
+                        *request_count = 0;
                         if msg.has_class(stun_proto::types::message::MessageClass::Error) {
                             warn!("Received error response to channel bind request");
                             pending_events.push_front(TurnEvent::ChannelCreateFailed(
@@ -759,11 +783,10 @@ impl TurnClientProtocol {
                                 .iter()
                                 .enumerate()
                                 .find_map(|(idx, existing_channel)| {
-                                    if existing_channel.pending_refresh.is_some_and(
-                                        |refresh_transaction| {
-                                            refresh_transaction == msg.transaction_id()
-                                        },
-                                    ) {
+                                    if existing_channel
+                                        .pending_refresh
+                                        .contains(&msg.transaction_id())
+                                    {
                                         Some(idx)
                                     } else {
                                         None
@@ -772,9 +795,10 @@ impl TurnClientProtocol {
                                 .map(|pending_idx| (idx, pending_idx))
                         })
                     {
+                        *request_count = 0;
                         let transport = allocations[alloc_idx].transport;
                         let channel = &mut allocations[alloc_idx].channels[existing_idx];
-                        channel.pending_refresh = None;
+                        channel.pending_refresh.clear();
                         if msg.has_class(stun_proto::types::message::MessageClass::Error) {
                             warn!("Received error response to channel bind request");
                             pending_events.push_front(TurnEvent::ChannelCreateFailed(
@@ -802,6 +826,7 @@ impl TurnClientProtocol {
                                 .map(|channel_idx| (allocation, channel_idx))
                         })
                     {
+                        *request_count = 0;
                         let pending = allocation.pending_tcp_turn.swap_remove(existing_idx);
                         let Ok(connection_id) = msg.attribute::<ConnectionId>() else {
                             pending_events
@@ -1128,6 +1153,8 @@ impl TurnClientProtocol {
                     self.allocation_transport,
                     &self.families,
                     &mut self.pending_transmits,
+                    &mut self.pending_events,
+                    &mut self.request_count,
                     &transmit.data,
                     now,
                 );
@@ -1135,7 +1162,7 @@ impl TurnClientProtocol {
             AuthState::Authenticating(transaction_id) => {
                 trace!("received STUN message {}", transmit.data);
                 let msg = transmit.data;
-                if !msg.is_response() || &msg.transaction_id() != transaction_id {
+                if !msg.is_response() || !transaction_id.contains(&msg.transaction_id()) {
                     return TurnProtocolRecv::Ignored;
                 }
                 match self.stun_auth.validate_incoming_message(&transmit.data) {
@@ -1148,6 +1175,8 @@ impl TurnClientProtocol {
                             self.allocation_transport,
                             &self.families,
                             &mut self.pending_transmits,
+                            &mut self.pending_events,
+                            &mut self.request_count,
                             &msg,
                             now,
                         );
@@ -1169,7 +1198,7 @@ impl TurnClientProtocol {
                 if !self.stun_agent.handle_stun_message(&msg, transmit.from) {
                     return TurnProtocolRecv::Handled;
                 }
-                if !msg.is_response() || &msg.transaction_id() != transaction_id {
+                if !msg.is_response() || !transaction_id.contains(&msg.transaction_id()) {
                     return TurnProtocolRecv::Ignored;
                 }
                 match msg.class() {
@@ -1213,7 +1242,7 @@ impl TurnClientProtocol {
                                     transmit: transmit.into_owned(),
                                     is_stun_request: true,
                                 });
-                                self.state = AuthState::Authenticating(transaction_id);
+                                self.state = AuthState::Authenticating(vec![transaction_id]);
                                 return TurnProtocolRecv::Handled;
                             }
                         }
@@ -1273,7 +1302,7 @@ impl TurnClientProtocol {
                                     tcp_data: Vec::default(),
                                     pending_permissions: VecDeque::default(),
                                     pending_channels: VecDeque::default(),
-                                    pending_refresh: None,
+                                    pending_refresh: vec![],
                                     expired_channels: vec![],
                                     pending_tcp_allocate: vec![],
                                 });
@@ -1315,6 +1344,7 @@ impl TurnClientProtocol {
                 &self.families,
                 &mut self.pending_transmits,
                 &mut self.pending_events,
+                &mut self.request_count,
                 transmit.data,
                 transmit.transport,
                 transmit.from,
@@ -1553,7 +1583,9 @@ impl TurnClientProtocol {
             AuthState::Error => return TurnPollRet::Closed,
             AuthState::Initial => TurnPollRet::WaitUntil(now),
             AuthState::InitialSent(transaction_id) => {
-                if cancelled_transaction.is_some_and(|cancelled| &cancelled == transaction_id) {
+                if cancelled_transaction
+                    .is_some_and(|cancelled| transaction_id.contains(&cancelled))
+                {
                     info!("Initial transaction timed out or was cancelled");
                     for fam in self.families.iter().cloned() {
                         self.pending_events
@@ -1565,7 +1597,9 @@ impl TurnClientProtocol {
                 TurnPollRet::WaitUntil(earliest_wait)
             }
             AuthState::Authenticating(transaction_id) => {
-                if cancelled_transaction.is_some_and(|cancelled| &cancelled == transaction_id) {
+                if cancelled_transaction
+                    .is_some_and(|cancelled| transaction_id.contains(&cancelled))
+                {
                     info!("Authenticating transaction timed out or was cancelled");
                     self.state = AuthState::Error;
                 }
@@ -1604,8 +1638,13 @@ impl TurnClientProtocol {
                         alloc.refresh_time() - now
                     );
                     // Refresh the allocation if necessary.
-                    if let Some((pending, _lifetime)) = alloc.pending_refresh {
-                        if cancelled_transaction.is_some_and(|cancelled| cancelled == pending) {
+                    if !alloc.pending_refresh.is_empty() {
+                        if cancelled_transaction.is_some_and(|cancelled| {
+                            alloc
+                                .pending_refresh
+                                .iter()
+                                .any(|(transaction_id, _lifetime)| *transaction_id == cancelled)
+                        }) {
                             warn!("Refresh timed out or was cancelled");
                             if alloc.expires_at > now {
                                 expires_at = alloc.expires_at;
@@ -1639,7 +1678,7 @@ impl TurnClientProtocol {
                         for (idx, (channel, pending_transaction)) in
                             alloc.pending_channels.iter_mut().enumerate()
                         {
-                            if t == *pending_transaction {
+                            if pending_transaction.contains(&t) {
                                 channel_idx = Some(idx);
                                 self.pending_events
                                     .push_back(TurnEvent::ChannelCreateFailed(
@@ -1656,7 +1695,7 @@ impl TurnClientProtocol {
                         for (idx, (permission, pending_transaction)) in
                             alloc.pending_permissions.iter_mut().enumerate()
                         {
-                            if t == *pending_transaction {
+                            if pending_transaction.contains(&t) {
                                 permission_idx = Some(idx);
                                 self.pending_events
                                     .push_back(TurnEvent::PermissionCreateFailed(
@@ -1681,8 +1720,10 @@ impl TurnClientProtocol {
                             channel.peer_addr,
                             channel.refresh_time() - now
                         );
-                        if let Some(pending) = channel.pending_refresh {
-                            if cancelled_transaction.is_some_and(|cancelled| cancelled == pending) {
+                        if !channel.pending_refresh.is_empty() {
+                            if cancelled_transaction.is_some_and(|cancelled| {
+                                channel.pending_refresh.contains(&cancelled)
+                            }) {
                                 // TODO: need to eventually fail when the permission times out.
                                 warn!("{} channel {} from {} to {} refresh timed out or was cancelled", alloc.transport, channel.id, alloc.relayed_address, channel.peer_addr);
                                 expires_at = channel.expires_at;
@@ -1706,7 +1747,7 @@ impl TurnClientProtocol {
                     if let Some(chan_idx) = remove_chan_idx {
                         let mut channel = alloc.channels.swap_remove(chan_idx);
                         let peer_addr = channel.peer_addr;
-                        channel.pending_refresh.take();
+                        channel.pending_refresh.clear();
                         alloc.expired_channels.push(channel);
                         self.pending_events
                             .push_back(TurnEvent::ChannelCreateFailed(alloc.transport, peer_addr));
@@ -1732,8 +1773,10 @@ impl TurnClientProtocol {
                             permission.ip,
                             permission.refresh_time() - now
                         );
-                        if let Some(pending) = permission.pending_refresh {
-                            if cancelled_transaction.is_some_and(|cancelled| cancelled == pending) {
+                        if !permission.pending_refresh.is_empty() {
+                            if cancelled_transaction.is_some_and(|cancelled| {
+                                permission.pending_refresh.contains(&cancelled)
+                            }) {
                                 warn!(
                                     "permission {} from {} to {} refresh timed out or was cancelled",
                                     alloc.transport, alloc.relayed_address, permission.ip
@@ -1883,7 +1926,7 @@ impl TurnClientProtocol {
             AuthState::Error => None,
             AuthState::Initial => {
                 let (transmit, transaction_id) = self.send_initial_request(now);
-                self.state = AuthState::InitialSent(transaction_id);
+                self.state = AuthState::InitialSent(vec![transaction_id]);
                 self.last_send_time = Some(now);
                 Some(transmit)
             }
@@ -1894,14 +1937,14 @@ impl TurnClientProtocol {
                     if alloc.expired || alloc.expires_at < now {
                         continue;
                     }
-                    if alloc.pending_refresh.is_none() && alloc.refresh_time() <= now {
+                    if alloc.pending_refresh.is_empty() && alloc.refresh_time() <= now {
                         let (transmit, transaction_id, lifetime) = Self::send_refresh(
                             &mut self.stun_agent,
                             &mut self.stun_auth,
                             1800,
                             now,
                         );
-                        alloc.pending_refresh = Some((transaction_id, lifetime));
+                        alloc.pending_refresh.push((transaction_id, lifetime));
                         self.last_send_time = Some(now);
                         return Some(transmit);
                     }
@@ -1910,7 +1953,7 @@ impl TurnClientProtocol {
                         if channel.expires_at < now {
                             continue;
                         }
-                        if channel.pending_refresh.is_none() && channel.refresh_time() <= now {
+                        if channel.pending_refresh.is_empty() && channel.refresh_time() <= now {
                             info!(
                                 "refreshing {} channel {} from {} to {}",
                                 alloc.transport,
@@ -1925,7 +1968,7 @@ impl TurnClientProtocol {
                                 channel.peer_addr,
                                 now,
                             );
-                            channel.pending_refresh = Some(transaction_id);
+                            channel.pending_refresh.push(transaction_id);
                             self.last_send_time = Some(now);
                             return Some(transmit);
                         }
@@ -1935,7 +1978,7 @@ impl TurnClientProtocol {
                         if permission.expires_at < now {
                             continue;
                         }
-                        if permission.pending_refresh.is_none() && permission.refresh_time() <= now
+                        if permission.pending_refresh.is_empty() && permission.refresh_time() <= now
                         {
                             info!(
                                 "refreshing {} permission from {} to {}",
@@ -1947,7 +1990,7 @@ impl TurnClientProtocol {
                                 permission.ip,
                                 now,
                             );
-                            permission.pending_refresh = Some(transaction_id);
+                            permission.pending_refresh.push(transaction_id);
                             self.last_send_time = Some(now);
                             return Some(transmit);
                         }
@@ -1980,7 +2023,7 @@ impl TurnClientProtocol {
             alloc.channels.clear();
             alloc.expires_at = now;
             alloc.expired = true;
-            alloc.pending_refresh = Some((transaction_id, lifetime));
+            alloc.pending_refresh.push((transaction_id, lifetime));
         }
         self.pending_transmits.push_back(PendingTransmit {
             transmit: transmit.into_owned(),
@@ -2032,7 +2075,7 @@ impl TurnClientProtocol {
             expired: false,
             expires_at: now,
             ip: peer_addr,
-            pending_refresh: None,
+            pending_refresh: vec![],
         };
 
         let (transmit, transaction_id) = Self::send_create_permission_request(
@@ -2044,7 +2087,7 @@ impl TurnClientProtocol {
         info!("Creating {permission:?}");
         allocation
             .pending_permissions
-            .push_back((permission, transaction_id));
+            .push_back((permission, vec![transaction_id]));
         self.pending_transmits.push_back(PendingTransmit {
             transmit,
             is_stun_request: true,
@@ -2342,24 +2385,24 @@ impl TurnClientProtocol {
             expired: false,
             expires_at: now,
             ip: peer_addr.ip(),
-            pending_refresh: None,
+            pending_refresh: vec![],
         };
         if !allocation.have_permission(peer_addr.ip())
             && !allocation.have_pending_permission(peer_addr.ip())
         {
             allocation
                 .pending_permissions
-                .push_back((permission, transaction_id));
+                .push_back((permission, vec![transaction_id]));
         }
         let channel = Channel {
             id: channel_id,
             expires_at: now,
             peer_addr,
-            pending_refresh: None,
+            pending_refresh: vec![],
         };
         allocation
             .pending_channels
-            .push_back((channel, transaction_id));
+            .push_back((channel, vec![transaction_id]));
         self.pending_transmits.push_back(PendingTransmit {
             transmit: transmit.into_owned(),
             is_stun_request: true,
@@ -2380,8 +2423,8 @@ impl TurnClientProtocol {
 #[derive(Debug)]
 enum AuthState {
     Initial,
-    InitialSent(TransactionId),
-    Authenticating(TransactionId),
+    InitialSent(Vec<TransactionId>),
+    Authenticating(Vec<TransactionId>),
     Authenticated,
     Error,
 }
@@ -2400,9 +2443,9 @@ struct Allocation {
     pending_tcp_allocate: Vec<PendingTcpAllocate>,
     tcp_data: Vec<TcpDataChannel>,
 
-    pending_permissions: VecDeque<(Permission, TransactionId)>,
-    pending_channels: VecDeque<(Channel, TransactionId)>,
-    pending_refresh: Option<(TransactionId, u32)>,
+    pending_permissions: VecDeque<(Permission, Vec<TransactionId>)>,
+    pending_channels: VecDeque<(Channel, Vec<TransactionId>)>,
+    pending_refresh: Vec<(TransactionId, u32)>,
 
     expired_channels: Vec<Channel>,
 }
@@ -2461,7 +2504,7 @@ struct Channel {
     id: u16,
     peer_addr: SocketAddr,
     expires_at: Instant,
-    pending_refresh: Option<TransactionId>,
+    pending_refresh: Vec<TransactionId>,
 }
 
 impl Channel {
@@ -2475,7 +2518,7 @@ struct Permission {
     expired: bool,
     expires_at: Instant,
     ip: IpAddr,
-    pending_refresh: Option<TransactionId>,
+    pending_refresh: Vec<TransactionId>,
 }
 
 impl Permission {
@@ -5038,6 +5081,24 @@ mod tests {
         assert_eq!(transmit.from, generate_tcp_local_address());
         assert_eq!(transmit.to, client.remote_addr());
         assert_eq!(&transmit.data.build(), data.as_slice());
+    }
+
+    #[test]
+    fn test_turn_client_protocol_stale_nonce_limit() {
+        let _log = crate::tests::test_init_log();
+        let mut now = Instant::ZERO;
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        for _ in 0..MAX_STALE_NONCE_REPLIES + 1 {
+            now = wait_advance(&mut client, now);
+            let ret = allocate_response(&mut client, |msg| generate_stale_nonce(&msg), now);
+            assert!(matches!(ret, TurnProtocolRecv::Handled));
+        }
+        assert!(matches!(
+            client.poll_event().unwrap(),
+            TurnEvent::AllocationCreateFailed(_)
+        ));
+        assert!(matches!(client.poll(now), TurnPollRet::Closed));
     }
 
     #[test]
