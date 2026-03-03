@@ -60,6 +60,8 @@ pub(crate) static TCP_STUN_REQUEST_TIMEOUT: Duration = Duration::from_millis(395
 pub(crate) static MIN_STUN_REQUEST_CADENCE: Duration = Duration::from_millis(50);
 /// The maximum number of stale nonce values that can be received in a row.
 static MAX_STALE_NONCE_REPLIES: usize = 8;
+/// The minimum (and default) lifetime of an allocation.
+static MIN_LIFETIME: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug)]
 pub(crate) struct TurnClientProtocol {
@@ -366,17 +368,21 @@ impl TurnClientProtocol {
             }
         }
         'outer: for alloc in allocations.iter_mut() {
-            if alloc
-                .pending_refresh
-                .iter()
-                .any(|(trans, _lifetime)| *trans == msg.transaction_id())
+            if let Some(requested_lifetime) =
+                alloc.pending_refresh.iter().find_map(|(trans, lifetime)| {
+                    if *trans == msg.transaction_id() {
+                        Some(lifetime)
+                    } else {
+                        None
+                    }
+                })
             {
                 info!(
                     "Received STALE_NONCE in response to REFRESH for transaction {}, resending",
                     msg.transaction_id()
                 );
                 let (transmit, transaction_id, lifetime) =
-                    Self::send_refresh(stun_agent, stun_auth, 1800, now);
+                    Self::send_refresh(stun_agent, stun_auth, *requested_lifetime, now);
                 pending_transmits.push_back(PendingTransmit {
                     transmit,
                     is_stun_request: true,
@@ -699,18 +705,24 @@ impl TurnClientProtocol {
                         else {
                             continue;
                         };
-                        alloc.pending_refresh.clear();
-                        *request_count = 0;
-                        debug!("removed pending REFRESH transaction {transaction_id}");
+                        debug!("removed pending REFRESH transaction {transaction_id} with requested lifetime of {requested_lifetime}");
                         if is_success {
                             if requested_lifetime == 0 {
+                                alloc.pending_refresh.clear();
+                                *request_count = 0;
                                 remove_allocations = true;
                             } else {
                                 let Ok(lifetime) = msg.attribute::<Lifetime>() else {
                                     continue;
                                 };
-                                alloc.expires_at =
-                                    now + Duration::from_secs(lifetime.seconds() as u64);
+                                let lifetime = lifetime.seconds() as u64;
+                                if lifetime < MIN_LIFETIME.as_secs() {
+                                    warn!("Server provided an invalid lifetime value ({lifetime}) in the REFRESH response, ignoring");
+                                } else {
+                                    alloc.pending_refresh.clear();
+                                    *request_count = 0;
+                                    alloc.expires_at = now + Duration::from_secs(lifetime);
+                                }
                             }
                             handled = true;
                         }
@@ -3477,6 +3489,36 @@ mod tests {
     }
 
     #[test]
+    fn test_turn_client_protocol_refresh_reply_lifetime_invalid() {
+        let _log = crate::tests::test_init_log();
+        for lifetime in [0, 1, 599] {
+            let now = Instant::ZERO;
+            let mut client = new_protocol();
+            let credentials = client_credentials(&client);
+            initial_allocate(&mut client, now);
+            let now = wait_advance(&mut client, now);
+            authenticated_allocate(&mut client, now);
+            let now = wait_advance(&mut client, now);
+            let ret = refresh_response(
+                &mut client,
+                |msg| {
+                    let mut reply = Message::builder_success(&msg, MessageWriteVec::new());
+                    reply.add_attribute(&Lifetime::new(lifetime)).unwrap();
+                    reply
+                        .add_message_integrity(&credentials.into(), IntegrityAlgorithm::Sha1)
+                        .unwrap();
+                    reply.finish()
+                },
+                now,
+            );
+            assert!(matches!(ret, TurnProtocolRecv::Handled));
+            // advance to the end of the allocation valid window.
+            let now = wait_advance(&mut client, now);
+            check_closed(&mut client, now + Duration::from_secs(1));
+        }
+    }
+
+    #[test]
     fn test_turn_client_protocol_delete_stale_nonce() {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
@@ -3496,6 +3538,7 @@ mod tests {
             now,
         );
         assert!(matches!(ret, TurnProtocolRecv::Handled));
+        tracing::error!("{client:?}");
         check_closed(&mut client, now);
     }
 
