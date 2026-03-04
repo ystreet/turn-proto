@@ -620,9 +620,15 @@ impl TurnClientApi for TurnClientOpensslTls {
 
 #[cfg(test)]
 mod tests {
-    use alloc::string::{String, ToString};
+    use alloc::string::String;
     use core::time::Duration;
+    use openssl::asn1::{Asn1Integer, Asn1Time, Asn1Type};
+    use openssl::bn::BigNum;
+    use openssl::hash::MessageDigest;
+    use openssl::nid::Nid;
+    use openssl::pkey::{PKey, Private};
     use openssl::ssl::SslMethod;
+    use openssl::x509::{X509Name, X509};
     use tracing::debug;
     use turn_server_proto::openssl::OpensslTurnServer;
     use turn_types::{AddressFamily, TurnCredentials};
@@ -635,8 +641,50 @@ mod tests {
 
     use super::*;
 
-    use rcgen::CertifiedKey;
     use turn_server_proto::api::{TurnServerApi, TurnServerPollRet};
+
+    fn generate_cert() -> (PKey<Private>, X509) {
+        let pkey = PKey::ec_gen("prime256v1").unwrap();
+
+        let mut x509 = X509::builder().unwrap();
+        x509.set_version(2).unwrap(); // V3 (0-indexed)
+
+        // random 64 bits as serial
+        let mut serial = [0_u8; 8];
+        openssl::rand::rand_bytes(&mut serial).unwrap();
+        let serial = BigNum::from_slice(&serial).unwrap();
+        let asn_serial = Asn1Integer::from_bn(&serial).unwrap();
+        x509.set_serial_number(&asn_serial).unwrap();
+
+        let common = "localhost";
+        let mut cn = X509Name::builder().unwrap();
+        cn.append_entry_by_nid_with_type(Nid::COMMONNAME, common, Asn1Type::UTF8STRING)
+            .unwrap();
+        let cn = cn.build();
+        x509.set_issuer_name(&cn).unwrap();
+        x509.set_subject_name(&cn).unwrap();
+
+        x509.set_not_before(
+            &Asn1Time::from_unix(
+                (std::time::SystemTime::now()
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    - std::time::Duration::from_secs(600))
+                .as_secs() as i64,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        x509.set_not_after(&Asn1Time::days_from_now(365).unwrap())
+            .unwrap();
+        x509.set_pubkey(&pkey).unwrap();
+
+        x509.sign(&pkey, MessageDigest::sha256()).unwrap();
+        let x509 = x509.build();
+
+        (pkey, x509)
+    }
 
     fn test_ssl_context(transport: TransportType) -> SslContext {
         let method = match transport {
@@ -649,16 +697,13 @@ mod tests {
     }
 
     fn test_openssl_server_config(transport: TransportType) -> SslContext {
-        let CertifiedKey { cert, signing_key } =
-            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let (pkey, cert) = generate_cert();
         let method = match transport {
             TransportType::Udp => SslMethod::dtls_server(),
             TransportType::Tcp => SslMethod::tls_server(),
         };
         let mut builder = SslContext::builder(method).unwrap();
-        let cert = openssl::x509::X509::from_der(cert.der()).unwrap();
         builder.set_certificate(&cert).unwrap();
-        let pkey = openssl::pkey::PKey::private_key_from_der(signing_key.serialized_der()).unwrap();
         builder.set_private_key(&pkey).unwrap();
         builder.set_verify_callback(openssl::ssl::SslVerifyMode::NONE, |_ok, _store| true);
         builder.set_client_hello_callback(|ssl, _alert| {
