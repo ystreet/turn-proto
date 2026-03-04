@@ -19,7 +19,7 @@ thiserror = { version = "2", default-features = false }
 tracing = { version = "0.1", default-features = false, features = ["attributes"] }
 tracing-subscriber = "0.3"
 criterion = "0.7"
-rustls = "0.23"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 rustls-platform-verifier = "0.6"
 smallvec = "1"
 openssl = "0.10"

@@ -21,3 +21,10 @@ the [Rust programming language](https://www.rust-lang.org/).
  - [x] [RFC8656](https://tools.ietf.org/html/rfc8656):
    Traversal Using Relays around NAT (TURN): Relay Extensions to Session
    Traversal Utilities for NAT (STUN)
+
+## Rustls crypto providers
+
+`turn-client-proto` does not enable any cryptographic providers on rustls.
+It is the user's responsibility (library or application) to enable and use
+the relevant cryptographic provider (ring, aws-lc-rs, RustCrypto, etc),
+that they wish to use.
