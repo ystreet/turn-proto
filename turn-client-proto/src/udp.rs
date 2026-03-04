@@ -14,7 +14,6 @@
 
 use alloc::vec::Vec;
 use core::net::{IpAddr, SocketAddr};
-use stun_proto::auth::LongTermClientAuth;
 
 use stun_proto::agent::{StunAgent, Transmit};
 use stun_proto::types::data::Data;
@@ -24,14 +23,12 @@ use stun_proto::types::TransportType;
 
 use turn_types::channel::ChannelData;
 use turn_types::stun::message::Message;
-use turn_types::AddressFamily;
-use turn_types::TurnCredentials;
 
 use tracing::{trace, warn};
 
 use crate::api::{
     DataRangeOrOwned, DelayedMessageOrChannelSend, Socket5Tuple, TcpAllocateError, TcpConnectError,
-    TransmitBuild, TurnClientApi, TurnPeerData,
+    TransmitBuild, TurnClientApi, TurnConfig, TurnPeerData,
 };
 use crate::protocol::{TurnClientProtocol, TurnProtocolChannelRecv};
 
@@ -51,19 +48,19 @@ impl TurnClientUdp {
     ///
     /// # Examples
     /// ```
-    /// # use turn_types::{AddressFamily, TurnCredentials};
+    /// # use turn_types::TurnCredentials;
     /// # use turn_client_proto::prelude::*;
     /// # use turn_client_proto::udp::TurnClientUdp;
-    /// # use stun_proto::types::TransportType;
+    /// # use turn_client_proto::api::TurnConfig;
+    /// # use turn_types::TransportType;
     /// let credentials = TurnCredentials::new("tuser", "tpass");
-    /// let transport = TransportType::Udp;
+    /// let config = TurnConfig::new(credentials.clone());
     /// let local_addr = "192.168.0.1:4000".parse().unwrap();
     /// let remote_addr = "10.0.0.1:3478".parse().unwrap();
     /// let client = TurnClientUdp::allocate(
     ///     local_addr,
     ///     remote_addr,
-    ///     credentials,
-    ///     &[AddressFamily::IPV4],
+    ///     config,
     /// );
     /// assert_eq!(client.transport(), TransportType::Udp);
     /// assert_eq!(client.local_addr(), local_addr);
@@ -71,27 +68,19 @@ impl TurnClientUdp {
     /// ```
     #[tracing::instrument(
         name = "turn_client_allocate"
-        skip(credentials)
+        skip(config),
+        fields(allocation_transport = %config.allocation_transport(),)
     )]
-    pub fn allocate(
-        local_addr: SocketAddr,
-        remote_addr: SocketAddr,
-        credentials: TurnCredentials,
-        allocation_families: &[AddressFamily],
-    ) -> Self {
+    pub fn allocate(local_addr: SocketAddr, remote_addr: SocketAddr, config: TurnConfig) -> Self {
         let stun_agent = StunAgent::builder(TransportType::Udp, local_addr)
             .remote_addr(remote_addr)
             .build();
-        let mut stun_auth = LongTermClientAuth::new();
-        stun_auth.set_credentials(credentials.into());
+        if config.allocation_transport() != TransportType::Udp {
+            panic!("Attempt made to create a UDP TURN client without a UDP allocation");
+        }
 
         Self {
-            protocol: TurnClientProtocol::new(
-                stun_agent,
-                stun_auth,
-                TransportType::Udp,
-                allocation_families,
-            ),
+            protocol: TurnClientProtocol::new(stun_agent, config),
         }
     }
 }
@@ -249,6 +238,7 @@ impl TurnClientApi for TurnClientUdp {
 pub(crate) mod tests {
     use alloc::string::String;
     use turn_server_proto::server::TurnServer;
+    use turn_types::TurnCredentials;
 
     use super::*;
 
@@ -270,7 +260,9 @@ pub(crate) mod tests {
         allocation_transport: TransportType,
     ) -> TurnClient {
         assert_eq!(allocation_transport, TransportType::Udp);
-        TurnClientUdp::allocate(local_addr, remote_addr, credentials, &[AddressFamily::IPV4]).into()
+        let mut config = TurnConfig::new(credentials);
+        config.set_allocation_transport(allocation_transport);
+        TurnClientUdp::allocate(local_addr, remote_addr, config).into()
     }
 
     fn turn_server_udp_new(listen_address: SocketAddr, realm: String) -> TurnServer {

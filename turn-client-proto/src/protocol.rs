@@ -42,7 +42,7 @@ use turn_types::AddressFamily;
 use crate::api::{
     BindChannelError, CreatePermissionError, DataRangeOrOwned, DelayedMessageOrChannelSend,
     DeleteError, SendError, Socket5Tuple, TcpAllocateError, TcpConnectError, TransmitBuild,
-    TurnEvent, TurnPeerData, TurnPollRet, TurnRecvRet,
+    TurnConfig, TurnEvent, TurnPeerData, TurnPollRet, TurnRecvRet,
 };
 use crate::tcp::ensure_data_owned;
 
@@ -88,13 +88,11 @@ struct PendingTransmit {
 }
 
 impl TurnClientProtocol {
-    pub(crate) fn new(
-        stun_agent: StunAgent,
-        stun_auth: LongTermClientAuth,
-        allocation_transport: TransportType,
-        address_families: &[AddressFamily],
-    ) -> Self {
+    pub(crate) fn new(stun_agent: StunAgent, config: TurnConfig) -> Self {
         turn_types::debug_init();
+        let mut stun_auth = LongTermClientAuth::new();
+        stun_auth.set_credentials(config.credentials().clone().into());
+        let address_families = config.address_families();
         let families = address_families.iter().cloned().fold(
             smallvec::SmallVec::with_capacity(address_families.len()),
             |mut ret, fam| {
@@ -107,13 +105,13 @@ impl TurnClientProtocol {
         if families.is_empty() {
             panic!("Incorrect number of address families");
         }
-        if allocation_transport == TransportType::Tcp
+        if config.allocation_transport() == TransportType::Tcp
             && stun_agent.transport() != TransportType::Tcp
         {
             panic!("Cannot create TCP allocation without a TCP client connection");
         }
         Self {
-            allocation_transport,
+            allocation_transport: config.allocation_transport(),
             families,
             stun_agent,
             stun_auth,
@@ -2718,9 +2716,13 @@ mod tests {
         let stun_agent = StunAgent::builder(client_transport, local_addr)
             .remote_addr(remote_addr)
             .build();
-        let mut stun_auth = LongTermClientAuth::new();
-        stun_auth.set_credentials(credentials.into());
-        let client = TurnClientProtocol::new(stun_agent, stun_auth, allocation_transport, families);
+        let mut config = TurnConfig::new(credentials);
+        config.set_allocation_transport(allocation_transport);
+        config.set_address_family(families[0]);
+        for family in &families[1..] {
+            config.add_address_family(*family);
+        }
+        let client = TurnClientProtocol::new(stun_agent, config);
         assert_eq!(client.transport(), client_transport);
         assert_eq!(client.local_addr(), local_addr);
         assert_eq!(client.remote_addr(), remote_addr);

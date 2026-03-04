@@ -24,7 +24,7 @@ use stun_proto::agent::Transmit;
 use stun_proto::types::data::Data;
 use stun_proto::types::TransportType;
 use stun_proto::Instant;
-use turn_types::AddressFamily;
+use turn_types::{AddressFamily, TurnCredentials};
 
 /// The public API of a TURN client.
 pub trait TurnClientApi: core::fmt::Debug + Send {
@@ -127,6 +127,118 @@ pub trait TurnClientApi: core::fmt::Debug + Send {
 
     /// A higher layer has encountered an error and this client is no longer usable.
     fn protocol_error(&mut self);
+}
+
+/// Configuration structure for handling TURN client configuration.
+///
+/// Holds the following information:
+///   - Long term credentials for connecting to a TURN server.
+///   - The [`TransportType`] of the requested allocation.
+///   - A list of [`AddressFamily`]s the allocation should be attempted to be created with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnConfig {
+    allocation_transport: TransportType,
+    address_families: smallvec::SmallVec<[AddressFamily; 2]>,
+    credentials: TurnCredentials,
+}
+
+impl TurnConfig {
+    /// Construct a new [`TurnConfig`] with the provided credentials.
+    ///
+    /// By default a IPV4/UDP allocation is requested.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use turn_client_proto::api::TurnConfig;
+    /// # use turn_types::{AddressFamily, TransportType, TurnCredentials};
+    /// let credentials = TurnCredentials::new("user", "pass");
+    /// let config = TurnConfig::new(credentials.clone());
+    /// assert_eq!(config.credentials(), &credentials);
+    /// assert_eq!(config.allocation_transport(), TransportType::Udp);
+    /// assert_eq!(config.address_families(), &[AddressFamily::IPV4]);
+    /// ```
+    pub fn new(credentials: TurnCredentials) -> Self {
+        Self {
+            allocation_transport: TransportType::Udp,
+            address_families: smallvec::smallvec![AddressFamily::IPV4],
+            credentials,
+        }
+    }
+
+    /// Set the allocation transport requested.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use turn_client_proto::api::TurnConfig;
+    /// # use turn_types::{TransportType, TurnCredentials};
+    /// let credentials = TurnCredentials::new("user", "pass");
+    /// let mut config = TurnConfig::new(credentials.clone());
+    /// config.set_allocation_transport(TransportType::Tcp);
+    /// assert_eq!(config.allocation_transport(), TransportType::Tcp);
+    /// ```
+    pub fn set_allocation_transport(&mut self, allocation_transport: TransportType) {
+        self.allocation_transport = allocation_transport;
+    }
+
+    /// Retrieve the allocation transport requested.
+    pub fn allocation_transport(&self) -> TransportType {
+        self.allocation_transport
+    }
+
+    /// Add an [`AddressFamily`] that will be requested.
+    ///
+    /// Duplicate [`AddressFamily`]s are ignored.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use turn_client_proto::api::TurnConfig;
+    /// # use turn_types::{AddressFamily, TurnCredentials};
+    /// let credentials = TurnCredentials::new("user", "pass");
+    /// let mut config = TurnConfig::new(credentials.clone());
+    /// assert_eq!(config.address_families(), &[AddressFamily::IPV4]);
+    /// // Duplicate AddressFamily is ignored.
+    /// config.add_address_family(AddressFamily::IPV4);
+    /// assert_eq!(config.address_families(), &[AddressFamily::IPV4]);
+    /// config.add_address_family(AddressFamily::IPV6);
+    /// assert_eq!(config.address_families(), &[AddressFamily::IPV4, AddressFamily::IPV6]);
+    /// ```
+    pub fn add_address_family(&mut self, family: AddressFamily) {
+        if !self.address_families.contains(&family) {
+            self.address_families.push(family);
+        }
+    }
+
+    /// Set the [`AddressFamily`] that will be requested.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use turn_client_proto::api::TurnConfig;
+    /// # use turn_types::{AddressFamily, TurnCredentials};
+    /// let credentials = TurnCredentials::new("user", "pass");
+    /// let mut config = TurnConfig::new(credentials.clone());
+    /// assert_eq!(config.address_families(), &[AddressFamily::IPV4]);
+    /// config.set_address_family(AddressFamily::IPV4);
+    /// assert_eq!(config.address_families(), &[AddressFamily::IPV4]);
+    /// config.set_address_family(AddressFamily::IPV6);
+    /// assert_eq!(config.address_families(), &[AddressFamily::IPV6]);
+    /// ```
+    pub fn set_address_family(&mut self, family: AddressFamily) {
+        self.address_families = smallvec::smallvec![family];
+    }
+
+    /// Retrieve the [`AddressFamily`]s that are requested.
+    pub fn address_families(&self) -> &[AddressFamily] {
+        &self.address_families
+    }
+
+    /// Retrieve the [`TurnCredentials`] used for authenticating with the TURN server.
+    pub fn credentials(&self) -> &TurnCredentials {
+        &self.credentials
+    }
 }
 
 /// Return value from calling [poll](TurnClientApi::poll)().

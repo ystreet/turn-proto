@@ -16,7 +16,6 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::net::{IpAddr, SocketAddr};
 use core::ops::Range;
-use stun_proto::auth::LongTermClientAuth;
 use turn_types::stun::message::Message;
 
 use stun_proto::agent::{StunAgent, Transmit};
@@ -26,14 +25,12 @@ use stun_proto::Instant;
 
 use turn_types::channel::ChannelData;
 use turn_types::tcp::{IncomingTcp, StoredTcp, TurnTcpBuffer};
-use turn_types::AddressFamily;
-use turn_types::TurnCredentials;
 
 use tracing::{trace, warn};
 
 use crate::api::{
     DataRangeOrOwned, DelayedMessageOrChannelSend, Socket5Tuple, TcpAllocateError, TcpConnectError,
-    TransmitBuild, TurnClientApi, TurnPeerData,
+    TransmitBuild, TurnClientApi, TurnConfig, TurnPeerData,
 };
 use crate::protocol::{TurnClientProtocol, TurnProtocolChannelRecv, TurnProtocolRecv};
 
@@ -65,49 +62,40 @@ impl TurnClientTcp {
     ///
     /// # Examples
     /// ```
-    /// # use turn_types::{AddressFamily, TurnCredentials};
+    /// # use turn_types::TurnCredentials;
     /// # use turn_client_proto::prelude::*;
     /// # use turn_client_proto::tcp::TurnClientTcp;
+    /// # use turn_client_proto::api::TurnConfig;
     /// # use stun_proto::types::TransportType;
     /// let credentials = TurnCredentials::new("tuser", "tpass");
+    /// let mut config = TurnConfig::new(credentials);
+    /// // The transport protocol of the allocation on the TURN server.
+    /// config.set_allocation_transport(TransportType::Udp);
     /// let local_addr = "192.168.0.1:4000".parse().unwrap();
     /// let remote_addr = "10.0.0.1:3478".parse().unwrap();
     /// let client = TurnClientTcp::allocate(
     ///     local_addr,
     ///     remote_addr,
-    ///     credentials,
-    ///     // The transport protocol of the allocation on the TURN server.
-    ///     TransportType::Udp,
-    ///     &[AddressFamily::IPV4],
+    ///     config,
     /// );
     /// assert_eq!(client.transport(), TransportType::Tcp);
     /// assert_eq!(client.local_addr(), local_addr);
     /// assert_eq!(client.remote_addr(), remote_addr);
     /// ```
     #[tracing::instrument(
-        name = "turn_client_allocate"
-        skip(credentials)
+        name = "turn_client_tcp_allocate"
+        skip(config),
+        fields(
+            allocation_transport = %config.allocation_transport(),
+        )
     )]
-    pub fn allocate(
-        local_addr: SocketAddr,
-        remote_addr: SocketAddr,
-        credentials: TurnCredentials,
-        allocation_transport: TransportType,
-        allocation_families: &[AddressFamily],
-    ) -> Self {
+    pub fn allocate(local_addr: SocketAddr, remote_addr: SocketAddr, config: TurnConfig) -> Self {
         let stun_agent = StunAgent::builder(TransportType::Tcp, local_addr)
             .remote_addr(remote_addr)
             .build();
-        let mut stun_auth = LongTermClientAuth::new();
-        stun_auth.set_credentials(credentials.into());
 
         Self {
-            protocol: TurnClientProtocol::new(
-                stun_agent,
-                stun_auth,
-                allocation_transport,
-                allocation_families,
-            ),
+            protocol: TurnClientProtocol::new(stun_agent, config),
             incoming_tcp_buffers: BTreeMap::from([(
                 (local_addr, remote_addr),
                 TcpBuffer::Control(TurnTcpBuffer::new()),
@@ -540,6 +528,7 @@ mod tests {
     use turn_server_proto::server::TurnServer;
 
     use alloc::string::String;
+    use turn_types::TurnCredentials;
 
     use crate::{
         api::tests::{
@@ -559,14 +548,9 @@ mod tests {
         credentials: TurnCredentials,
         allocation_transport: TransportType,
     ) -> TurnClient {
-        TurnClientTcp::allocate(
-            local_addr,
-            remote_addr,
-            credentials,
-            allocation_transport,
-            &[AddressFamily::IPV4],
-        )
-        .into()
+        let mut config = TurnConfig::new(credentials);
+        config.set_allocation_transport(allocation_transport);
+        TurnClientTcp::allocate(local_addr, remote_addr, config).into()
     }
 
     fn turn_server_tcp_new(listen_addr: SocketAddr, realm: String) -> TurnServer {
