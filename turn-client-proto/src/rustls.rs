@@ -28,14 +28,11 @@ use stun_proto::Instant;
 
 use stun_proto::types::TransportType;
 
-use turn_types::AddressFamily;
-use turn_types::TurnCredentials;
-
 use tracing::{debug, trace, warn};
 
 use crate::api::{
     DelayedMessageOrChannelSend, Socket5Tuple, TcpAllocateError, TcpConnectError, TransmitBuild,
-    TurnClientApi, TurnPeerData,
+    TurnClientApi, TurnConfig, TurnPeerData,
 };
 
 pub use crate::api::{
@@ -48,7 +45,7 @@ use crate::tcp::TurnClientTcp;
 #[derive(Debug)]
 pub struct TurnClientRustls {
     protocol: TurnClientTcp,
-    config: Arc<ClientConfig>,
+    tls_config: Arc<ClientConfig>,
     server_name: ServerName<'static>,
     pending_allocates: Vec<(u32, Socket5Tuple, SocketAddr)>,
     sockets: Vec<Socket>,
@@ -69,28 +66,20 @@ impl TurnClientRustls {
     pub fn allocate(
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
-        credentials: TurnCredentials,
-        allocation_transport: TransportType,
-        allocation_families: &[AddressFamily],
+        config: TurnConfig,
         server_name: ServerName<'static>,
-        config: Arc<ClientConfig>,
+        tls_config: Arc<ClientConfig>,
     ) -> Self {
         Self {
-            protocol: TurnClientTcp::allocate(
-                local_addr,
-                remote_addr,
-                credentials,
-                allocation_transport,
-                allocation_families,
-            ),
+            protocol: TurnClientTcp::allocate(local_addr, remote_addr, config),
             sockets: vec![Socket {
                 local_addr,
                 remote_addr,
-                tls: ClientConnection::new(config.clone(), server_name.clone()).unwrap(),
+                tls: ClientConnection::new(tls_config.clone(), server_name.clone()).unwrap(),
                 local_closed: false,
                 peer_closed: false,
             }],
-            config,
+            tls_config,
             server_name,
             pending_allocates: vec![],
         }
@@ -348,7 +337,7 @@ impl TurnClientApi for TurnClientRustls {
                 self.sockets.push(Socket {
                     local_addr,
                     remote_addr: self.remote_addr(),
-                    tls: ClientConnection::new(self.config.clone(), self.server_name.clone())
+                    tls: ClientConnection::new(self.tls_config.clone(), self.server_name.clone())
                         .unwrap(),
                     local_closed: false,
                     peer_closed: false,
@@ -535,6 +524,7 @@ mod tests {
     use alloc::borrow::ToOwned;
     use alloc::string::{String, ToString};
     use core::time::Duration;
+    use turn_types::{AddressFamily, TurnCredentials};
 
     use crate::api::tests::{transmit_send_build, TurnTest};
     use crate::client::TurnClient;
@@ -646,12 +636,12 @@ mod tests {
         credentials: TurnCredentials,
         allocation_transport: TransportType,
     ) -> TurnClient {
+        let mut config = TurnConfig::new(credentials);
+        config.set_allocation_transport(allocation_transport);
         TurnClientRustls::allocate(
             local_addr,
             remote_addr,
-            credentials,
-            allocation_transport,
-            &[AddressFamily::IPV4],
+            config,
             remote_addr.ip().into(),
             client_config(),
         )

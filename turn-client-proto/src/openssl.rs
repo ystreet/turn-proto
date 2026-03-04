@@ -30,14 +30,11 @@ use stun_proto::Instant;
 
 use stun_proto::types::TransportType;
 
-use turn_types::AddressFamily;
-use turn_types::TurnCredentials;
-
 use tracing::{info, trace, warn};
 
 use crate::api::{
     DelayedMessageOrChannelSend, Socket5Tuple, TcpAllocateError, TcpConnectError, TransmitBuild,
-    TurnClientApi, TurnPeerData,
+    TurnClientApi, TurnConfig, TurnPeerData,
 };
 
 pub use crate::api::{
@@ -187,9 +184,7 @@ impl TurnClientOpensslTls {
         transport: TransportType,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
-        credentials: TurnCredentials,
-        allocation_transport: TransportType,
-        allocation_families: &[AddressFamily],
+        config: TurnConfig,
         ssl_context: SslContext,
     ) -> Self {
         let ssl = Ssl::new(&ssl_context).expect("Cannot create ssl structure");
@@ -197,23 +192,14 @@ impl TurnClientOpensslTls {
         Self {
             protocol: match transport {
                 TransportType::Udp => {
-                    if allocation_transport != TransportType::Udp {
+                    if config.allocation_transport() != TransportType::Udp {
                         panic!("Cannot create a TCP allocation with a UDP connection to the TURN server")
                     }
-                    TcpOrUdp::Udp(TurnClientUdp::allocate(
-                        local_addr,
-                        remote_addr,
-                        credentials,
-                        allocation_families,
-                    ))
+                    TcpOrUdp::Udp(TurnClientUdp::allocate(local_addr, remote_addr, config))
                 }
-                TransportType::Tcp => TcpOrUdp::Tcp(TurnClientTcp::allocate(
-                    local_addr,
-                    remote_addr,
-                    credentials,
-                    allocation_transport,
-                    allocation_families,
-                )),
+                TransportType::Tcp => {
+                    TcpOrUdp::Tcp(TurnClientTcp::allocate(local_addr, remote_addr, config))
+                }
             },
             ssl_context,
             sockets: vec![Socket {
@@ -639,6 +625,7 @@ mod tests {
     use openssl::ssl::SslMethod;
     use tracing::debug;
     use turn_server_proto::openssl::OpensslTurnServer;
+    use turn_types::{AddressFamily, TurnCredentials};
 
     use crate::api::tests::{transmit_send_build, TurnTest};
     use crate::client::TurnClient;
@@ -691,16 +678,13 @@ mod tests {
         transport: TransportType,
         local_addr: SocketAddr,
         remote_addr: SocketAddr,
-        credentials: TurnCredentials,
-        allocation_transport: TransportType,
+        config: TurnConfig,
     ) -> TurnClient {
         TurnClientOpensslTls::allocate(
             transport,
             local_addr,
             remote_addr,
-            credentials,
-            allocation_transport,
-            &[AddressFamily::IPV4],
+            config,
             test_ssl_context(transport),
         )
         .into()
@@ -712,13 +696,9 @@ mod tests {
         credentials: TurnCredentials,
         allocation_transport: TransportType,
     ) -> TurnClient {
-        turn_openssl_new(
-            TransportType::Tcp,
-            local_addr,
-            remote_addr,
-            credentials,
-            allocation_transport,
-        )
+        let mut config = TurnConfig::new(credentials);
+        config.set_allocation_transport(allocation_transport);
+        turn_openssl_new(TransportType::Tcp, local_addr, remote_addr, config)
     }
 
     fn turn_udp_openssl_new(
@@ -727,13 +707,9 @@ mod tests {
         credentials: TurnCredentials,
         allocation_transport: TransportType,
     ) -> TurnClient {
-        turn_openssl_new(
-            TransportType::Udp,
-            local_addr,
-            remote_addr,
-            credentials,
-            allocation_transport,
-        )
+        let mut config = TurnConfig::new(credentials);
+        config.set_allocation_transport(allocation_transport);
+        turn_openssl_new(TransportType::Udp, local_addr, remote_addr, config)
     }
 
     fn turn_server_openssl_new(

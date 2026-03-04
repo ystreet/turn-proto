@@ -15,12 +15,11 @@ use std::net::SocketAddr;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use stun_proto::agent::Transmit;
 use stun_proto::Instant;
-use turn_client_proto::api::{DelayedMessageOrChannelSend, TurnEvent, TurnRecvRet};
+use turn_client_proto::api::{DelayedMessageOrChannelSend, TurnConfig, TurnEvent, TurnRecvRet};
 use turn_client_proto::prelude::*;
 use turn_client_proto::udp::TurnClientUdp;
 use turn_server_proto::api::{TurnServerApi, TurnServerPollRet};
 use turn_server_proto::server::TurnServer;
-use turn_types::AddressFamily;
 use turn_types::{stun::TransportType, TurnCredentials};
 
 struct TurnTest<T: TurnClientApi> {
@@ -132,7 +131,8 @@ static SIZES: [usize; 3] = [32, 1024, 16000];
 fn bench_turn_client_sendrecv(c: &mut Criterion) {
     let mut test = TurnTest::new(
         |local_addr: SocketAddr, remote_addr: SocketAddr, credentials: TurnCredentials| {
-            TurnClientUdp::allocate(local_addr, remote_addr, credentials, &[AddressFamily::IPV4])
+            let config = TurnConfig::new(credentials);
+            TurnClientUdp::allocate(local_addr, remote_addr, config)
         },
     );
 
@@ -241,7 +241,8 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
     let mut group = c.benchmark_group("Turn/Recv");
     let mut test = TurnTest::new(
         |local_addr: SocketAddr, remote_addr: SocketAddr, credentials: TurnCredentials| {
-            TurnClientUdp::allocate(local_addr, remote_addr, credentials, &[AddressFamily::IPV4])
+            let config = TurnConfig::new(credentials);
+            TurnClientUdp::allocate(local_addr, remote_addr, config)
         },
     );
     let now = Instant::ZERO;

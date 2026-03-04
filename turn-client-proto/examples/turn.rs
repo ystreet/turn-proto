@@ -66,7 +66,7 @@
 use rustls::pki_types::ServerName;
 use rustls::ClientConfig;
 use rustls_platform_verifier::ConfigVerifierExt;
-use turn_client_proto::api::TcpConnectError;
+use turn_client_proto::api::{TcpConnectError, TurnConfig};
 use turn_client_proto::client::TurnClient;
 use turn_client_proto::openssl::TurnClientOpensslTls;
 use turn_client_proto::prelude::*;
@@ -243,13 +243,12 @@ impl ClientUdp {
     fn new(
         socket: UdpSocket,
         to: SocketAddr,
-        credentials: TurnCredentials,
-        allocation_families: &[AddressFamily],
+        config: TurnConfig,
         events_sender: SyncSender<TurnEvent>,
     ) -> Self {
         let base_instant = std::time::Instant::now();
         let local_addr = socket.local_addr().unwrap();
-        let client = TurnClientUdp::allocate(local_addr, to, credentials, allocation_families);
+        let client = TurnClientUdp::allocate(local_addr, to, config);
         let inner = Arc::new((Mutex::new(client.into()), Condvar::new()));
         let socket = Arc::new(socket);
 
@@ -266,8 +265,7 @@ impl ClientUdp {
     fn new_openssl(
         socket: UdpSocket,
         to: SocketAddr,
-        credentials: TurnCredentials,
-        allocation_families: &[AddressFamily],
+        config: TurnConfig,
         events_sender: SyncSender<TurnEvent>,
         insecure_tls: bool,
     ) -> Self {
@@ -286,9 +284,7 @@ impl ClientUdp {
             TransportType::Udp,
             local_addr,
             remote_addr,
-            credentials,
-            TransportType::Udp,
-            allocation_families,
+            config,
             ssl_context.build(),
         );
         let inner = Arc::new((Mutex::new(client.into()), Condvar::new()));
@@ -518,21 +514,13 @@ impl ClientTcp {
     fn new(
         socket: TcpStream,
         to: SocketAddr,
-        credentials: TurnCredentials,
-        allocation_transport: TransportType,
-        allocation_families: &[AddressFamily],
+        config: TurnConfig,
         events_sender: SyncSender<TurnEvent>,
     ) -> Self {
         let base_instant = std::time::Instant::now();
         let local_addr = socket.local_addr().unwrap();
         let remote_addr = to;
-        let client = TurnClientTcp::allocate(
-            local_addr,
-            remote_addr,
-            credentials,
-            allocation_transport,
-            allocation_families,
-        );
+        let client = TurnClientTcp::allocate(local_addr, remote_addr, config);
         let socket_clone = socket.try_clone().unwrap();
         let local_addr = socket.local_addr().unwrap();
         let send_sender = tcp_send_thread(socket);
@@ -557,9 +545,7 @@ impl ClientTcp {
     fn new_rustls(
         socket: TcpStream,
         to: SocketAddr,
-        credentials: TurnCredentials,
-        allocation_transport: TransportType,
-        allocation_families: &[AddressFamily],
+        config: TurnConfig,
         server_name: ServerName<'static>,
         events_sender: SyncSender<TurnEvent>,
         insecure_tls: bool,
@@ -567,7 +553,7 @@ impl ClientTcp {
         let base_instant = std::time::Instant::now();
         let local_addr = socket.local_addr().unwrap();
         let remote_addr = to;
-        let config = if insecure_tls {
+        let tls_config = if insecure_tls {
             ClientConfig::builder()
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(danger::NoCertificateVerification::new(
@@ -580,11 +566,9 @@ impl ClientTcp {
         let client = TurnClientRustls::allocate(
             local_addr,
             remote_addr,
-            credentials,
-            allocation_transport,
-            allocation_families,
+            config,
             server_name,
-            Arc::new(config),
+            Arc::new(tls_config),
         );
         let socket_clone = socket.try_clone().unwrap();
         let local_addr = socket.local_addr().unwrap();
@@ -610,9 +594,7 @@ impl ClientTcp {
     fn new_openssl(
         socket: TcpStream,
         to: SocketAddr,
-        credentials: TurnCredentials,
-        allocation_transport: TransportType,
-        allocation_families: &[AddressFamily],
+        config: TurnConfig,
         events_sender: SyncSender<TurnEvent>,
         insecure_tls: bool,
     ) -> Self {
@@ -631,9 +613,7 @@ impl ClientTcp {
             TransportType::Tcp,
             local_addr,
             remote_addr,
-            credentials,
-            allocation_transport,
-            allocation_families,
+            config,
             ssl_context.build(),
         );
         let socket_clone = socket.try_clone().unwrap();
@@ -922,6 +902,13 @@ fn main() -> io::Result<()> {
         panic!("TURN-TCP allocations can only be created with a TCP based connection to the TURN server. Use `--transport tcp`.");
     }
 
+    let mut config = TurnConfig::new(credentials);
+    config.set_allocation_transport(cli.allocation_transport.into());
+    config.set_address_family(address_families[0]);
+    for family in &address_families[1..] {
+        config.add_address_family(*family);
+    }
+
     let client = match transport {
         TransportType::Udp => {
             let socket = if server.is_ipv4() {
@@ -940,8 +927,7 @@ fn main() -> io::Result<()> {
                         let client = ClientUdp::new_openssl(
                             socket,
                             server,
-                            credentials,
-                            &address_families,
+                            config,
                             events_sender,
                             cli.insecure_tls,
                         );
@@ -949,13 +935,7 @@ fn main() -> io::Result<()> {
                     }
                 }
             } else {
-                let client = ClientUdp::new(
-                    socket,
-                    server,
-                    credentials,
-                    &address_families,
-                    events_sender,
-                );
+                let client = ClientUdp::new(socket, server, config, events_sender);
                 Box::new(client) as Box<dyn Client<_>>
             }
         }
@@ -973,9 +953,7 @@ fn main() -> io::Result<()> {
                         let client = ClientTcp::new_rustls(
                             socket,
                             server,
-                            credentials,
-                            cli.allocation_transport.into(),
-                            &address_families,
+                            config,
                             server_name,
                             events_sender,
                             cli.insecure_tls,
@@ -986,9 +964,7 @@ fn main() -> io::Result<()> {
                         let client = ClientTcp::new_openssl(
                             socket,
                             server,
-                            credentials,
-                            cli.allocation_transport.into(),
-                            &address_families,
+                            config,
                             //server_name,
                             events_sender,
                             cli.insecure_tls,
@@ -997,14 +973,7 @@ fn main() -> io::Result<()> {
                     }
                 }
             } else {
-                let client = ClientTcp::new(
-                    socket,
-                    server,
-                    credentials,
-                    cli.allocation_transport.into(),
-                    &address_families,
-                    events_sender,
-                );
+                let client = ClientTcp::new(socket, server, config, events_sender);
                 Box::new(client) as Box<dyn Client<_>>
             }
         }

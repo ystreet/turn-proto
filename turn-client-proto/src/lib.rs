@@ -40,15 +40,16 @@
 //!
 //! ```
 //! use turn_client_proto::udp::TurnClientUdp;
+//! use turn_client_proto::api::TurnConfig;
 //! let turn_server_address = "127.0.0.1:3478".parse().unwrap();
 //! let local_address = "127.0.0.1:1000".parse().unwrap();
 //! let credentials = turn_types::TurnCredentials::new("username", "password");
+//! let config = TurnConfig::new(credentials);
 //!
 //! let client = TurnClientUdp::allocate(
 //!     local_address,
 //!     turn_server_address,
-//!     credentials,
-//!     &[turn_types::AddressFamily::IPV4],
+//!     config,
 //! );
 //! ```
 

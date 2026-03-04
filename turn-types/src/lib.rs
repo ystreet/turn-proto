@@ -54,7 +54,7 @@ pub mod prelude {
 use alloc::borrow::ToOwned;
 use alloc::string::{String, ToString};
 use stun_types::message::{LongTermCredentials, LongTermKeyCredentials};
-pub use stun_types::AddressFamily;
+pub use stun_types::{AddressFamily, TransportType};
 
 /// Initialize some debugging functionality of the library.
 ///
@@ -66,7 +66,7 @@ pub fn debug_init() {
 }
 
 /// Credentials used for a TURN user.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnCredentials {
     username: String,
     password: String,

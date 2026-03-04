@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 use core::net::SocketAddr;
 use stun_types::TransportType;
-use turn_client_proto::api::{TurnClientApi, TurnEvent, TurnPollRet};
+use turn_client_proto::api::{TurnClientApi, TurnConfig, TurnEvent, TurnPollRet};
 use turn_client_proto::client::TurnClient;
 use turn_client_proto::stun::Instant;
 use turn_client_proto::udp::TurnClientUdp;
@@ -32,11 +32,12 @@ impl TestClient {
             credentials.username().to_string(),
             credentials.password().to_string(),
         );
+        let mut config = TurnConfig::new(credentials.clone());
+        config.add_address_family(AddressFamily::IPV6);
         let client = TurnClientUdp::allocate(
             client_addr,
             server_addr,
-            credentials.clone(),
-            &[AddressFamily::IPV4, AddressFamily::IPV6],
+            config,
         );
         let relayed_ipv4 = "10.0.0.2:2222".parse().unwrap();
         let relayed_ipv6 = "[fe80::1]:2222".parse().unwrap();
