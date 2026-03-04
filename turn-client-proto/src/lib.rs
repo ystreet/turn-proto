@@ -52,6 +52,13 @@
 //!     config,
 //! );
 //! ```
+//!
+//! ## Rustls crypto providers
+//!
+//! `turn-client-proto` does not enable any cryptographic providers on rustls.
+//! It is the user's responsibility (library or application) to enable and use
+//! the relevant cryptographic provider (ring, aws-lc-rs, RustCrypto, etc),
+//! that they wish to use.
 
 #![deny(missing_debug_implementations)]
 #![deny(missing_docs)]

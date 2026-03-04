@@ -701,7 +701,7 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for ClientTcp {
     }
 }
 
-use rustls::crypto::aws_lc_rs as crypto_provider;
+use rustls::crypto::ring as crypto_provider;
 mod danger {
     use rustls::client::danger::HandshakeSignatureValid;
     use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};

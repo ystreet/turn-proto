@@ -23,6 +23,13 @@
 //! [RFC6062]: https://tools.ietf.org/html/rfc6062
 //! [RFC6156]: https://tools.ietf.org/html/rfc6156
 //! [RFC8656]: https://tools.ietf.org/html/rfc8656
+//!
+//! ## Rustls crypto providers
+//!
+//! `turn-server-proto` does not enable any cryptographic providers on rustls.
+//! It is the user's responsibility (library or application) to enable and use
+//! the relevant cryptographic provider (ring, aws-lc-rs, RustCrypto, etc),
+//! that they wish to use.
 
 #![deny(missing_debug_implementations)]
 #![deny(missing_docs)]

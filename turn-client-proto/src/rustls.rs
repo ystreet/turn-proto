@@ -535,7 +535,7 @@ mod tests {
     use super::*;
 
     use rcgen::CertifiedKey;
-    use rustls::crypto::aws_lc_rs as crypto_provider;
+    use rustls::crypto::ring as crypto_provider;
     use rustls::pki_types::PrivateKeyDer;
     use rustls::ServerConfig;
     use turn_server_proto::api::{TurnServerApi, TurnServerPollRet};

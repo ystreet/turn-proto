@@ -62,6 +62,13 @@ sans-IO API and thus does no networking calls of its own.
 for communicating with TURN clients. It does this using a sans-IO API and thus
 does no networking calls of its own.
 
+## Rustls crypto providers
+
+`turn-client-proto` and `turn-server-proto` do not enable any cryptographic
+providers on rustls.  It is the user's responsibility (library or application)
+to enable and use the relevant cryptographic provider (ring, aws-lc-rs,
+RustCrypto, etc), that they wish to use.
+
 ## Funding
 
 [Support for TURN](https://nlnet.nl/project/librice/) has been funded in part through the
