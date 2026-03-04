@@ -19,7 +19,7 @@ use stun_proto::agent::Transmit;
 use stun_proto::Instant;
 use turn_client_proto::api::{TurnConfig, TurnEvent, TurnRecvRet};
 use turn_client_proto::prelude::*;
-use turn_client_proto::udp::TurnClientUdp;
+use turn_client_proto::udp::{TurnClientUdp, TurnPollRet};
 use turn_server_proto::api::{TurnServerApi, TurnServerPollRet};
 use turn_server_proto::server::TurnServer;
 use turn_types::{stun::TransportType, TurnCredentials};
@@ -57,13 +57,22 @@ impl<T: TurnClientApi> TurnTest<T> {
         }
     }
 
-    fn allocate(&mut self, now: Instant) {
+    fn client_advance(&mut self, now: Instant) -> Instant {
+        let TurnPollRet::WaitUntil(expiry) = self.client.poll(now) else {
+            unreachable!();
+        };
+        assert!(expiry > now);
+        expiry
+    }
+
+    fn allocate(&mut self, now: Instant) -> Instant {
         let transmit = self.client.poll_transmit(now).unwrap();
         let transmit = self.server.recv(transmit, now).unwrap();
         assert!(matches!(
             self.client.recv(transmit.build(), now),
             TurnRecvRet::Handled
         ));
+        let now = self.client_advance(now);
         let transmit = self.client.poll_transmit(now).unwrap();
         assert!(self.server.recv(transmit, now).is_none());
         let TurnServerPollRet::AllocateSocket {
@@ -99,12 +108,14 @@ impl<T: TurnClientApi> TurnTest<T> {
             self.client.poll_event(),
             Some(TurnEvent::AllocationCreated(TransportType::Udp, _))
         ));
+        now
     }
 
-    fn create_permission(&mut self, now: Instant) {
+    fn create_permission(&mut self, now: Instant) -> Instant {
         self.client
             .create_permission(TransportType::Udp, self.peer_addr.ip(), now)
             .unwrap();
+        let now = self.client_advance(now);
         let transmit = self.client.poll_transmit(now).unwrap();
         let transmit = self.server.recv(transmit, now).unwrap();
         assert!(matches!(
@@ -115,18 +126,21 @@ impl<T: TurnClientApi> TurnTest<T> {
             self.client.poll_event(),
             Some(TurnEvent::PermissionCreated(TransportType::Udp, _))
         ));
+        now
     }
 
-    fn channel_bind(&mut self, now: Instant) {
+    fn channel_bind(&mut self, now: Instant) -> Instant {
         self.client
             .bind_channel(TransportType::Udp, self.peer_addr, now)
             .unwrap();
+        let now = self.client_advance(now);
         let transmit = self.client.poll_transmit(now).unwrap();
         let transmit = self.server.recv(transmit, now).unwrap();
         assert!(matches!(
             self.client.recv(transmit.build(), now),
             TurnRecvRet::Handled
         ));
+        now
     }
 }
 
@@ -175,6 +189,7 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
                 let transmit = test.client.poll_transmit(now).unwrap();
                 let transmit = test.server.recv(transmit, now).unwrap();
                 test.client.recv(transmit.build(), now);
+                let now = test.client_advance(now);
                 let transmit = test.client.poll_transmit(now).unwrap();
                 (test, transmit)
             },
@@ -219,6 +234,7 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
                 let transmit = test.client.poll_transmit(now).unwrap();
                 let transmit = test.server.recv(transmit, now).unwrap();
                 test.client.recv(transmit.build(), now);
+                let now = test.client_advance(now);
                 let transmit = test.client.poll_transmit(now).unwrap();
                 (test, transmit)
             },
@@ -260,10 +276,11 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
                         TurnClientUdp::allocate(local_addr, remote_addr, config)
                     },
                 );
-                test.allocate(now);
+                let now = test.allocate(now);
                 test.client
                     .create_permission(TransportType::Udp, test.peer_addr.ip(), now)
                     .unwrap();
+                let now = test.client_advance(now);
                 let transmit = test.client.poll_transmit(now).unwrap();
 
                 (test, transmit)
@@ -286,11 +303,12 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
                         TurnClientUdp::allocate(local_addr, remote_addr, config)
                     },
                 );
-                test.allocate(now);
+                let now = test.allocate(now);
                 test.create_permission(now);
                 test.client
                     .bind_channel(TransportType::Udp, test.peer_addr, now)
                     .unwrap();
+                let now = test.client_advance(now);
                 let transmit = test.client.poll_transmit(now).unwrap();
 
                 (test, transmit)
@@ -310,8 +328,8 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
         },
     );
     let now = Instant::ZERO;
-    test.allocate(now);
-    test.create_permission(now);
+    let now = test.allocate(now);
+    let now = test.create_permission(now);
     for size in SIZES.iter() {
         let data = vec![8; *size];
         let transmit = test
@@ -353,7 +371,7 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
             )
         });
     }
-    test.channel_bind(now);
+    let now = test.channel_bind(now);
     for size in SIZES.iter() {
         let data = vec![8; *size];
         let transmit = test
@@ -405,8 +423,8 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
         },
     );
     let now = Instant::ZERO;
-    test.allocate(now);
-    test.create_permission(now);
+    let now = test.allocate(now);
+    let now = test.create_permission(now);
     for size in SIZES.iter() {
         let data = vec![8; *size];
         let transmit = Transmit::new(data, TransportType::Udp, test.peer_addr, test.relayed_addr);
@@ -443,7 +461,7 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
             )
         });
     }
-    test.channel_bind(now);
+    let now = test.channel_bind(now);
     for size in SIZES.iter() {
         let data = vec![8; *size];
         let transmit = Transmit::new(data, TransportType::Udp, test.peer_addr, test.relayed_addr);

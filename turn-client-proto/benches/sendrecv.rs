@@ -17,7 +17,7 @@ use stun_proto::agent::Transmit;
 use stun_proto::Instant;
 use turn_client_proto::api::{DelayedMessageOrChannelSend, TurnConfig, TurnEvent, TurnRecvRet};
 use turn_client_proto::prelude::*;
-use turn_client_proto::udp::TurnClientUdp;
+use turn_client_proto::udp::{TurnClientUdp, TurnPollRet};
 use turn_server_proto::api::{TurnServerApi, TurnServerPollRet};
 use turn_server_proto::server::TurnServer;
 use turn_types::{stun::TransportType, TurnCredentials};
@@ -55,13 +55,22 @@ impl<T: TurnClientApi> TurnTest<T> {
         }
     }
 
-    fn allocate(&mut self, now: Instant) {
+    fn client_advance(&mut self, now: Instant) -> Instant {
+        let TurnPollRet::WaitUntil(expiry) = self.client.poll(now) else {
+            unreachable!();
+        };
+        assert!(expiry > now);
+        expiry
+    }
+
+    fn allocate(&mut self, now: Instant) -> Instant {
         let transmit = self.client.poll_transmit(now).unwrap();
         let transmit = self.server.recv(transmit, now).unwrap();
         assert!(matches!(
             self.client.recv(transmit.build(), now),
             TurnRecvRet::Handled
         ));
+        let now = self.client_advance(now);
         let transmit = self.client.poll_transmit(now).unwrap();
         assert!(self.server.recv(transmit, now).is_none());
         let TurnServerPollRet::AllocateSocket {
@@ -101,6 +110,7 @@ impl<T: TurnClientApi> TurnTest<T> {
         self.client
             .create_permission(TransportType::Udp, self.peer_addr.ip(), now)
             .unwrap();
+        let now = self.client_advance(now);
         let transmit = self.client.poll_transmit(now).unwrap();
         let transmit = self.server.recv(transmit, now).unwrap();
         assert!(matches!(
@@ -111,18 +121,21 @@ impl<T: TurnClientApi> TurnTest<T> {
             self.client.poll_event(),
             Some(TurnEvent::PermissionCreated(TransportType::Udp, _))
         ));
+        now
     }
 
-    fn channel_bind(&mut self, now: Instant) {
+    fn channel_bind(&mut self, now: Instant) -> Instant {
         self.client
             .bind_channel(TransportType::Udp, self.peer_addr, now)
             .unwrap();
+        let now = self.client_advance(now);
         let transmit = self.client.poll_transmit(now).unwrap();
         let transmit = self.server.recv(transmit, now).unwrap();
         assert!(matches!(
             self.client.recv(transmit.build(), now),
             TurnRecvRet::Handled
         ));
+        now
     }
 }
 
@@ -137,7 +150,7 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
     );
 
     let now = Instant::ZERO;
-    test.allocate(now);
+    let now = test.allocate(now);
 
     let mut group = c.benchmark_group("Turn/Send");
 
@@ -190,7 +203,7 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
         );
     }
 
-    test.channel_bind(now);
+    let now = test.channel_bind(now);
 
     for size in SIZES.iter() {
         group.throughput(criterion::Throughput::Bytes(*size as u64));
@@ -246,7 +259,7 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
         },
     );
     let now = Instant::ZERO;
-    test.allocate(now);
+    let now = test.allocate(now);
 
     for size in SIZES.iter() {
         group.throughput(criterion::Throughput::Bytes(*size as u64));
@@ -285,7 +298,7 @@ fn bench_turn_client_sendrecv(c: &mut Criterion) {
         );
     }
 
-    test.channel_bind(now);
+    let now = test.channel_bind(now);
 
     for size in SIZES.iter() {
         group.throughput(criterion::Throughput::Bytes(*size as u64));
