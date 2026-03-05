@@ -1124,6 +1124,7 @@ impl TurnServerProtocol {
 
     fn handle_stun_connect(
         &mut self,
+        peer_tcp: &BTreeMap<(SocketAddr, SocketAddr), PeerTcp>,
         transmit: Transmit<&Message<'_>>,
         now: Instant,
     ) -> Result<(), MessageWriteVec> {
@@ -1213,6 +1214,9 @@ impl TurnServerProtocol {
             .pending_tcp_connect
             .iter()
             .any(|pending| pending.peer_addr == peer_addr)
+            || peer_tcp
+                .iter()
+                .any(|((_relayed_addr, tcp_peer_addr), _)| tcp_peer_addr == &peer_addr)
         {
             return Err(Self::connection_already_exists_error_signed(
                 &mut self.auth,
@@ -1437,6 +1441,7 @@ impl TurnServerProtocol {
     )]
     fn handle_stun(
         &mut self,
+        peer_tcp: &BTreeMap<(SocketAddr, SocketAddr), PeerTcp>,
         transmit: Transmit<&Message<'_>>,
         tcp_type: TcpStunType,
         now: Instant,
@@ -1463,9 +1468,9 @@ impl TurnServerProtocol {
                 CHANNEL_BIND if matches!(tcp_type, TcpStunType::Control) => self
                     .handle_stun_channel_bind(transmit, now)
                     .map(|t| Some(InternalHandleStun::Transmit(t))),
-                CONNECT if matches!(tcp_type, TcpStunType::Control) => {
-                    self.handle_stun_connect(transmit, now).map(|_| None)
-                }
+                CONNECT if matches!(tcp_type, TcpStunType::Control) => self
+                    .handle_stun_connect(peer_tcp, transmit, now)
+                    .map(|_| None),
                 CONNECTION_BIND if matches!(tcp_type, TcpStunType::Unknown) => self
                     .handle_stun_connection_bind(transmit, now, tcp_stun_change)
                     .map(|t| Some(InternalHandleStun::Transmit(t))),
@@ -1660,6 +1665,7 @@ impl TurnServerProtocol {
 
     fn handle_listen_tcp_stored_message(
         &mut self,
+        peer_tcp: &BTreeMap<(SocketAddr, SocketAddr), PeerTcp>,
         remote_addr: SocketAddr,
         data: Vec<u8>,
         tcp_type: TcpStunType,
@@ -1671,7 +1677,7 @@ impl TurnServerProtocol {
             return None;
         };
         let msg_transmit = Transmit::new(&msg, TransportType::Tcp, remote_addr, listen_addr);
-        match self.handle_stun(msg_transmit, tcp_type, now, tcp_stun_change) {
+        match self.handle_stun(peer_tcp, msg_transmit, tcp_type, now, tcp_stun_change) {
             Err(builder) => Some(Transmit::new(
                 builder.finish(),
                 TransportType::Tcp,
@@ -2238,6 +2244,7 @@ impl TurnServerApi for TurnServer {
                                 Transmit::new(&msg, transmit.transport, transmit.from, transmit.to);
                             let mut tcp_stun_change = None;
                             let ret = self.protocol.handle_stun(
+                                &self.peer_tcp,
                                 msg_transmit,
                                 tcp_type,
                                 now,
@@ -2354,6 +2361,7 @@ impl TurnServerApi for TurnServer {
                             let ret = self
                                 .protocol
                                 .handle_listen_tcp_stored_message(
+                                    &self.peer_tcp,
                                     transmit.from,
                                     data,
                                     tcp_type,
@@ -2450,6 +2458,7 @@ impl TurnServerApi for TurnServer {
                             Transmit::new(&msg, transmit.transport, transmit.from, transmit.to);
                         let mut change = None;
                         let ret = match self.protocol.handle_stun(
+                            &self.peer_tcp,
                             msg_transmit,
                             TcpStunType::Control,
                             now,
@@ -2729,6 +2738,7 @@ impl TurnServerApi for TurnServer {
                 Some(StoredTcp::Message(msg)) => {
                     let mut tcp_stun_change = None;
                     let ret = self.protocol.handle_listen_tcp_stored_message(
+                        &self.peer_tcp,
                         remote_addr,
                         msg,
                         tcp_type,
@@ -3053,7 +3063,7 @@ impl TurnServerApi for TurnServer {
             .sign_outgoing_message(response, &user, client_addr)
             .unwrap();
         response.add_fingerprint().unwrap();
-        if socket_addr.is_ok() {
+        if socket_addr.is_ok() && response.has_class(MessageClass::Success) {
             self.protocol.tcp_connection_id += 1;
             self.protocol
                 .pending_tcp_connection_binds
@@ -5575,34 +5585,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_server_tcp_allocation_success() {
-        let _init = crate::tests::test_init_log();
-        let now = Instant::ZERO;
-        let mut server = new_server(TransportType::Tcp);
-        let (realm, nonce) = initial_allocate(&mut server, now);
-        let creds = credentials().into_long_term_credentials(&realm);
-        let reply = authenticated_allocate_with_credentials(
-            &mut server,
-            TransportType::Tcp,
-            creds.clone(),
-            &nonce,
-            now,
-        );
-        validate_authenticated_allocate_reply(&reply.data, creds.clone());
-        create_permission(&mut server, creds.clone(), &nonce, now);
-
-        let connection_id = tcp_connect(&mut server, peer_address(), creds.clone(), &nonce, now);
-
-        tcp_connection_bind(
-            &mut server,
-            connection_id,
-            tcp_local_address(),
-            creds,
-            &nonce,
-            now,
-        );
-
+    fn tcp_data_transfer(server: &mut TurnServer, now: Instant) {
         let data = [9; 5];
         let forward = server
             .recv(
@@ -5631,6 +5614,37 @@ mod tests {
         assert_eq!(forward.from, server.listen_address());
         assert_eq!(forward.to, tcp_local_address());
         assert_eq!(&forward.data.build(), data.as_slice());
+    }
+
+    #[test]
+    fn test_server_tcp_allocation_success() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut server = new_server(TransportType::Tcp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply = authenticated_allocate_with_credentials(
+            &mut server,
+            TransportType::Tcp,
+            creds.clone(),
+            &nonce,
+            now,
+        );
+        validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        create_permission(&mut server, creds.clone(), &nonce, now);
+
+        let connection_id = tcp_connect(&mut server, peer_address(), creds.clone(), &nonce, now);
+
+        tcp_connection_bind(
+            &mut server,
+            connection_id,
+            tcp_local_address(),
+            creds,
+            &nonce,
+            now,
+        );
+
+        tcp_data_transfer(&mut server, now);
     }
 
     #[test]
@@ -5768,5 +5782,174 @@ mod tests {
         assert_eq!(forward.from, server.listen_address());
         assert_eq!(forward.to, tcp_local_address());
         assert_eq!(&forward.data.build(), peer_data.as_slice());
+    }
+
+    #[test]
+    fn test_server_tcp_connection_already_exists_after_success() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut server = new_server(TransportType::Tcp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply = authenticated_allocate_with_credentials(
+            &mut server,
+            TransportType::Tcp,
+            creds.clone(),
+            &nonce,
+            now,
+        );
+        validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        create_permission(&mut server, creds.clone(), &nonce, now);
+
+        let connection_id = tcp_connect(&mut server, peer_address(), creds.clone(), &nonce, now);
+
+        tcp_connection_bind(
+            &mut server,
+            connection_id,
+            tcp_local_address(),
+            creds.clone(),
+            &nonce,
+            now,
+        );
+
+        let msg = tcp_connect_msg(peer_address(), creds, &nonce);
+        let reply = server
+            .recv(
+                Transmit::new(
+                    msg,
+                    server.transport(),
+                    client_address(),
+                    server.listen_address(),
+                ),
+                now,
+            )
+            .unwrap()
+            .build();
+        let reply = Message::from_bytes(&reply.data).unwrap();
+        assert!(reply.has_method(CONNECT));
+        let err_code = reply.attribute::<ErrorCode>().unwrap();
+        assert_eq!(err_code.code(), ErrorCode::CONNECTION_ALREADY_EXISTS);
+
+        tcp_data_transfer(&mut server, now);
+    }
+
+    #[test]
+    fn test_server_tcp_connection_already_exists_while_pending() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut server = new_server(TransportType::Tcp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply = authenticated_allocate_with_credentials(
+            &mut server,
+            TransportType::Tcp,
+            creds.clone(),
+            &nonce,
+            now,
+        );
+        validate_authenticated_allocate_reply(&reply.data, creds.clone());
+        create_permission(&mut server, creds.clone(), &nonce, now);
+
+        let connection_id = tcp_connect(&mut server, peer_address(), creds.clone(), &nonce, now);
+
+        let msg = tcp_connect_msg(peer_address(), creds.clone(), &nonce);
+        let reply = server
+            .recv(
+                Transmit::new(
+                    msg,
+                    server.transport(),
+                    client_address(),
+                    server.listen_address(),
+                ),
+                now,
+            )
+            .unwrap()
+            .build();
+        let reply = Message::from_bytes(&reply.data).unwrap();
+        assert!(reply.has_method(CONNECT));
+        let err_code = reply.attribute::<ErrorCode>().unwrap();
+        assert_eq!(err_code.code(), ErrorCode::CONNECTION_ALREADY_EXISTS);
+
+        tcp_connection_bind(
+            &mut server,
+            connection_id,
+            tcp_local_address(),
+            creds.clone(),
+            &nonce,
+            now,
+        );
+
+        tcp_data_transfer(&mut server, now);
+    }
+
+    #[test]
+    fn test_server_tcp_connection_socket_error() {
+        let _init = crate::tests::test_init_log();
+        for (tcp_err, err_code) in [
+            (
+                TcpConnectError::InsufficientCapacity,
+                ErrorCode::INSUFFICIENT_CAPACITY,
+            ),
+            (TcpConnectError::Forbidden, ErrorCode::FORBIDDEN),
+            (
+                TcpConnectError::TimedOut,
+                ErrorCode::CONNECTION_TIMEOUT_OR_FAILURE,
+            ),
+            (
+                TcpConnectError::Failure,
+                ErrorCode::CONNECTION_TIMEOUT_OR_FAILURE,
+            ),
+        ] {
+            let now = Instant::ZERO;
+            let mut server = new_server(TransportType::Tcp);
+            let (realm, nonce) = initial_allocate(&mut server, now);
+            let creds = credentials().into_long_term_credentials(&realm);
+            let reply = authenticated_allocate_with_credentials(
+                &mut server,
+                TransportType::Tcp,
+                creds.clone(),
+                &nonce,
+                now,
+            );
+            validate_authenticated_allocate_reply(&reply.data, creds.clone());
+            create_permission(&mut server, creds.clone(), &nonce, now);
+
+            let msg = tcp_connect_msg(peer_address(), creds.clone(), &nonce);
+            assert!(server
+                .recv(client_transmit(msg, server.transport()), now)
+                .is_none());
+            let TurnServerPollRet::TcpConnect {
+                relayed_addr,
+                peer_addr,
+                listen_addr,
+                client_addr,
+            } = server.poll(now)
+            else {
+                unreachable!();
+            };
+            assert_eq!(relayed_addr, relayed_address());
+            assert_eq!(peer_addr, peer_address());
+            assert_eq!(listen_addr, server.listen_address());
+            assert_eq!(client_addr, client_address());
+
+            server.tcp_connected(
+                relayed_addr,
+                peer_addr,
+                listen_addr,
+                client_addr,
+                Err(tcp_err),
+                now,
+            );
+
+            let reply = server.poll_transmit(now).unwrap();
+            assert_eq!(reply.transport, server.transport());
+            assert_eq!(reply.from, server.listen_address());
+            assert_eq!(reply.to, client_address());
+            let reply = reply.data.build();
+            let reply = Message::from_bytes(&reply).unwrap();
+            assert!(reply.has_method(CONNECT));
+            assert!(reply.has_class(MessageClass::Error));
+            assert_eq!(reply.attribute::<ErrorCode>().unwrap().code(), err_code);
+        }
     }
 }
