@@ -204,9 +204,11 @@ impl TurnServerProtocol {
             }
             Err(err) => match err.reason() {
                 AuthErrorReason::Parse(_) | AuthErrorReason::BadRequest => {
+                    trace!("auth bad request");
                     Err(Self::bad_request(msg, 0))
                 }
                 AuthErrorReason::StaleNonce => {
+                    trace!("auth stale nonce");
                     let error = ErrorCode::builder(ErrorCode::STALE_NONCE).build().unwrap();
                     let nonce_value = self.auth.nonce_for_client(transmit.from).unwrap();
                     let realm = Realm::new(self.auth.realm()).unwrap();
@@ -227,6 +229,7 @@ impl TurnServerProtocol {
                     Err(builder)
                 }
                 AuthErrorReason::Unauthorized | AuthErrorReason::IntegrityFailed => {
+                    trace!("auth unauthorized");
                     let error = ErrorCode::builder(ErrorCode::UNAUTHORIZED).build().unwrap();
                     let nonce_value = self.auth.nonce_for_client(transmit.from).unwrap();
                     let realm = Realm::new(self.auth.realm()).unwrap();
@@ -1199,7 +1202,8 @@ impl TurnServerProtocol {
             ));
         };
 
-        if now > alloc.expires_at {
+        error!("now: {now}, expires {}", alloc.expires_at);
+        if alloc.expires_at < now {
             trace!("allocation has expired");
             // allocation has expired
             return Err(Self::allocation_mismatch(
@@ -1218,6 +1222,7 @@ impl TurnServerProtocol {
                 .iter()
                 .any(|((_relayed_addr, tcp_peer_addr), _)| tcp_peer_addr == &peer_addr)
         {
+            trace!("already exists");
             return Err(Self::connection_already_exists_error_signed(
                 &mut self.auth,
                 msg,
@@ -1225,8 +1230,6 @@ impl TurnServerProtocol {
                 transmit.from,
             ));
         }
-
-        // TODO: check if a connection bind request is currently in progress.
 
         alloc.pending_tcp_connect.push(PendingTcpConnect {
             transaction_id: msg.transaction_id(),
@@ -1331,6 +1334,33 @@ impl TurnServerProtocol {
         // only once the incoming credentials are validated can we remove the pending request.
         let pending = self.pending_tcp_connection_binds.swap_remove(idx);
 
+        let Some(client) = self.mut_client_from_5tuple(
+            client_transmit.transport,
+            client_transmit.to,
+            client_transmit.from,
+        ) else {
+            trace!("allocation mismatch, no client");
+            return Err(Self::allocation_mismatch(
+                &mut self.auth,
+                msg,
+                &user,
+                transmit.from,
+            ));
+        };
+
+        if client.allocations.iter().all(|alloc| {
+            alloc.addr.is_ipv4() != pending.peer_addr.is_ipv4() || alloc.expires_at < now
+        }) {
+            // no allocation with
+            trace!("allocation mismatch, no allocation");
+            return Err(Self::allocation_mismatch(
+                &mut self.auth,
+                msg,
+                &user,
+                transmit.from,
+            ));
+        };
+
         *tcp_stun_change = Some(TcpStunChange::Data {
             client_data_addr: transmit.from,
             listen_addr: pending.listen_addr,
@@ -1433,7 +1463,7 @@ impl TurnServerProtocol {
 
     #[tracing::instrument(
         name = "turn_server_handle_stun",
-        skip(self, transmit, now, tcp_stun_change),
+        skip(self, transmit, now, tcp_stun_change, peer_tcp),
         fields(
             msg.transaction = %transmit.data.transaction_id(),
             msg.method = %transmit.data.method(),
@@ -1476,7 +1506,7 @@ impl TurnServerProtocol {
                     .map(|t| Some(InternalHandleStun::Transmit(t))),
                 _ => {
                     let user = self.validate_stun(&transmit, now)?.clone();
-                    let Some(_client) =
+                    let Some(client) =
                         self.mut_client_from_5tuple(transmit.transport, transmit.to, transmit.from)
                     else {
                         return Err(Self::allocation_mismatch(
@@ -1486,6 +1516,19 @@ impl TurnServerProtocol {
                             transmit.from,
                         ));
                     };
+
+                    if client
+                        .allocations
+                        .iter()
+                        .all(|alloc| alloc.expires_at < now)
+                    {
+                        return Err(Self::allocation_mismatch(
+                            &mut self.auth,
+                            transmit.data,
+                            &user,
+                            transmit.from,
+                        ));
+                    }
 
                     Err(Self::bad_request_signed(
                         &mut self.auth,
@@ -5951,5 +5994,83 @@ mod tests {
             assert!(reply.has_class(MessageClass::Error));
             assert_eq!(reply.attribute::<ErrorCode>().unwrap().code(), err_code);
         }
+    }
+
+    #[test]
+    fn test_server_tcp_connection_bind_allocation_mismatch() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut server = new_server(TransportType::Tcp);
+        let (realm, nonce) = initial_allocate(&mut server, now);
+        let creds = credentials().into_long_term_credentials(&realm);
+        let reply = authenticated_allocate_with_credentials(
+            &mut server,
+            TransportType::Tcp,
+            creds.clone(),
+            &nonce,
+            now,
+        );
+        validate_authenticated_allocate_reply(&reply.data, creds.clone());
+
+        let now = now + DEFAULT_ALLOCATION_DURATION - Duration::from_secs(1);
+        create_permission(&mut server, creds.clone(), &nonce, now);
+
+        // CONNECTION-BIND sent from a control connection results in an error.
+        let connection_id = tcp_connect(&mut server, peer_address(), creds.clone(), &nonce, now);
+
+        let msg = tcp_connection_bind_msg(connection_id, creds.clone(), &nonce);
+        let reply = server
+            .recv(
+                Transmit::new(
+                    msg,
+                    server.transport(),
+                    client_address(),
+                    server.listen_address(),
+                ),
+                now,
+            )
+            .unwrap();
+
+        assert_eq!(reply.transport, server.transport());
+        assert_eq!(reply.from, server.listen_address());
+        assert_eq!(reply.to, client_address());
+
+        let reply = reply.data.build();
+        let reply = Message::from_bytes(&reply).unwrap();
+        assert!(reply.has_method(CONNECTION_BIND));
+        assert!(reply.has_class(MessageClass::Error));
+        assert_eq!(
+            reply.attribute::<ErrorCode>().unwrap().code(),
+            ErrorCode::BAD_REQUEST
+        );
+
+        // allocation has expired
+        let now = now + Duration::from_secs(5);
+
+        let msg = tcp_connection_bind_msg(connection_id, creds.clone(), &nonce);
+        let reply = server
+            .recv(
+                Transmit::new(
+                    msg,
+                    server.transport(),
+                    tcp_local_address(),
+                    server.listen_address(),
+                ),
+                now,
+            )
+            .unwrap();
+
+        assert_eq!(reply.transport, server.transport());
+        assert_eq!(reply.from, server.listen_address());
+        assert_eq!(reply.to, tcp_local_address());
+
+        let reply = reply.data.build();
+        let reply = Message::from_bytes(&reply).unwrap();
+        assert!(reply.has_method(CONNECTION_BIND));
+        assert!(reply.has_class(MessageClass::Error));
+        assert_eq!(
+            reply.attribute::<ErrorCode>().unwrap().code(),
+            ErrorCode::ALLOCATION_MISMATCH
+        );
     }
 }
