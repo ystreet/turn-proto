@@ -78,13 +78,13 @@ use turn_client_proto::udp::{
 };
 
 use stun_proto::agent::Transmit;
+use stun_proto::Instant;
 use turn_types::stun::data::Data;
 use turn_types::stun::TransportType;
 use turn_types::AddressFamily;
 
 use clap::{Parser, ValueEnum};
 
-use sans_io_time::Instant;
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};

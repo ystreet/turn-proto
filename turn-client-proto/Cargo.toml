@@ -30,17 +30,21 @@ clap = {version = "4", features = ["derive"]}
 criterion.workspace = true
 rustls = { workspace = true, features = ["ring"]}
 rustls-platform-verifier.workspace = true
+stun-proto.workspace = true
 rcgen = "0.14"
-sans-io-time = "0.1"
 
 [features]
 default = ["rustls", "std", "openssl"]
-std = ["thiserror/std", "turn-types/std"]
+std = ["thiserror/std", "turn-types/std", "stun-proto/std"]
 rustls = ["dep:rustls", "std", "rustls/std"]
 openssl = ["dep:openssl", "std"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }
+
+[[example]]
+name = "turn"
+required-features = ["default"]
 
 [[bench]]
 name = "sendrecv"
