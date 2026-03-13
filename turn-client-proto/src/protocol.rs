@@ -2685,7 +2685,7 @@ pub(crate) enum TurnProtocolChannelRecv {
 
 #[cfg(test)]
 mod tests {
-    use std::string::ToString;
+    use alloc::string::ToString;
 
     use turn_server_proto::api::TurnServerApi;
     use turn_types::attribute::ConnectionId;
