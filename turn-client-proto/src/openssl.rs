@@ -669,7 +669,7 @@ mod tests {
                 (std::time::SystemTime::now()
                     .duration_since(std::time::SystemTime::UNIX_EPOCH)
                     .unwrap()
-                    - std::time::Duration::from_secs(600))
+                    - core::time::Duration::from_secs(600))
                 .as_secs() as i64,
             )
             .unwrap(),
