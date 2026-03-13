@@ -14,6 +14,8 @@
 //! transports (TCP, and UDP) and wrappers (TLS).
 
 use alloc::vec::Vec;
+use stun_proto::auth::Feature;
+use turn_types::stun::message::IntegrityAlgorithm;
 use core::net::{IpAddr, SocketAddr};
 use core::ops::Range;
 use turn_types::prelude::DelayedTransmitBuild;
@@ -140,6 +142,8 @@ pub struct TurnConfig {
     allocation_transport: TransportType,
     address_families: smallvec::SmallVec<[AddressFamily; 2]>,
     credentials: TurnCredentials,
+    supported_integrity: smallvec::SmallVec<[IntegrityAlgorithm; 2]>,
+    anonymous_username: Feature,
 }
 
 impl TurnConfig {
@@ -163,6 +167,8 @@ impl TurnConfig {
             allocation_transport: TransportType::Udp,
             address_families: smallvec::smallvec![AddressFamily::IPV4],
             credentials,
+            supported_integrity: smallvec::smallvec![IntegrityAlgorithm::Sha1],
+            anonymous_username: Feature::Auto,
         }
     }
 
@@ -238,6 +244,39 @@ impl TurnConfig {
     /// Retrieve the [`TurnCredentials`] used for authenticating with the TURN server.
     pub fn credentials(&self) -> &TurnCredentials {
         &self.credentials
+    }
+
+    /// Add a supported integrity algorithm that could be used.
+    pub fn add_supported_integrity(&mut self, integrity: IntegrityAlgorithm) {
+        if !self.supported_integrity.contains(&integrity) {
+            self.supported_integrity.push(integrity);
+        }
+    }
+
+    /// Set the supported integrity algorithm used.
+    pub fn set_supported_integrity(&mut self, integrity: IntegrityAlgorithm) {
+        self.supported_integrity = smallvec::smallvec![integrity];
+    }
+
+    /// The supported integrity algorithms used.
+    pub fn supported_integrity(&self) -> &[IntegrityAlgorithm] {
+        &self.supported_integrity
+    }
+
+    /// Set whether anonymous username usage is required.
+    ///
+    /// A value of `Required` requires the server to support RFC 8489 and the
+    /// [`Userhash`](stun_proto::types::attribute::Userhash) attribute.
+    pub fn set_anonymous_username(&mut self, anon: Feature) {
+        self.anonymous_username = anon;
+    }
+
+    /// Whether anonymous username usage is required.
+    ///
+    /// A value of `Required` requires the server to support RFC 8489 and the
+    /// [`Userhash`](stun_proto::types::attribute::Userhash) attribute.
+    pub fn anonymous_username(&self) -> Feature {
+        self.anonymous_username
     }
 }
 

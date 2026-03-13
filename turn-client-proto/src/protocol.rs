@@ -92,6 +92,12 @@ impl TurnClientProtocol {
         turn_types::debug_init();
         let mut stun_auth = LongTermClientAuth::new();
         stun_auth.set_credentials(config.credentials().clone().into());
+        let integrity = config.supported_integrity();
+        stun_auth.set_supported_integrity(integrity[0]);
+        for integrity in &integrity[1..] {
+            stun_auth.add_supported_integrity(*integrity);
+        }
+        stun_auth.set_anonymous_username(config.anonymous_username());
         let address_families = config.address_families();
         let families = address_families.iter().cloned().fold(
             smallvec::SmallVec::with_capacity(address_families.len()),
