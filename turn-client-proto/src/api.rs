@@ -577,7 +577,7 @@ pub(crate) mod tests {
         stun::{
             attribute::{
                 AttributeStaticType, ErrorCode, MessageIntegrity, MessageIntegritySha256, Nonce,
-                Realm, Username, XorMappedAddress,
+                Realm, Userhash, Username, XorMappedAddress,
             },
             message::{Message, MessageClass, MessageType, MessageWriteVec, Method, TransactionId},
             prelude::{MessageWrite, MessageWriteExt},
@@ -836,6 +836,7 @@ pub(crate) mod tests {
             assert!(!msg.has_attribute(Realm::TYPE));
             assert!(!msg.has_attribute(Nonce::TYPE));
             assert!(!msg.has_attribute(Username::TYPE));
+            assert!(!msg.has_attribute(Userhash::TYPE));
             assert!(!msg.has_attribute(MessageIntegrity::TYPE));
             assert!(!msg.has_attribute(MessageIntegritySha256::TYPE));
             // error reply
@@ -861,7 +862,7 @@ pub(crate) mod tests {
             assert!(msg.has_attribute(RequestedTransport::TYPE));
             assert!(msg.has_attribute(Realm::TYPE));
             assert!(msg.has_attribute(Nonce::TYPE));
-            assert!(msg.has_attribute(Username::TYPE));
+            assert!(msg.has_attribute(Username::TYPE) || msg.has_attribute(Userhash::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
             assert!(self.server.recv(transmit, now).is_none());
             let TurnServerPollRet::AllocateSocket {
@@ -925,7 +926,7 @@ pub(crate) mod tests {
             assert!(msg.has_class(stun_proto::types::message::MessageClass::Request));
             assert!(msg.has_attribute(Realm::TYPE));
             assert!(msg.has_attribute(Nonce::TYPE));
-            assert!(msg.has_attribute(Username::TYPE));
+            assert!(msg.has_attribute(Username::TYPE) || msg.has_attribute(Userhash::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
             // ok reply
             let transmit = self.server.recv(transmit, now).unwrap().build();
@@ -969,7 +970,7 @@ pub(crate) mod tests {
             assert!(msg.has_attribute(Lifetime::TYPE));
             assert!(msg.has_attribute(Realm::TYPE));
             assert!(msg.has_attribute(Nonce::TYPE));
-            assert!(msg.has_attribute(Username::TYPE));
+            assert!(msg.has_attribute(Username::TYPE) || msg.has_attribute(Userhash::TYPE));
             assert!(msg.has_attribute(MessageIntegrity::TYPE));
             // ok reply
             let transmit = self.server.recv(transmit, now).unwrap().build();

@@ -20,6 +20,7 @@ use core::net::{IpAddr, SocketAddr};
 use core::time::Duration;
 use pnet_packet::Packet;
 use stun_proto::auth::{AuthErrorReason, LongTermServerAuth, LongTermValidation};
+use turn_types::stun::attribute::{MessageIntegritySha256, Userhash};
 use turn_types::stun::prelude::AttributeExt;
 use turn_types::tcp::{IncomingTcp, StoredTcp, TurnTcpBuffer};
 use turn_types::transmit::{DelayedChannel, DelayedMessage, TransmitBuild};
@@ -160,14 +161,15 @@ impl TurnServerProtocol {
         &mut self,
         transmit: &Transmit<&Message<'_>>,
         now: Instant,
-    ) -> Result<String, MessageWriteVec> {
+    ) -> Result<(), MessageWriteVec> {
         let msg = transmit.data;
 
         match self.auth.validate_incoming_message(msg, transmit.from, now) {
             Ok(LongTermValidation::ResendRequest(_algo)) => unreachable!(),
             Ok(LongTermValidation::Validated(_algo)) => {
                 // checked by auth already
-                let username = msg.attribute::<Username>().unwrap();
+                let username = msg.attribute::<Username>().ok();
+                let userhash = msg.attribute::<Userhash>().ok();
 
                 // All requests after the initial Allocate must use the same username as
                 // that used to create the allocation, to prevent attackers from
@@ -180,8 +182,23 @@ impl TurnServerProtocol {
                 if let Some(client) =
                     self.client_from_5tuple(transmit.transport, transmit.to, transmit.from)
                 {
-                    if client.username != username.username() {
-                        trace!("mismatched username");
+                    trace!(
+                        "checking user: {username:?} vs {:?} || {userhash:?} vs {:?}",
+                        client.username,
+                        client.userhash
+                    );
+                    if username.as_ref().is_some_and(|u| {
+                        client
+                            .username
+                            .as_ref()
+                            .map_or(true, |cu| u.username() != cu)
+                    }) || userhash.as_ref().map(|u| *u.hash()) != client.userhash
+                    {
+                        trace!(
+                            "mismatched username: {username:?} vs {:?} || {userhash:?} vs {:?}",
+                            client.username,
+                            client.userhash
+                        );
                         let error = ErrorCode::builder(ErrorCode::WRONG_CREDENTIALS)
                             .build()
                             .unwrap();
@@ -194,13 +211,13 @@ impl TurnServerProtocol {
                         builder.add_attribute(&error).unwrap();
                         let builder = self
                             .auth
-                            .sign_outgoing_message(builder, username.username(), transmit.from)
+                            .sign_outgoing_message(builder, transmit.from)
                             .unwrap();
                         return Err(builder);
                     }
                 }
 
-                Ok(username.username().to_owned())
+                Ok(())
             }
             Err(err) => match err.reason() {
                 AuthErrorReason::Parse(_) | AuthErrorReason::BadRequest => {
@@ -228,7 +245,9 @@ impl TurnServerProtocol {
 
                     Err(builder)
                 }
-                AuthErrorReason::Unauthorized | AuthErrorReason::IntegrityFailed => {
+                AuthErrorReason::Unauthorized
+                | AuthErrorReason::IntegrityFailed
+                | AuthErrorReason::UnsupportedFeature => {
                     trace!("auth unauthorized");
                     let error = ErrorCode::builder(ErrorCode::UNAUTHORIZED).build().unwrap();
                     let nonce_value = self.auth.nonce_for_client(transmit.from).unwrap();
@@ -279,17 +298,15 @@ impl TurnServerProtocol {
     fn bad_request_signed(
         auth: &mut LongTermServerAuth,
         msg: &Message<'_>,
-        user: &str,
         to: SocketAddr,
     ) -> MessageWriteVec {
-        let builder = Self::bad_request(msg, auth.message_signature_bytes(to, user, false));
-        auth.sign_outgoing_message(builder, user, to).unwrap()
+        let builder = Self::bad_request(msg, auth.message_signature_bytes(to, false));
+        auth.sign_outgoing_message(builder, to).unwrap()
     }
 
     fn allocation_mismatch(
         auth: &mut LongTermServerAuth,
         msg: &Message<'_>,
-        user: &str,
         to: SocketAddr,
     ) -> MessageWriteVec {
         let error = ErrorCode::builder(ErrorCode::ALLOCATION_MISMATCH)
@@ -300,12 +317,12 @@ impl TurnServerProtocol {
             MessageWriteVec::with_capacity(
                 MessageHeader::LENGTH
                     + error.padded_len()
-                    + auth.message_signature_bytes(to, user, false)
+                    + auth.message_signature_bytes(to, false)
                     + 8,
             ),
         );
         response.add_attribute(&error).unwrap();
-        let mut response = auth.sign_outgoing_message(response, user, to).unwrap();
+        let mut response = auth.sign_outgoing_message(response, to).unwrap();
         response.add_fingerprint().unwrap();
         response
     }
@@ -351,7 +368,7 @@ impl TurnServerProtocol {
         tcp_stun_change: &mut Option<TcpStunChange>,
     ) -> Result<(), MessageWriteVec> {
         let msg = transmit.data;
-        let user = self.validate_stun(&transmit, now)?.clone();
+        self.validate_stun(&transmit, now)?;
         let mut address_families = smallvec::SmallVec::<[AddressFamily; 2]>::new();
 
         if let Some(_client) =
@@ -361,7 +378,6 @@ impl TurnServerProtocol {
             return Err(Self::allocation_mismatch(
                 &mut self.auth,
                 msg,
-                &user,
                 transmit.from,
             ));
         };
@@ -373,13 +389,20 @@ impl TurnServerProtocol {
         let mut requested_address_family = None;
         let mut additional_address_family = None;
         let mut username = None;
+        let mut userhash = None;
         let mut dont_fragment = None;
 
         let mut unknown_attributes = smallvec::SmallVec::<[AttributeType; 4]>::default();
         for (_offset, attr) in msg.iter_attributes() {
             match attr.get_type() {
                 // checked by validate_stun()
-                Realm::TYPE | Nonce::TYPE | MessageIntegrity::TYPE => (),
+                Realm::TYPE
+                | Nonce::TYPE
+                | MessageIntegrity::TYPE
+                | MessageIntegritySha256::TYPE => (),
+                Userhash::TYPE => {
+                    userhash = Userhash::from_raw(attr).ok().map(|u| *u.hash());
+                }
                 Username::TYPE => {
                     username = Username::from_raw(attr)
                         .ok()
@@ -393,24 +416,14 @@ impl TurnServerProtocol {
                 EvenPort::TYPE => even_port = Some(attr),
                 RequestedAddressFamily::TYPE => {
                     if additional_address_family.is_some() {
-                        return Err(Self::bad_request_signed(
-                            &mut self.auth,
-                            msg,
-                            &user,
-                            transmit.from,
-                        ));
+                        return Err(Self::bad_request_signed(&mut self.auth, msg, transmit.from));
                     } else {
                         requested_address_family = Some(attr)
                     }
                 }
                 AdditionalAddressFamily::TYPE => {
                     if requested_address_family.is_some() {
-                        return Err(Self::bad_request_signed(
-                            &mut self.auth,
-                            msg,
-                            &user,
-                            transmit.from,
-                        ));
+                        return Err(Self::bad_request_signed(&mut self.auth, msg, transmit.from));
                     } else {
                         additional_address_family = Some(attr)
                     }
@@ -433,20 +446,12 @@ impl TurnServerProtocol {
                 &unknown_attributes,
                 MessageWriteVec::with_capacity(64),
             );
-            let err = self
-                .auth
-                .sign_outgoing_message(err, &user, transmit.from)
-                .unwrap();
+            let err = self.auth.sign_outgoing_message(err, transmit.from).unwrap();
             return Err(err);
         }
 
         let Some(requested_transport) = requested_transport else {
-            return Err(Self::bad_request_signed(
-                &mut self.auth,
-                msg,
-                &user,
-                transmit.from,
-            ));
+            return Err(Self::bad_request_signed(&mut self.auth, msg, transmit.from));
         };
 
         let allocation_transport = match requested_transport.protocol() {
@@ -463,12 +468,7 @@ impl TurnServerProtocol {
                     || dont_fragment.is_some()
                     || reservation_token.is_some()
                 {
-                    return Err(Self::bad_request_signed(
-                        &mut self.auth,
-                        msg,
-                        &user,
-                        transmit.from,
-                    ));
+                    return Err(Self::bad_request_signed(&mut self.auth, msg, transmit.from));
                 }
                 TransportType::Tcp
             }
@@ -484,7 +484,7 @@ impl TurnServerProtocol {
                 builder.add_attribute(&error).unwrap();
                 let builder = self
                     .auth
-                    .sign_outgoing_message(builder, &user, transmit.from)
+                    .sign_outgoing_message(builder, transmit.from)
                     .unwrap();
                 return Err(builder);
             }
@@ -492,12 +492,7 @@ impl TurnServerProtocol {
 
         if let Some(additional) = additional_address_family {
             let Ok(additional) = AdditionalAddressFamily::from_raw(additional) else {
-                return Err(Self::bad_request_signed(
-                    &mut self.auth,
-                    msg,
-                    &user,
-                    transmit.from,
-                ));
+                return Err(Self::bad_request_signed(&mut self.auth, msg, transmit.from));
             };
             /* The server checks if the request contains both
              * REQUESTED-ADDRESS-FAMILY and ADDITIONAL-ADDRESS-FAMILY attributes. If yes,
@@ -519,12 +514,7 @@ impl TurnServerProtocol {
                     requested_address_family.is_some(),
                     even_port.is_some(),
                 );
-                return Err(Self::bad_request_signed(
-                    &mut self.auth,
-                    msg,
-                    &user,
-                    transmit.from,
-                ));
+                return Err(Self::bad_request_signed(&mut self.auth, msg, transmit.from));
             }
             address_families.push(AddressFamily::IPV4);
             address_families.push(additional.family());
@@ -532,21 +522,11 @@ impl TurnServerProtocol {
 
         if let Some(requested) = requested_address_family {
             let Ok(requested) = RequestedAddressFamily::from_raw(requested) else {
-                return Err(Self::bad_request_signed(
-                    &mut self.auth,
-                    msg,
-                    &user,
-                    transmit.from,
-                ));
+                return Err(Self::bad_request_signed(&mut self.auth, msg, transmit.from));
             };
             if reservation_token.is_some() {
                 debug!("RequestedAddressFamily with ReservationToken -> Bad Request");
-                return Err(Self::bad_request_signed(
-                    &mut self.auth,
-                    msg,
-                    &user,
-                    transmit.from,
-                ));
+                return Err(Self::bad_request_signed(&mut self.auth, msg, transmit.from));
             }
             address_families.push(requested.family());
         } else if address_families.is_empty() {
@@ -566,12 +546,7 @@ impl TurnServerProtocol {
              */
             if even_port.is_some() {
                 debug!("ReservationToken with EvenPort -> Bad Request");
-                return Err(Self::bad_request_signed(
-                    &mut self.auth,
-                    msg,
-                    &user,
-                    transmit.from,
-                ));
+                return Err(Self::bad_request_signed(&mut self.auth, msg, transmit.from));
             }
 
             // TODO: further RESERVATION-TOKEN handling
@@ -587,7 +562,8 @@ impl TurnServerProtocol {
             remote_addr: transmit.from,
             local_addr: transmit.to,
             allocations: vec![],
-            username: username.unwrap(),
+            username,
+            userhash,
         };
         debug!(
             "have new pending ALLOCATE from client {} from {} to {}",
@@ -614,7 +590,6 @@ impl TurnServerProtocol {
     fn peer_address_family_mismatch_signed(
         auth: &mut LongTermServerAuth,
         msg: &Message<'_>,
-        user: &str,
         to: SocketAddr,
     ) -> MessageWriteVec {
         let error = ErrorCode::builder(ErrorCode::PEER_ADDRESS_FAMILY_MISMATCH)
@@ -625,12 +600,12 @@ impl TurnServerProtocol {
             MessageWriteVec::with_capacity(
                 MessageHeader::LENGTH
                     + error.padded_len()
-                    + auth.message_signature_bytes(to, user, false)
+                    + auth.message_signature_bytes(to, false)
                     + 8,
             ),
         );
         response.add_attribute(&error).unwrap();
-        let mut response = auth.sign_outgoing_message(response, user, to).unwrap();
+        let mut response = auth.sign_outgoing_message(response, to).unwrap();
         response.add_fingerprint().unwrap();
         response
     }
@@ -642,7 +617,7 @@ impl TurnServerProtocol {
         tcp_stun_change: &mut Option<TcpStunChange>,
     ) -> Result<Transmit<Vec<u8>>, MessageWriteVec> {
         let msg = transmit.data;
-        let user = self.validate_stun(&transmit, now)?.clone();
+        self.validate_stun(&transmit, now)?;
 
         let Some(client) =
             self.mut_client_from_5tuple(transmit.transport, transmit.to, transmit.from)
@@ -651,7 +626,6 @@ impl TurnServerProtocol {
             return Err(Self::allocation_mismatch(
                 &mut self.auth,
                 msg,
-                &user,
                 transmit.from,
             ));
         };
@@ -663,7 +637,12 @@ impl TurnServerProtocol {
         for (_offset, attr) in msg.iter_attributes() {
             match attr.get_type() {
                 // handled by validate_stun
-                Username::TYPE | Realm::TYPE | Nonce::TYPE | MessageIntegrity::TYPE => (),
+                Username::TYPE
+                | Userhash::TYPE
+                | Realm::TYPE
+                | Nonce::TYPE
+                | MessageIntegrity::TYPE
+                | MessageIntegritySha256::TYPE => (),
                 Lifetime::TYPE => {
                     request_lifetime = Lifetime::from_raw(attr).ok().map(|lt| lt.seconds())
                 }
@@ -686,10 +665,7 @@ impl TurnServerProtocol {
                 &unknown_attributes,
                 MessageWriteVec::with_capacity(64),
             );
-            let err = self
-                .auth
-                .sign_outgoing_message(err, &user, transmit.from)
-                .unwrap();
+            let err = self.auth.sign_outgoing_message(err, transmit.from).unwrap();
             return Err(err);
         }
 
@@ -703,6 +679,7 @@ impl TurnServerProtocol {
             );
         }
         let mut modified = false;
+        let mut removed_client = false;
         if request_lifetime == 0 {
             error!("deleting allocation");
             if let Some(family) = requested_family {
@@ -721,16 +698,17 @@ impl TurnServerProtocol {
                             transmit.from,
                         )
                         .unwrap();
+                        removed_client = true;
                     }
                 }
             } else {
-                if let Some(client) =
+                let Some(client) =
                     self.remove_client_by_5tuple(transmit.transport, transmit.to, transmit.from)
-                {
-                    *tcp_stun_change = Some(TcpStunChange::Delete(client.allocations));
-                } else {
+                else {
                     unreachable!();
                 };
+                *tcp_stun_change = Some(TcpStunChange::Delete(client.allocations));
+                removed_client = true;
                 modified = true;
             }
         } else {
@@ -754,7 +732,7 @@ impl TurnServerProtocol {
             builder.add_attribute(&lifetime).unwrap();
             let builder = self
                 .auth
-                .sign_outgoing_message(builder, &user, transmit.from)
+                .sign_outgoing_message(builder, transmit.from)
                 .unwrap();
             builder.finish()
         } else {
@@ -762,10 +740,12 @@ impl TurnServerProtocol {
             return Err(Self::peer_address_family_mismatch_signed(
                 &mut self.auth,
                 msg,
-                &user,
                 transmit.from,
             ));
         };
+        if removed_client {
+            self.auth.remove_client(transmit.from);
+        }
 
         let Ok(transmit) = self.stun.send(response, transmit.from, now) else {
             error!("Failed to send");
@@ -794,7 +774,7 @@ impl TurnServerProtocol {
         now: Instant,
     ) -> Result<Transmit<Vec<u8>>, MessageWriteVec> {
         let msg = transmit.data;
-        let user = self.validate_stun(&transmit, now)?.clone();
+        self.validate_stun(&transmit, now)?;
 
         let Some(client) =
             self.mut_client_from_5tuple(transmit.transport, transmit.to, transmit.from)
@@ -803,7 +783,6 @@ impl TurnServerProtocol {
             return Err(Self::allocation_mismatch(
                 &mut self.auth,
                 msg,
-                &user,
                 transmit.from,
             ));
         };
@@ -813,15 +792,15 @@ impl TurnServerProtocol {
         for (_offset, attr) in msg.iter_attributes() {
             match attr.get_type() {
                 // checked by validate_stun()
-                Username::TYPE | Realm::TYPE | Nonce::TYPE | MessageIntegrity::TYPE => (),
+                Username::TYPE
+                | Userhash::TYPE
+                | Realm::TYPE
+                | Nonce::TYPE
+                | MessageIntegrity::TYPE
+                | MessageIntegritySha256::TYPE => (),
                 XorPeerAddress::TYPE => {
                     let Ok(xor_peer_addr) = XorPeerAddress::from_raw(attr) else {
-                        return Err(Self::bad_request_signed(
-                            &mut self.auth,
-                            msg,
-                            &user,
-                            transmit.from,
-                        ));
+                        return Err(Self::bad_request_signed(&mut self.auth, msg, transmit.from));
                     };
                     peer_addresses.push(xor_peer_addr.addr(msg.transaction_id()));
                 }
@@ -839,19 +818,11 @@ impl TurnServerProtocol {
                 &unknown_attributes,
                 MessageWriteVec::with_capacity(64),
             );
-            let err = self
-                .auth
-                .sign_outgoing_message(err, &user, transmit.from)
-                .unwrap();
+            let err = self.auth.sign_outgoing_message(err, transmit.from).unwrap();
             return Err(err);
         }
         if peer_addresses.is_empty() {
-            return Err(Self::bad_request_signed(
-                &mut self.auth,
-                msg,
-                &user,
-                transmit.from,
-            ));
+            return Err(Self::bad_request_signed(&mut self.auth, msg, transmit.from));
         }
 
         for peer_addr in peer_addresses.iter() {
@@ -864,7 +835,6 @@ impl TurnServerProtocol {
                 return Err(Self::peer_address_family_mismatch_signed(
                     &mut self.auth,
                     msg,
-                    &user,
                     transmit.from,
                 ));
             };
@@ -875,7 +845,6 @@ impl TurnServerProtocol {
                 return Err(Self::allocation_mismatch(
                     &mut self.auth,
                     msg,
-                    &user,
                     transmit.from,
                 ));
             }
@@ -899,15 +868,12 @@ impl TurnServerProtocol {
         let builder = Message::builder_success(
             msg,
             MessageWriteVec::with_capacity(
-                MessageHeader::LENGTH
-                    + self
-                        .auth
-                        .message_signature_bytes(transmit.from, &user, false),
+                MessageHeader::LENGTH + self.auth.message_signature_bytes(transmit.from, false),
             ),
         );
         let builder = self
             .auth
-            .sign_outgoing_message(builder, &user, transmit.from)
+            .sign_outgoing_message(builder, transmit.from)
             .unwrap();
         let response = builder.finish();
 
@@ -929,7 +895,7 @@ impl TurnServerProtocol {
         now: Instant,
     ) -> Result<Transmit<Vec<u8>>, MessageWriteVec> {
         let msg = transmit.data;
-        let user = self.validate_stun(&transmit, now)?.clone();
+        self.validate_stun(&transmit, now)?;
 
         let Some(client) =
             self.mut_client_from_5tuple(transmit.transport, transmit.to, transmit.from)
@@ -938,7 +904,6 @@ impl TurnServerProtocol {
             return Err(Self::allocation_mismatch(
                 &mut self.auth,
                 msg,
-                &user,
                 transmit.from,
             ));
         };
@@ -950,7 +915,12 @@ impl TurnServerProtocol {
         for (_offset, attr) in msg.iter_attributes() {
             match attr.get_type() {
                 // checked by validate_stun()
-                Username::TYPE | Realm::TYPE | Nonce::TYPE | MessageIntegrity::TYPE => (),
+                Username::TYPE
+                | Userhash::TYPE
+                | Realm::TYPE
+                | Nonce::TYPE
+                | MessageIntegrity::TYPE
+                | MessageIntegritySha256::TYPE => (),
                 XorPeerAddress::TYPE => xor_peer_address = XorPeerAddress::from_raw(attr).ok(),
                 ChannelNumber::TYPE => channel_number = ChannelNumber::from_raw(attr).ok(),
                 atype => {
@@ -967,10 +937,7 @@ impl TurnServerProtocol {
                 &unknown_attributes,
                 MessageWriteVec::with_capacity(64),
             );
-            let err = self
-                .auth
-                .sign_outgoing_message(err, &user, transmit.from)
-                .unwrap();
+            let err = self.auth.sign_outgoing_message(err, transmit.from).unwrap();
             return Err(err);
         }
 
@@ -979,12 +946,7 @@ impl TurnServerProtocol {
 
         let Some(peer_addr) = peer_addr else {
             trace!("No peer address");
-            return Err(Self::bad_request_signed(
-                &mut self.auth,
-                msg,
-                &user,
-                transmit.from,
-            ));
+            return Err(Self::bad_request_signed(&mut self.auth, msg, transmit.from));
         };
 
         let Some(alloc) = client
@@ -996,7 +958,6 @@ impl TurnServerProtocol {
             return Err(Self::peer_address_family_mismatch_signed(
                 &mut self.auth,
                 msg,
-                &user,
                 transmit.from,
             ));
         };
@@ -1007,7 +968,6 @@ impl TurnServerProtocol {
             return Err(Self::allocation_mismatch(
                 &mut self.auth,
                 msg,
-                &user,
                 transmit.from,
             ));
         }
@@ -1018,36 +978,21 @@ impl TurnServerProtocol {
 
         let Some(channel_no) = channel_no else {
             debug!("Bad request: no requested channel id");
-            return Err(Self::bad_request_signed(
-                &mut self.auth,
-                msg,
-                &user,
-                transmit.from,
-            ));
+            return Err(Self::bad_request_signed(&mut self.auth, msg, transmit.from));
         };
 
         // RFC8656 reduces this range to 0x4000..=0x4fff but we keep the RFC5766 range for
         // backwards compatibility
         if !(0x4000..=0x7fff).contains(&channel_no) {
             trace!("Channel id out of range");
-            return Err(Self::bad_request_signed(
-                &mut self.auth,
-                msg,
-                &user,
-                transmit.from,
-            ));
+            return Err(Self::bad_request_signed(&mut self.auth, msg, transmit.from));
         }
         if existing
             .as_ref()
             .is_some_and(|existing| existing.id != channel_no)
         {
             trace!("channel peer address does not match channel ID");
-            return Err(Self::bad_request_signed(
-                &mut self.auth,
-                msg,
-                &user,
-                transmit.from,
-            ));
+            return Err(Self::bad_request_signed(&mut self.auth, msg, transmit.from));
         }
 
         if let Some(existing) = existing.as_mut() {
@@ -1081,7 +1026,7 @@ impl TurnServerProtocol {
         );
         let builder = self
             .auth
-            .sign_outgoing_message(builder, &user, transmit.from)
+            .sign_outgoing_message(builder, transmit.from)
             .unwrap();
         let response = builder.finish();
 
@@ -1104,7 +1049,6 @@ impl TurnServerProtocol {
     fn connection_already_exists_error_signed(
         auth: &mut LongTermServerAuth,
         msg: &Message<'_>,
-        user: &str,
         to: SocketAddr,
     ) -> MessageWriteVec {
         let error = ErrorCode::builder(ErrorCode::CONNECTION_ALREADY_EXISTS)
@@ -1115,12 +1059,12 @@ impl TurnServerProtocol {
             MessageWriteVec::with_capacity(
                 MessageHeader::LENGTH
                     + error.padded_len()
-                    + auth.message_signature_bytes(to, user, false)
+                    + auth.message_signature_bytes(to, false)
                     + 8,
             ),
         );
         response.add_attribute(&error).unwrap();
-        let mut response = auth.sign_outgoing_message(response, user, to).unwrap();
+        let mut response = auth.sign_outgoing_message(response, to).unwrap();
         response.add_fingerprint().unwrap();
         response
     }
@@ -1132,7 +1076,7 @@ impl TurnServerProtocol {
         now: Instant,
     ) -> Result<(), MessageWriteVec> {
         let msg = transmit.data;
-        let user = self.validate_stun(&transmit, now)?.clone();
+        self.validate_stun(&transmit, now)?;
 
         let Some(client) =
             self.mut_client_from_5tuple(transmit.transport, transmit.to, transmit.from)
@@ -1141,7 +1085,6 @@ impl TurnServerProtocol {
             return Err(Self::allocation_mismatch(
                 &mut self.auth,
                 msg,
-                &user,
                 transmit.from,
             ));
         };
@@ -1152,7 +1095,12 @@ impl TurnServerProtocol {
         for (_offset, attr) in msg.iter_attributes() {
             match attr.get_type() {
                 // handled by validate_stun
-                Username::TYPE | Realm::TYPE | Nonce::TYPE | MessageIntegrity::TYPE => (),
+                Username::TYPE
+                | Userhash::TYPE
+                | Realm::TYPE
+                | Nonce::TYPE
+                | MessageIntegrity::TYPE
+                | MessageIntegritySha256::TYPE => (),
                 XorPeerAddress::TYPE => {
                     peer_addr = XorPeerAddress::from_raw(attr)
                         .ok()
@@ -1172,20 +1120,12 @@ impl TurnServerProtocol {
                 &unknown_attributes,
                 MessageWriteVec::with_capacity(64),
             );
-            let err = self
-                .auth
-                .sign_outgoing_message(err, &user, transmit.from)
-                .unwrap();
+            let err = self.auth.sign_outgoing_message(err, transmit.from).unwrap();
             return Err(err);
         }
 
         let Some(peer_addr) = peer_addr else {
-            return Err(Self::bad_request_signed(
-                &mut self.auth,
-                msg,
-                &user,
-                transmit.from,
-            ));
+            return Err(Self::bad_request_signed(&mut self.auth, msg, transmit.from));
         };
 
         let Some(alloc) = client
@@ -1197,7 +1137,6 @@ impl TurnServerProtocol {
             return Err(Self::peer_address_family_mismatch_signed(
                 &mut self.auth,
                 msg,
-                &user,
                 transmit.from,
             ));
         };
@@ -1209,7 +1148,6 @@ impl TurnServerProtocol {
             return Err(Self::allocation_mismatch(
                 &mut self.auth,
                 msg,
-                &user,
                 transmit.from,
             ));
         }
@@ -1226,7 +1164,6 @@ impl TurnServerProtocol {
             return Err(Self::connection_already_exists_error_signed(
                 &mut self.auth,
                 msg,
-                &user,
                 transmit.from,
             ));
         }
@@ -1277,7 +1214,12 @@ impl TurnServerProtocol {
         for (_offset, attr) in msg.iter_attributes() {
             match attr.get_type() {
                 // handled by validate_stun
-                Username::TYPE | Realm::TYPE | Nonce::TYPE | MessageIntegrity::TYPE => (),
+                Username::TYPE
+                | Userhash::TYPE
+                | Realm::TYPE
+                | Nonce::TYPE
+                | MessageIntegrity::TYPE
+                | MessageIntegritySha256::TYPE => (),
                 ConnectionId::TYPE => {
                     connection_id = ConnectionId::from_raw(attr).ok().map(|r| r.id())
                 }
@@ -1315,7 +1257,7 @@ impl TurnServerProtocol {
             pending.client_control_addr,
             pending.listen_addr,
         );
-        let user = self.validate_stun(&client_transmit, now)?.clone();
+        self.validate_stun(&client_transmit, now)?;
 
         if !unknown_attributes.is_empty() {
             trace!("unknown attributes: {unknown_attributes:?}");
@@ -1326,7 +1268,7 @@ impl TurnServerProtocol {
             );
             let err = self
                 .auth
-                .sign_outgoing_message(err, &user, client_transmit.from)
+                .sign_outgoing_message(err, client_transmit.from)
                 .unwrap();
             return Err(err);
         }
@@ -1343,7 +1285,6 @@ impl TurnServerProtocol {
             return Err(Self::allocation_mismatch(
                 &mut self.auth,
                 msg,
-                &user,
                 transmit.from,
             ));
         };
@@ -1356,7 +1297,6 @@ impl TurnServerProtocol {
             return Err(Self::allocation_mismatch(
                 &mut self.auth,
                 msg,
-                &user,
                 transmit.from,
             ));
         };
@@ -1375,7 +1315,7 @@ impl TurnServerProtocol {
         let msg = Message::builder_success(msg, MessageWriteVec::new());
         let msg = self
             .auth
-            .sign_outgoing_message(msg, &user, client_transmit.from)
+            .sign_outgoing_message(msg, client_transmit.from)
             .unwrap();
         Ok(Transmit::new(
             msg.finish(),
@@ -1505,14 +1445,13 @@ impl TurnServerProtocol {
                     .handle_stun_connection_bind(transmit, now, tcp_stun_change)
                     .map(|t| Some(InternalHandleStun::Transmit(t))),
                 _ => {
-                    let user = self.validate_stun(&transmit, now)?.clone();
+                    self.validate_stun(&transmit, now)?;
                     let Some(client) =
                         self.mut_client_from_5tuple(transmit.transport, transmit.to, transmit.from)
                     else {
                         return Err(Self::allocation_mismatch(
                             &mut self.auth,
                             transmit.data,
-                            &user,
                             transmit.from,
                         ));
                     };
@@ -1525,7 +1464,6 @@ impl TurnServerProtocol {
                         return Err(Self::allocation_mismatch(
                             &mut self.auth,
                             transmit.data,
-                            &user,
                             transmit.from,
                         ));
                     }
@@ -1533,7 +1471,6 @@ impl TurnServerProtocol {
                     Err(Self::bad_request_signed(
                         &mut self.auth,
                         transmit.data,
-                        &user,
                         transmit.from,
                     ))
                 }
@@ -1740,7 +1677,6 @@ impl TurnServerProtocol {
 
     fn connection_attempt(
         auth: &mut LongTermServerAuth,
-        user: &str,
         to: SocketAddr,
         connection_id: u32,
         peer_addr: SocketAddr,
@@ -1754,13 +1690,13 @@ impl TurnServerProtocol {
             MessageWriteVec::with_capacity(
                 MessageHeader::LENGTH
                     + connection_id.padded_len()
-                    + auth.message_signature_bytes(to, user, false)
+                    + auth.message_signature_bytes(to, false)
                     + 8,
             ),
         );
         response.add_attribute(&connection_id).unwrap();
         response.add_attribute(&peer_addr).unwrap();
-        let mut response = auth.sign_outgoing_message(response, user, to).unwrap();
+        let mut response = auth.sign_outgoing_message(response, to).unwrap();
         response.add_fingerprint().unwrap();
         response
     }
@@ -2156,7 +2092,6 @@ impl TurnServerApi for TurnServer {
                                 .map(|allocation| {
                                     let msg = TurnServerProtocol::connection_attempt(
                                         &mut self.protocol.auth,
-                                        &client.username,
                                         client.remote_addr,
                                         connection_id,
                                         transmit.from,
@@ -2592,7 +2527,8 @@ impl TurnServerApi for TurnServer {
 
         let mut remove_peer_connections = vec![];
         let mut remove_client_connections = vec![];
-        for client in self.protocol.clients.iter_mut() {
+        let mut remove_clients = vec![];
+        for (client_idx, client) in self.protocol.clients.iter_mut().enumerate() {
             let mut remove_allocation_indices = vec![];
             for (alloc_idx, allocation) in client.allocations.iter_mut().enumerate() {
                 let mut remove_permission = vec![];
@@ -2624,7 +2560,6 @@ impl TurnServerApi for TurnServer {
                             remove_pending_tcp.push(pending_idx);
                             let response = pending.as_timeout_or_failure_response(
                                 &mut self.protocol.auth,
-                                &client.username,
                                 pending.client_control_addr,
                             );
                             self.protocol.pending_transmits.push_back(Transmit::new(
@@ -2705,6 +2640,13 @@ impl TurnServerApi for TurnServer {
                     &mut self.protocol.pending_tcp_connection_binds,
                 )
             }
+            if client.allocations.is_empty() {
+                remove_clients.push(client_idx);
+            }
+        }
+        for (idx, client_idx) in remove_clients.into_iter().enumerate() {
+            let client = self.protocol.clients.remove(client_idx - idx);
+            self.protocol.auth.remove_client(client.remote_addr);
         }
 
         for (key, value) in self.peer_tcp.iter_mut() {
@@ -2993,7 +2935,7 @@ impl TurnServerApi for TurnServer {
         let builder = self
             .protocol
             .auth
-            .sign_outgoing_message(builder, &pending.client.username, to)
+            .sign_outgoing_message(builder, to)
             .unwrap();
         let msg = builder.finish();
 
@@ -3046,7 +2988,6 @@ impl TurnServerApi for TurnServer {
             return;
         };
         let pending = allocation.pending_tcp_connect.swap_remove(position);
-        let user = client.username.clone();
         if pending
             .expires_at
             .is_some_and(|expires_at| expires_at < now)
@@ -3103,7 +3044,7 @@ impl TurnServerApi for TurnServer {
         let mut response = self
             .protocol
             .auth
-            .sign_outgoing_message(response, &user, client_addr)
+            .sign_outgoing_message(response, client_addr)
             .unwrap();
         response.add_fingerprint().unwrap();
         if socket_addr.is_ok() && response.has_class(MessageClass::Success) {
@@ -3134,7 +3075,8 @@ struct Client {
     remote_addr: SocketAddr,
 
     allocations: Vec<Allocation>,
-    username: String,
+    username: Option<String>,
+    userhash: Option<[u8; 32]>,
 }
 
 #[derive(Debug)]
@@ -3168,7 +3110,6 @@ impl PendingTcpConnect {
     fn as_timeout_or_failure_response(
         &self,
         auth: &mut LongTermServerAuth,
-        user: &str,
         to: SocketAddr,
     ) -> MessageWriteVec {
         let error = ErrorCode::builder(ErrorCode::CONNECTION_TIMEOUT_OR_FAILURE)
@@ -3180,11 +3121,11 @@ impl PendingTcpConnect {
             MessageWriteVec::with_capacity(
                 MessageHeader::LENGTH
                     + error.padded_len()
-                    + auth.message_signature_bytes(to, user, false)
+                    + auth.message_signature_bytes(to, false)
                     + 8,
             ),
         );
-        let mut response = auth.sign_outgoing_message(response, user, to).unwrap();
+        let mut response = auth.sign_outgoing_message(response, to).unwrap();
         response.add_fingerprint().unwrap();
         response
     }
