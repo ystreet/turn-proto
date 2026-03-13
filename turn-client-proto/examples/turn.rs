@@ -84,6 +84,7 @@ use turn_types::stun::TransportType;
 use turn_types::AddressFamily;
 
 use clap::{Parser, ValueEnum};
+use turn_types::stun::message::IntegrityAlgorithm;
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
@@ -784,6 +785,38 @@ enum TlsApi {
     Openssl,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
+enum Integrity {
+    Sha1,
+    Sha256,
+}
+
+impl From<Integrity> for IntegrityAlgorithm {
+    fn from(value: Integrity) -> Self {
+        match value {
+            Integrity::Sha1 => IntegrityAlgorithm::Sha1,
+            Integrity::Sha256 => IntegrityAlgorithm::Sha256,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
+enum Feature {
+    Disabled,
+    Auto,
+    Required,
+}
+
+impl From<Feature> for stun_proto::auth::Feature {
+    fn from(value: Feature) -> Self {
+        match value {
+            Feature::Disabled => Self::Disabled,
+            Feature::Auto => Self::Auto,
+            Feature::Required => Self::Required,
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Cli {
@@ -857,6 +890,10 @@ struct Cli {
     ipv4: bool,
     #[arg(long, default_value = "false", help = "Also allocate an IPv6 address")]
     ipv6: bool,
+    #[arg(long, default_value = "sha1", help = "Add an integrity algorithm to use with the server")]
+    integrity: Vec<Integrity>,
+    #[arg(long, default_value = "auto", help = "Whether to send a hashed username rather than the username in the clear")]
+    anonymous: Feature,
 }
 
 fn send_loop(
@@ -901,6 +938,9 @@ fn main() -> io::Result<()> {
     if cli.allocation_transport == Transport::Tcp && cli.transport != Transport::Tcp {
         panic!("TURN-TCP allocations can only be created with a TCP based connection to the TURN server. Use `--transport tcp`.");
     }
+    if cli.integrity.is_empty() {
+        panic!("No integrity algorithms provided!");
+    }
 
     let mut config = TurnConfig::new(credentials);
     config.set_allocation_transport(cli.allocation_transport.into());
@@ -908,6 +948,11 @@ fn main() -> io::Result<()> {
     for family in &address_families[1..] {
         config.add_address_family(*family);
     }
+    config.set_supported_integrity(cli.integrity[0].into());
+    for integrity in &cli.integrity[1..] {
+        config.add_supported_integrity((*integrity).into());
+    }
+    config.set_anonymous_username(cli.anonymous.into());
 
     let client = match transport {
         TransportType::Udp => {
