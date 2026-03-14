@@ -890,9 +890,17 @@ struct Cli {
     ipv4: bool,
     #[arg(long, default_value = "false", help = "Also allocate an IPv6 address")]
     ipv6: bool,
-    #[arg(long, default_value = "sha1", help = "Add an integrity algorithm to use with the server")]
+    #[arg(
+        long,
+        default_value = "sha1",
+        help = "Add an integrity algorithm to use with the server"
+    )]
     integrity: Vec<Integrity>,
-    #[arg(long, default_value = "auto", help = "Whether to send a hashed username rather than the username in the clear")]
+    #[arg(
+        long,
+        default_value = "auto",
+        help = "Whether to send a hashed username rather than the username in the clear"
+    )]
     anonymous: Feature,
 }
 
