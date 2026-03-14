@@ -19,7 +19,7 @@ use core::net::{IpAddr, SocketAddr};
 use core::ops::Range;
 use core::time::Duration;
 use stun_proto::agent::{StunAgent, StunAgentPollRet, Transmit};
-use stun_proto::auth::{AuthErrorReason, LongTermClientAuth, LongTermValidation};
+use stun_proto::auth::{LongTermClientAuth, LongTermClientValidation};
 use stun_proto::types::attribute::ErrorCode;
 use stun_proto::types::data::Data;
 use stun_proto::types::message::{Message, MessageClass, TransactionId};
@@ -589,8 +589,8 @@ impl TurnClientProtocol {
             };
         }
         match stun_auth.validate_incoming_message(&msg) {
-            Ok(LongTermValidation::Validated(_algo)) => (),
-            Ok(LongTermValidation::ResendRequest(_algo)) => {
+            Ok(LongTermClientValidation::Validated(_algo)) => (),
+            Ok(LongTermClientValidation::ResendRequest(_algo)) => {
                 return Self::handle_resend_request(
                     stun_agent,
                     stun_auth,
@@ -1139,9 +1139,9 @@ impl TurnClientProtocol {
                     return TurnProtocolRecv::Ignored;
                 };
                 let resend = match self.stun_auth.validate_incoming_message(&transmit.data) {
-                    Ok(LongTermValidation::ResendRequest(_algo)) => true,
-                    Err(e) => matches!(e.reason(), AuthErrorReason::StaleNonce),
-                    Ok(LongTermValidation::Validated(_algo)) => {
+                    Ok(LongTermClientValidation::ResendRequest(_algo)) => true,
+                    Err(_) => false,
+                    Ok(LongTermClientValidation::Validated(_algo)) => {
                         self.state = AuthState::Error;
                         for fam in self.families.iter().cloned() {
                             self.pending_events
@@ -1185,7 +1185,7 @@ impl TurnClientProtocol {
                     return TurnProtocolRecv::Ignored;
                 }
                 match self.stun_auth.validate_incoming_message(&transmit.data) {
-                    Ok(LongTermValidation::ResendRequest(_algo)) => {
+                    Ok(LongTermClientValidation::ResendRequest(_algo)) => {
                         return Self::handle_resend_request(
                             &mut self.stun_agent,
                             &mut self.stun_auth,
@@ -1200,7 +1200,7 @@ impl TurnClientProtocol {
                             now,
                         );
                     }
-                    Ok(LongTermValidation::Validated(_algo)) => (),
+                    Ok(LongTermClientValidation::Validated(_algo)) => (),
                     Err(e) => {
                         if e.integrity().is_some() {
                             self.state = AuthState::Error;
@@ -1410,8 +1410,8 @@ impl TurnClientProtocol {
                     return TurnProtocolRecv::Handled;
                 }
                 match self.stun_auth.validate_incoming_message(&transmit.data) {
-                    Ok(LongTermValidation::Validated(_algo)) => (),
-                    Ok(LongTermValidation::ResendRequest(_algo)) => {
+                    Ok(LongTermClientValidation::Validated(_algo)) => (),
+                    Ok(LongTermClientValidation::ResendRequest(_algo)) => {
                         let (transmit, transaction_id) = Self::send_connection_bind_request(
                             &mut self.stun_agent,
                             &mut self.stun_auth,

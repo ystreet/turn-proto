@@ -19,8 +19,10 @@ use byteorder::{BigEndian, ByteOrder};
 use core::net::{IpAddr, SocketAddr};
 use core::time::Duration;
 use pnet_packet::Packet;
-use stun_proto::auth::{AuthErrorReason, LongTermServerAuth, LongTermValidation};
-use turn_types::stun::attribute::{MessageIntegritySha256, Userhash};
+use stun_proto::auth::{
+    Feature, LongTermServerAuth, LongTermServerAuthErrorReason, LongTermServerValidation,
+};
+use turn_types::stun::attribute::{MessageIntegritySha256, PasswordAlgorithm, Userhash};
 use turn_types::stun::prelude::AttributeExt;
 use turn_types::tcp::{IncomingTcp, StoredTcp, TurnTcpBuffer};
 use turn_types::transmit::{DelayedChannel, DelayedMessage, TransmitBuild};
@@ -49,7 +51,7 @@ use turn_types::attribute::{
     ChannelNumber, Lifetime, RequestedTransport, XorPeerAddress, XorRelayedAddress,
 };
 use turn_types::message::{ALLOCATE, CHANNEL_BIND, DATA, REFRESH, SEND};
-use turn_types::stun::message::MessageHeader;
+use turn_types::stun::message::{IntegrityAlgorithm, MessageHeader};
 use turn_types::AddressFamily;
 
 use tracing::{debug, error, info, trace, warn};
@@ -165,8 +167,7 @@ impl TurnServerProtocol {
         let msg = transmit.data;
 
         match self.auth.validate_incoming_message(msg, transmit.from, now) {
-            Ok(LongTermValidation::ResendRequest(_algo)) => unreachable!(),
-            Ok(LongTermValidation::Validated(_algo)) => {
+            Ok(LongTermServerValidation::Validated(_algo)) => {
                 // checked by auth already
                 let username = msg.attribute::<Username>().ok();
                 let userhash = msg.attribute::<Userhash>().ok();
@@ -220,11 +221,11 @@ impl TurnServerProtocol {
                 Ok(())
             }
             Err(err) => match err.reason() {
-                AuthErrorReason::Parse(_) | AuthErrorReason::BadRequest => {
+                LongTermServerAuthErrorReason::BadRequest => {
                     trace!("auth bad request");
                     Err(Self::bad_request(msg, 0))
                 }
-                AuthErrorReason::StaleNonce => {
+                LongTermServerAuthErrorReason::StaleNonce => {
                     trace!("auth stale nonce");
                     let error = ErrorCode::builder(ErrorCode::STALE_NONCE).build().unwrap();
                     let nonce_value = self.auth.nonce_for_client(transmit.from).unwrap();
@@ -245,26 +246,24 @@ impl TurnServerProtocol {
 
                     Err(builder)
                 }
-                AuthErrorReason::Unauthorized
-                | AuthErrorReason::IntegrityFailed
-                | AuthErrorReason::UnsupportedFeature => {
+                LongTermServerAuthErrorReason::Unauthorized
+                | LongTermServerAuthErrorReason::IntegrityFailed
+                | LongTermServerAuthErrorReason::UnsupportedFeature => {
                     trace!("auth unauthorized");
                     let error = ErrorCode::builder(ErrorCode::UNAUTHORIZED).build().unwrap();
-                    let nonce_value = self.auth.nonce_for_client(transmit.from).unwrap();
-                    let realm = Realm::new(self.auth.realm()).unwrap();
-                    let nonce = Nonce::new(nonce_value).unwrap();
                     let mut builder = Message::builder_error(
                         msg,
                         MessageWriteVec::with_capacity(
                             MessageHeader::LENGTH
-                                + nonce.padded_len()
-                                + realm.padded_len()
-                                + error.padded_len(),
+                                + error.padded_len()
+                                + self.auth.message_signature_bytes(transmit.from, false),
                         ),
                     );
                     builder.add_attribute(&error).unwrap();
-                    builder.add_attribute(&realm).unwrap();
-                    builder.add_attribute(&nonce).unwrap();
+                    let builder = self
+                        .auth
+                        .sign_outgoing_message(builder, transmit.from)
+                        .unwrap();
 
                     Err(builder)
                 }
@@ -398,6 +397,7 @@ impl TurnServerProtocol {
                 // checked by validate_stun()
                 Realm::TYPE
                 | Nonce::TYPE
+                | PasswordAlgorithm::TYPE
                 | MessageIntegrity::TYPE
                 | MessageIntegritySha256::TYPE => (),
                 Userhash::TYPE => {
@@ -641,6 +641,7 @@ impl TurnServerProtocol {
                 | Userhash::TYPE
                 | Realm::TYPE
                 | Nonce::TYPE
+                | PasswordAlgorithm::TYPE
                 | MessageIntegrity::TYPE
                 | MessageIntegritySha256::TYPE => (),
                 Lifetime::TYPE => {
@@ -796,6 +797,7 @@ impl TurnServerProtocol {
                 | Userhash::TYPE
                 | Realm::TYPE
                 | Nonce::TYPE
+                | PasswordAlgorithm::TYPE
                 | MessageIntegrity::TYPE
                 | MessageIntegritySha256::TYPE => (),
                 XorPeerAddress::TYPE => {
@@ -919,6 +921,7 @@ impl TurnServerProtocol {
                 | Userhash::TYPE
                 | Realm::TYPE
                 | Nonce::TYPE
+                | PasswordAlgorithm::TYPE
                 | MessageIntegrity::TYPE
                 | MessageIntegritySha256::TYPE => (),
                 XorPeerAddress::TYPE => xor_peer_address = XorPeerAddress::from_raw(attr).ok(),
@@ -1099,6 +1102,7 @@ impl TurnServerProtocol {
                 | Userhash::TYPE
                 | Realm::TYPE
                 | Nonce::TYPE
+                | PasswordAlgorithm::TYPE
                 | MessageIntegrity::TYPE
                 | MessageIntegritySha256::TYPE => (),
                 XorPeerAddress::TYPE => {
@@ -1218,6 +1222,7 @@ impl TurnServerProtocol {
                 | Userhash::TYPE
                 | Realm::TYPE
                 | Nonce::TYPE
+                | PasswordAlgorithm::TYPE
                 | MessageIntegrity::TYPE
                 | MessageIntegritySha256::TYPE => (),
                 ConnectionId::TYPE => {
@@ -1737,10 +1742,14 @@ impl TurnServer {
     /// ```
     pub fn new(ttype: TransportType, listen_addr: SocketAddr, realm: String) -> Self {
         let stun = StunAgent::builder(ttype, listen_addr).build();
+        let mut auth = LongTermServerAuth::new(realm);
+        auth.set_supported_integrity(IntegrityAlgorithm::Sha1);
+        auth.add_supported_integrity(IntegrityAlgorithm::Sha256);
+        auth.set_anonymous_username(Feature::Auto);
         Self {
             protocol: TurnServerProtocol {
                 stun,
-                auth: LongTermServerAuth::new(realm),
+                auth,
                 clients: vec![],
                 pending_transmits: VecDeque::default(),
                 pending_allocates: VecDeque::default(),
