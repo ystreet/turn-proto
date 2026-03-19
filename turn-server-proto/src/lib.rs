@@ -46,6 +46,9 @@ extern crate std;
 pub mod api;
 pub mod server;
 
+#[cfg(feature = "dimpl")]
+pub mod dimpl;
+
 #[cfg(feature = "rustls")]
 pub mod rustls;
 
