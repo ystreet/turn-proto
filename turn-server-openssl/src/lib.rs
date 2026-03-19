@@ -50,11 +50,11 @@ use turn_server_proto::types::transmit::TransmitBuild;
 use turn_server_proto::types::AddressFamily;
 
 use turn_server_proto::api::Transmit;
-use turn_server_proto::types::Instant;
 use turn_server_proto::types::stun::TransportType;
+use turn_server_proto::types::Instant;
 
 pub use turn_server_proto as proto;
-pub use turn_server_proto::api as api;
+pub use turn_server_proto::api;
 
 use turn_server_proto::api::{
     DelayedMessageOrChannelSend, SocketAllocateError, TurnServerApi, TurnServerPollRet,

@@ -28,13 +28,20 @@
 //!
 //! The entry point for starting with a TURN client implementation depends on the transport
 //! protocol that you are looking to use. For UDP connections, you should start in the [`udp`]
-//! module, for TCP connections, the [`tcp`] module, for TLS connections, the [`rustls`] module
-//! (when the `rustls` feature is enabled), or the [`openssl`] module (when the `openssl` feature
-//! is enabled.
+//! module, for TCP connections, the [`tcp`] module. (D)TLS functionality is contained within
+//! extension crates. e.g.
+//! - For TLS connections over TCP, the [`turn-client-rustls`], or [`turn-client-openssl`] crates
+//!   are available.
+//! - For DTLS connections over UDP, the [`turn-client-dimpl`] or [`turn-client-openssl`] crates
+//!   are available.
 //!
 //! From there, the [`api`] module provides the interface that all of the TURN clients implement and
 //! the [`client`] module can be used to combine one of the above options into a single value for
 //! selection based on the underlying TURN client.
+//!
+//! [`turn-client-rustls`]: https://docs.rs/turn-client-rustls
+//! [`turn-client-openssl`]: https://docs.rs/turn-client-openssl
+//! [`turn-client-dimpl`]: https://docs.rs/turn-client-dimpl
 //!
 //! # Examples
 //!
@@ -52,13 +59,6 @@
 //!     config,
 //! );
 //! ```
-//!
-//! ## Rustls crypto providers
-//!
-//! `turn-client-proto` does not enable any cryptographic providers on rustls.
-//! It is the user's responsibility (library or application) to enable and use
-//! the relevant cryptographic provider (ring, aws-lc-rs, RustCrypto, etc),
-//! that they wish to use.
 
 #![deny(missing_debug_implementations)]
 #![deny(missing_docs)]
@@ -79,9 +79,6 @@ pub mod client;
 mod protocol;
 pub mod tcp;
 pub mod udp;
-
-#[cfg(feature = "rustls")]
-pub mod rustls;
 
 /// Public prelude.
 pub mod prelude {

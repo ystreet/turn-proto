@@ -12,10 +12,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["rustls", "std", "openssl"]
-rustls = ["dep:rustls", "std", "rustls/std"]
+default = ["std"]
 std = ["turn-types/std", "stun-proto/std", "thiserror/std", "rand/std"]
-openssl = ["dep:openssl", "std"]
 
 [dependencies]
 byteorder.workspace = true

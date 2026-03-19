@@ -26,7 +26,9 @@ use openssl::x509::{X509Name, X509};
 use tracing::{debug, trace};
 
 use turn_client_proto::types::message::CREATE_PERMISSION;
-use turn_client_proto::types::stun::message::{Message, MessageType, MessageWriteVec, TransactionId};
+use turn_client_proto::types::stun::message::{
+    Message, MessageType, MessageWriteVec, TransactionId,
+};
 use turn_client_proto::types::stun::prelude::MessageWrite;
 use turn_client_proto::types::{AddressFamily, TransportType, TurnCredentials};
 

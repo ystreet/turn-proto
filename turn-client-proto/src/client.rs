@@ -18,8 +18,6 @@ pub use crate::api::{
     BindChannelError, CreatePermissionError, DeleteError, SendError, TcpAllocateError, TurnEvent,
     TurnPollRet, TurnRecvRet,
 };
-#[cfg(feature = "rustls")]
-use crate::rustls::TurnClientRustls;
 use crate::tcp::TurnClientTcp;
 use crate::udp::TurnClientUdp;
 
@@ -225,7 +223,4 @@ macro_rules! impl_client {
     }
 }
 
-#[cfg(feature = "rustls")]
-impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp), (Rustls, TurnClientRustls));
-#[cfg(not(feature = "rustls"))]
 impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp));
