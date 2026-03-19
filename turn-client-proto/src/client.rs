@@ -27,6 +27,8 @@ use crate::api::{
     DelayedMessageOrChannelSend, Socket5Tuple, TcpConnectError, TransmitBuild, TurnClientApi,
     TurnPeerData,
 };
+#[cfg(feature = "dimpl")]
+use crate::dimpl::TurnClientDimpl;
 #[cfg(feature = "openssl")]
 use crate::openssl::TurnClientOpensslTls;
 #[cfg(feature = "rustls")]
@@ -210,11 +212,23 @@ macro_rules! impl_client {
 }
 pub(crate) use impl_client;
 
-#[cfg(all(feature = "rustls", feature = "openssl"))]
+#[cfg(all(feature = "rustls", feature = "openssl", feature = "dimpl"))]
+impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp), (Rustls, TurnClientRustls), (Openssl, TurnClientOpensslTls), (Dimpl, TurnClientDimpl));
+#[cfg(all(feature = "rustls", not(feature = "openssl"), feature = "dimpl"))]
+impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp), (Rustls, TurnClientRustls), (Dimpl, TurnClientDimpl));
+#[cfg(all(not(feature = "rustls"), feature = "openssl", feature = "dimpl"))]
+impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp), (Openssl, TurnClientOpensslTls), (Dimpl, TurnClientDimpl));
+#[cfg(all(not(feature = "rustls"), not(feature = "openssl"), feature = "dimpl"))]
+impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp), (Dimpl, TurnClientDimpl));
+#[cfg(all(feature = "rustls", feature = "openssl", not(feature = "dimpl")))]
 impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp), (Rustls, TurnClientRustls), (Openssl, TurnClientOpensslTls));
-#[cfg(all(feature = "rustls", not(feature = "openssl")))]
+#[cfg(all(feature = "rustls", not(feature = "openssl"), not(feature = "dimpl")))]
 impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp), (Rustls, TurnClientRustls));
-#[cfg(all(not(feature = "rustls"), feature = "openssl"))]
+#[cfg(all(not(feature = "rustls"), feature = "openssl", not(feature = "dimpl")))]
 impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp), (Openssl, TurnClientOpensslTls));
-#[cfg(all(not(feature = "rustls"), not(feature = "openssl")))]
+#[cfg(all(
+    not(feature = "rustls"),
+    not(feature = "openssl"),
+    not(feature = "dimpl")
+))]
 impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp));

@@ -68,6 +68,7 @@ use rustls::ClientConfig;
 use rustls_platform_verifier::ConfigVerifierExt;
 use turn_client_proto::api::{TcpConnectError, TurnConfig};
 use turn_client_proto::client::TurnClient;
+use turn_client_proto::dimpl::TurnClientDimpl;
 use turn_client_proto::openssl::TurnClientOpensslTls;
 use turn_client_proto::prelude::*;
 use turn_client_proto::rustls::TurnClientRustls;
@@ -288,6 +289,30 @@ impl ClientUdp {
             config,
             ssl_context.build(),
         );
+        let inner = Arc::new((Mutex::new(client.into()), Condvar::new()));
+        let socket = Arc::new(socket);
+
+        udp_recv_thread(base_instant, socket.clone(), inner.clone());
+        udp_send_thread(base_instant, socket.clone(), events_sender, inner.clone());
+
+        Self {
+            base_instant,
+            socket,
+            inner,
+        }
+    }
+
+    fn new_dimpl(
+        socket: UdpSocket,
+        to: SocketAddr,
+        config: TurnConfig,
+        events_sender: SyncSender<TurnEvent>,
+    ) -> Self {
+        let base_instant = std::time::Instant::now();
+        let local_addr = socket.local_addr().unwrap();
+        let tls_config = Arc::new(dimpl::Config::builder().build().unwrap());
+        let remote_addr = to;
+        let client = TurnClientDimpl::allocate(local_addr, remote_addr, config, tls_config);
         let inner = Arc::new((Mutex::new(client.into()), Condvar::new()));
         let socket = Arc::new(socket);
 
@@ -783,6 +808,7 @@ impl From<Transport> for TransportType {
 enum TlsApi {
     Rustls,
     Openssl,
+    Dimpl,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
@@ -975,7 +1001,7 @@ fn main() -> io::Result<()> {
             );
             if use_tls {
                 match cli.tls_api {
-                    TlsApi::Rustls => panic!("DTLS over UDP is not currently supported using Rustls. Use openssl instead"),
+                    TlsApi::Rustls => panic!("DTLS over UDP is not currently supported using Rustls. Use openssl or dimpl instead"),
                     TlsApi::Openssl => {
                         let client = ClientUdp::new_openssl(
                             socket,
@@ -983,6 +1009,18 @@ fn main() -> io::Result<()> {
                             config,
                             events_sender,
                             cli.insecure_tls,
+                        );
+                        Box::new(client) as Box<dyn Client<_>>
+                    }
+                    TlsApi::Dimpl => {
+                        if !cli.insecure_tls {
+                            panic!("dimpl implementation currently only supports insecure TLS");
+                        }
+                        let client = ClientUdp::new_dimpl(
+                            socket,
+                            server,
+                            config,
+                            events_sender,
                         );
                         Box::new(client) as Box<dyn Client<_>>
                     }
@@ -1024,6 +1062,7 @@ fn main() -> io::Result<()> {
                         );
                         Box::new(client) as Box<dyn Client<_>>
                     }
+                    TlsApi::Dimpl => panic!("TLS over TCP is not currently supported using dimpl. Use rustls or openssl instead"),
                 }
             } else {
                 let client = ClientTcp::new(socket, server, config, events_sender);
