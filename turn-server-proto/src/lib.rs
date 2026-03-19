@@ -49,9 +49,6 @@ pub mod server;
 #[cfg(feature = "rustls")]
 pub mod rustls;
 
-#[cfg(feature = "openssl")]
-pub mod openssl;
-
 pub use stun_proto as stun;
 pub use turn_types as types;
 

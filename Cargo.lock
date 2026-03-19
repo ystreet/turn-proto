@@ -1416,6 +1416,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "turn-client-openssl"
+version = "0.1.0"
+dependencies = [
+ "api-tests",
+ "openssl",
+ "stun-proto",
+ "tracing",
+ "tracing-subscriber",
+ "turn-client-proto",
+ "turn-server-openssl",
+]
+
+[[package]]
 name = "turn-client-proto"
 version = "0.6.0"
 dependencies = [
@@ -1447,6 +1460,17 @@ dependencies = [
  "turn-client-proto",
  "turn-server-proto",
  "turn-types",
+]
+
+[[package]]
+name = "turn-server-openssl"
+version = "0.1.0"
+dependencies = [
+ "openssl",
+ "tracing",
+ "tracing-subscriber",
+ "turn-client-proto",
+ "turn-server-proto",
 ]
 
 [[package]]

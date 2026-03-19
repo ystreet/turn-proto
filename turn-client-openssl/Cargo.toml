@@ -1,0 +1,31 @@
+[package]
+name = "turn-client-openssl"
+description = "TURN protocol in a sans-IO fashion (openssl)"
+version = "0.1.0"
+authors = ["Matthew Waters <matthew@centricular.com>"]
+license = "MIT OR Apache-2.0"
+keywords = ["TURN"]
+categories = ["network-programming", ]
+documentation = "https://docs.rs/turn-client-openssl"
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+openssl.workspace = true
+stun-proto = "2"
+turn-client-proto = { version = "0.6.0", path = "../turn-client-proto" }
+tracing = { version = "0.1", default-features = false, features = ["attributes"] }
+
+[dev-dependencies]
+api-tests = { path = "../api-tests" }
+tracing = { version = "0.1",features = ["std"] }
+tracing-subscriber = "0.3"
+turn-server-openssl = { path = "../turn-server-openssl" }
+
+[features]
+default = ["std"]
+std = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }

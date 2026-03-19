@@ -102,7 +102,7 @@ impl Client {
                         let _ = self.dtls.handle_timeout(time);
                         continue;
                     }
-                    if earliest_wait.is_non_or(|earliest| earliest > wait) {
+                    if earliest_wait.is_none_or(|earliest| earliest > wait) {
                         earliest_wait = Some(wait);
                     }
                     break;

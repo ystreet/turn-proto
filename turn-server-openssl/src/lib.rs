@@ -8,7 +8,33 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! # turn-server-dimpl
+//!
 //! A TURN server that can handle TLS client connections.
+//!
+//! Relevant standards:
+//! - [RFC5766]: Traversal Using Relays around NAT (TURN).
+//! - [RFC6062]: Traversal Using Relays around NAT (TURN) Extensions for TCP Allocations
+//! - [RFC6156]: Traversal Using Relays around NAT (TURN) Extension for IPv6
+//! - [RFC8656]: Traversal Using Relays around NAT (TURN): Relay Extensions to Session
+//!   Traversal Utilities for NAT (STUN)
+//!
+//! [RFC5766]: https://datatracker.ietf.org/doc/html/rfc5766
+//! [RFC6062]: https://tools.ietf.org/html/rfc6062
+//! [RFC6156]: https://tools.ietf.org/html/rfc6156
+//! [RFC8656]: https://tools.ietf.org/html/rfc8656
+
+#![deny(missing_debug_implementations)]
+#![deny(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![deny(clippy::std_instead_of_core)]
+#![deny(clippy::std_instead_of_alloc)]
+#![no_std]
+
+extern crate alloc;
+
+#[cfg(any(feature = "std", test))]
+extern crate std;
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -16,23 +42,30 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::net::SocketAddr;
 use core::time::Duration;
+
 use std::io::{Read, Write};
-use turn_types::prelude::DelayedTransmitBuild;
-use turn_types::transmit::TransmitBuild;
-use turn_types::AddressFamily;
+
+use turn_server_proto::types::prelude::DelayedTransmitBuild;
+use turn_server_proto::types::transmit::TransmitBuild;
+use turn_server_proto::types::AddressFamily;
+
+use turn_server_proto::api::Transmit;
+use turn_server_proto::types::Instant;
+use turn_server_proto::types::stun::TransportType;
+
+pub use turn_server_proto as proto;
+pub use turn_server_proto::api as api;
+
+use turn_server_proto::api::{
+    DelayedMessageOrChannelSend, SocketAllocateError, TurnServerApi, TurnServerPollRet,
+};
+use turn_server_proto::server::TurnServer;
+
+use tracing::{info, trace, warn};
 
 use openssl::ssl::{
     HandshakeError, MidHandshakeSslStream, ShutdownState, Ssl, SslContext, SslStream,
 };
-use stun_proto::agent::Transmit;
-use stun_proto::Instant;
-use tracing::{info, trace, warn};
-use turn_types::stun::TransportType;
-
-use crate::api::{
-    DelayedMessageOrChannelSend, SocketAllocateError, TurnServerApi, TurnServerPollRet,
-};
-use crate::server::TurnServer;
 
 /// A TURN server that can handle TLS connections.
 #[derive(Debug)]

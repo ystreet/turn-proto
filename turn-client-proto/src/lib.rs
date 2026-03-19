@@ -80,8 +80,6 @@ mod protocol;
 pub mod tcp;
 pub mod udp;
 
-#[cfg(feature = "openssl")]
-pub mod openssl;
 #[cfg(feature = "rustls")]
 pub mod rustls;
 
