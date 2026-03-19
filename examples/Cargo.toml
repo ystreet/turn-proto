@@ -14,13 +14,12 @@ edition = "2024"
 [dependencies]
 turn-client-proto = { version = "0.6.0", path = "../turn-client-proto" }
 turn-client-dimpl = { version = "0.1.0", path = "../turn-client-dimpl" }
+turn-client-openssl = { version = "0.1.0", path = "../turn-client-openssl" }
 
 clap = {version = "4", features = ["derive"]}
 stun-proto = "2"
 tracing = { version = "0.1", default-features = false, features = ["attributes", "std"]}
 tracing-subscriber = "0.3"
-
-openssl = "0.10"
 
 rustls = { version = "0.23", features = ["ring"]}
 rustls-platform-verifier = "0.6"

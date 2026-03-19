@@ -18,8 +18,6 @@ pub use crate::api::{
     BindChannelError, CreatePermissionError, DeleteError, SendError, TcpAllocateError, TurnEvent,
     TurnPollRet, TurnRecvRet,
 };
-#[cfg(feature = "openssl")]
-use crate::openssl::TurnClientOpensslTls;
 #[cfg(feature = "rustls")]
 use crate::rustls::TurnClientRustls;
 use crate::tcp::TurnClientTcp;
@@ -226,13 +224,8 @@ macro_rules! impl_client {
         })+
     }
 }
-pub(crate) use impl_client;
 
-#[cfg(all(feature = "rustls", feature = "openssl"))]
-impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp), (Rustls, TurnClientRustls), (Openssl, TurnClientOpensslTls));
-#[cfg(all(feature = "rustls", not(feature = "openssl")))]
+#[cfg(feature = "rustls")]
 impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp), (Rustls, TurnClientRustls));
-#[cfg(all(not(feature = "rustls"), feature = "openssl"))]
-impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp), (Openssl, TurnClientOpensslTls));
-#[cfg(all(not(feature = "rustls"), not(feature = "openssl")))]
+#[cfg(not(feature = "rustls"))]
 impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp));

@@ -8,41 +8,53 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! #turn-client-openssl
+//!
 //! TLS TURN client using OpenSSL.
 //!
 //! An implementation of a TURN client suitable for TLS over TCP connections and DTLS over UDP
 //! connections.
 
+#![deny(missing_debug_implementations)]
+#![deny(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![deny(clippy::std_instead_of_core)]
+#![deny(clippy::std_instead_of_alloc)]
+#![no_std]
+
+extern crate alloc;
+
+pub use openssl;
+
+#[cfg(any(feature = "std", test))]
+extern crate std;
+
+pub use turn_client_proto::api;
+
+use std::io::{Read, Write};
+
 use alloc::collections::VecDeque;
-use alloc::vec;
 use alloc::vec::Vec;
+use alloc::vec;
+
 use core::net::{IpAddr, SocketAddr};
 use core::time::Duration;
+
+use turn_client_proto::types::Instant;
+use turn_client_proto::types::TransportType;
+
+use tracing::{info, trace, warn};
+
+use turn_client_proto::api::*;
+use turn_client_proto::udp::TurnClientUdp;
+use turn_client_proto::tcp::TurnClientTcp;
+
 use openssl::ssl::{
     HandshakeError, MidHandshakeSslStream, ShutdownResult, ShutdownState, Ssl, SslContext,
     SslStream,
 };
-use std::io::{Read, Write};
 
-use stun_proto::agent::Transmit;
-use stun_proto::types::data::Data;
-use stun_proto::Instant;
-
-use stun_proto::types::TransportType;
-
-use tracing::{info, trace, warn};
-
-use crate::api::{
-    DelayedMessageOrChannelSend, Socket5Tuple, TcpAllocateError, TcpConnectError, TransmitBuild,
-    TurnClientApi, TurnConfig, TurnPeerData,
-};
-
-pub use crate::api::{
-    BindChannelError, CreatePermissionError, DeleteError, SendError, TurnEvent, TurnPollRet,
-    TurnRecvRet,
-};
-use crate::tcp::TurnClientTcp;
-use crate::udp::TurnClientUdp;
+turn_client_proto::impl_client!(TcpOrUdp, (Udp, TurnClientUdp), (Tcp, TurnClientTcp));
 
 /// A TURN client that communicates over TLS.
 #[derive(Debug)]
@@ -60,8 +72,6 @@ struct Socket {
     pending_write: VecDeque<Data<'static>>,
     shutdown: ShutdownState,
 }
-
-crate::client::impl_client!(TcpOrUdp, (Udp, TurnClientUdp), (Tcp, TurnClientTcp));
 
 #[derive(Debug)]
 enum HandshakeState {

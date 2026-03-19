@@ -66,9 +66,10 @@
 use rustls::pki_types::ServerName;
 use rustls::ClientConfig;
 use rustls_platform_verifier::ConfigVerifierExt;
+
 use turn_client_dimpl::{dimpl, TurnClientDimpl};
+use turn_client_openssl::{openssl, TurnClientOpensslTls};
 use turn_client_proto::api::{TcpConnectError, TurnConfig};
-use turn_client_proto::openssl::TurnClientOpensslTls;
 use turn_client_proto::prelude::*;
 use turn_client_proto::rustls::TurnClientRustls;
 use turn_client_proto::tcp::TurnClientTcp;

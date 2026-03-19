@@ -15,7 +15,6 @@ use core::time::Duration;
 use std::net::SocketAddr;
 use stun_proto::agent::Transmit;
 use stun_proto::Instant;
-use turn_client_proto::openssl::TurnClientOpensslTls;
 
 use openssl::asn1::{Asn1Integer, Asn1Time, Asn1Type};
 use openssl::bn::BigNum;
@@ -26,15 +25,17 @@ use openssl::ssl::{SslContext, SslMethod};
 use openssl::x509::{X509Name, X509};
 use tracing::{debug, trace};
 
-use turn_types::message::CREATE_PERMISSION;
-use turn_types::stun::message::{Message, MessageType, MessageWriteVec, TransactionId};
-use turn_types::stun::prelude::MessageWrite;
-use turn_types::{AddressFamily, TransportType, TurnCredentials};
+use turn_client_proto::types::message::CREATE_PERMISSION;
+use turn_client_proto::types::stun::message::{Message, MessageType, MessageWriteVec, TransactionId};
+use turn_client_proto::types::stun::prelude::MessageWrite;
+use turn_client_proto::types::{AddressFamily, TransportType, TurnCredentials};
 
 use turn_client_proto::api::*;
 
-use turn_server_proto::api::{TurnServerApi, TurnServerPollRet};
-use turn_server_proto::openssl::OpensslTurnServer;
+use turn_client_openssl::TurnClientOpensslTls;
+
+use turn_server_openssl::api::{TurnServerApi, TurnServerPollRet};
+use turn_server_openssl::OpensslTurnServer;
 
 use api_tests::*;
 
@@ -385,7 +386,7 @@ fn test_turn_openssl_offpath_data() {
         let now = create_permission(&mut test, now);
         let data = Message::builder(
             MessageType::from_class_method(
-                turn_types::stun::message::MessageClass::Error,
+                turn_client_proto::types::stun::message::MessageClass::Error,
                 CREATE_PERMISSION,
             ),
             TransactionId::generate(),

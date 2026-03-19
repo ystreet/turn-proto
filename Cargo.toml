@@ -2,7 +2,9 @@
 members = [
     "turn-types",
     "turn-client-proto",
+    "turn-client-openssl",
     "turn-server-proto",
+    "turn-server-openssl",
     "api-tests",
     "fuzz"
 ]
