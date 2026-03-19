@@ -8,7 +8,35 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! A TURN server that can handle TLS client connections.
+//! # turn-server-dimpl
+//!
+//! A TURN server that can handle DTLS client connections using `dimpl`.
+//!
+//! `turn-server-dimpl` provides a sans-IO API for a TURN server communicating with many TURN clients.
+//!
+//! Relevant standards:
+//! - [RFC5766]: Traversal Using Relays around NAT (TURN).
+//! - [RFC6062]: Traversal Using Relays around NAT (TURN) Extensions for TCP Allocations
+//! - [RFC6156]: Traversal Using Relays around NAT (TURN) Extension for IPv6
+//! - [RFC8656]: Traversal Using Relays around NAT (TURN): Relay Extensions to Session
+//!   Traversal Utilities for NAT (STUN)
+//!
+//! [RFC5766]: https://datatracker.ietf.org/doc/html/rfc5766
+//! [RFC6062]: https://tools.ietf.org/html/rfc6062
+//! [RFC6156]: https://tools.ietf.org/html/rfc6156
+//! [RFC8656]: https://tools.ietf.org/html/rfc8656
+
+#![deny(missing_debug_implementations)]
+#![deny(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![deny(clippy::std_instead_of_core)]
+#![deny(clippy::std_instead_of_alloc)]
+#![no_std]
+
+extern crate alloc;
+
+#[cfg(any(feature = "std", test))]
+extern crate std;
 
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -17,19 +45,23 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::net::SocketAddr;
 use core::time::Duration;
-use turn_types::prelude::DelayedTransmitBuild;
-use turn_types::transmit::TransmitBuild;
-use turn_types::AddressFamily;
+use turn_server_proto::types::prelude::DelayedTransmitBuild;
+use turn_server_proto::types::transmit::TransmitBuild;
+use turn_server_proto::types::AddressFamily;
 
-use stun_proto::agent::Transmit;
-use stun_proto::Instant;
-use tracing::{info, trace, warn};
-use turn_types::stun::TransportType;
+use turn_server_proto::api::Transmit;
+use turn_server_proto::types::Instant;
+use turn_server_proto::types::stun::TransportType;
 
-use crate::api::{
+pub use turn_server_proto as proto;
+pub use turn_server_proto::api as api;
+
+use turn_server_proto::api::{
     DelayedMessageOrChannelSend, SocketAllocateError, TurnServerApi, TurnServerPollRet,
 };
-use crate::server::TurnServer;
+use turn_server_proto::server::TurnServer;
+
+use tracing::{info, trace, warn};
 
 /// A TURN server that can handle TLS connections.
 #[derive(Debug)]
@@ -70,7 +102,7 @@ impl Client {
                         let _ = self.dtls.handle_timeout(time);
                         continue;
                     }
-                    if earliest_wait.map_or(true, |earliest| earliest > wait) {
+                    if earliest_wait.is_non_or(|earliest| earliest > wait) {
                         earliest_wait = Some(wait);
                     }
                     break;
@@ -378,7 +410,7 @@ impl TurnServerApi for DimplTurnServer {
         peer_addr: SocketAddr,
         listen_addr: SocketAddr,
         client_addr: SocketAddr,
-        socket_addr: Result<SocketAddr, crate::api::TcpConnectError>,
+        socket_addr: Result<SocketAddr, api::TcpConnectError>,
         now: Instant,
     ) {
         self.server.tcp_connected(
@@ -389,5 +421,51 @@ impl TurnServerApi for DimplTurnServer {
             socket_addr,
             now,
         )
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use tracing::subscriber::DefaultGuard;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::Layer;
+
+    use super::*;
+
+    fn test_init_log() -> DefaultGuard {
+        crate::proto::types::debug_init();
+        let level_filter = std::env::var("TURN_LOG")
+            .or(std::env::var("RUST_LOG"))
+            .ok()
+            .and_then(|var| var.parse::<tracing_subscriber::filter::Targets>().ok())
+            .unwrap_or(
+                tracing_subscriber::filter::Targets::new().with_default(tracing::Level::TRACE),
+            );
+        let registry = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_file(true)
+                .with_line_number(true)
+                .with_level(true)
+                .with_target(false)
+                .with_test_writer()
+                .with_filter(level_filter),
+        );
+        tracing::subscriber::set_default(registry)
+    }
+
+    fn generate_cert() -> dimpl::DtlsCertificate {
+        dimpl::certificate::generate_self_signed_certificate().unwrap()
+    }
+
+    #[test]
+    fn constructor() {
+        let _log = test_init_log();
+        let config = Arc::new(dimpl::Config::builder().build().unwrap());
+        let listen_addr = "127.0.0.1:3478".parse().unwrap();
+        let realm = String::from("realm");
+        let cert = generate_cert();
+        let server = DimplTurnServer::new(TransportType::Udp, listen_addr, realm, config, cert);
+        assert_eq!(server.listen_address(), listen_addr);
     }
 }

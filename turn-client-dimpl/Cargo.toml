@@ -1,0 +1,33 @@
+[package]
+name = "turn-client-dimpl"
+description = "TURN protocol in a sans-IO fashion (dimpl)"
+version = "0.1.0"
+authors = ["Matthew Waters <matthew@centricular.com>"]
+license = "MIT OR Apache-2.0"
+keywords = ["TURN"]
+categories = ["network-programming", ]
+documentation = "https://docs.rs/turn-client-dimpl"
+edition = "2024"
+repository = "https://github.com/ystreet/turn-proto"
+rust-version = "1.85.0"
+
+[workspace]
+
+[dependencies]
+dimpl = "0.4"
+stun-proto = "2"
+turn-client-proto = { version = "0.6.0", path = "../turn-client-proto" }
+tracing = { version = "0.1", default-features = false, features = ["attributes"] }
+
+[dev-dependencies]
+api-tests = { path = "../api-tests" }
+tracing = { version = "0.1",features = ["std"] }
+tracing-subscriber = "0.3"
+turn-server-dimpl = { path = "../turn-server-dimpl" }
+
+[features]
+default = ["std"]
+std = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }

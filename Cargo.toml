@@ -1,6 +1,22 @@
 [workspace]
-members = ["turn-types", "turn-client-proto", "turn-server-proto", "fuzz"]
-default-members = ["turn-types", "turn-client-proto", "turn-server-proto"]
+members = [
+    "turn-types",
+    "turn-client-proto",
+    "turn-server-proto",
+    "api-tests",
+    "fuzz"
+]
+default-members = [
+    "turn-types",
+    "turn-client-proto",
+    "turn-server-proto",
+    "api-tests"
+]
+exclude = [
+    "turn-client-dimpl",
+    "turn-server-dimpl",
+    "examples",
+]
 resolver = "2"
 
 [workspace.package]
@@ -10,12 +26,15 @@ edition = "2021"
 rust-version = "1.80.0"
 
 [workspace.dependencies]
+turn-client-proto = { version = "0.6.0", path = "turn-client-proto" }
+turn-server-proto = { version = "0.6.0", path = "turn-server-proto" }
+turn-types = { version = "0.6.0", path = "turn-types", default-features = false }
+api-tests = { path = "api-tests" }
+
 base64 = "0.22"
 byteorder = { version = "1", default-features = false }
-dimpl = "0.4"
 stun-proto = { version = "2.0.0", default-features = false }
 stun-types = { version = "2.0.0", default-features = false }
-turn-types = { path = "turn-types", version = "0.6.0", default-features = false }
 thiserror = { version = "2", default-features = false }
 tracing = { version = "0.1", default-features = false, features = ["attributes"] }
 tracing-subscriber = "0.3"

@@ -14,12 +14,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::{net::SocketAddr, time::Duration};
 
-use stun_proto::agent::Transmit;
-use stun_proto::Instant;
+pub use stun_proto::agent::Transmit;
 use turn_types::prelude::DelayedTransmitBuild;
 use turn_types::stun::{attribute::ErrorCode, TransportType};
 use turn_types::transmit::{DelayedChannel, DelayedMessage, TransmitBuild};
 use turn_types::AddressFamily;
+use turn_types::Instant;
 
 /// API for TURN servers.
 pub trait TurnServerApi: Send + core::fmt::Debug {
