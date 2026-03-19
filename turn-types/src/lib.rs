@@ -46,6 +46,8 @@ pub mod message;
 pub mod tcp;
 pub mod transmit;
 
+pub use stun_proto::Instant;
+
 /// Public prelude.
 pub mod prelude {
     pub use crate::transmit::DelayedTransmitBuild;

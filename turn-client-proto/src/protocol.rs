@@ -2687,7 +2687,6 @@ pub(crate) enum TurnProtocolChannelRecv {
 mod tests {
     use alloc::string::ToString;
 
-    use turn_server_proto::api::TurnServerApi;
     use turn_types::attribute::ConnectionId;
     use turn_types::prelude::DelayedTransmitBuild;
     use turn_types::stun::attribute::{Nonce, Realm, UnknownAttributes};
@@ -2698,8 +2697,6 @@ mod tests {
     use turn_types::TurnCredentials;
 
     use crate::api::tests::generate_addresses;
-    use crate::api::TurnClientApi;
-    use crate::tcp::TurnRecvRet;
 
     use super::*;
 
@@ -5203,49 +5200,5 @@ mod tests {
             TurnEvent::AllocationCreateFailed(_)
         ));
         assert!(matches!(client.poll(now), TurnPollRet::Closed));
-    }
-
-    #[test]
-    fn test_client_receive_offpath_data() {
-        let _log = crate::tests::test_init_log();
-
-        let now = Instant::ZERO;
-
-        let mut test = crate::udp::tests::create_test();
-        let data = [0x40, 0, 0, 14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let TurnRecvRet::Ignored(ignored) = test.client.recv(
-            Transmit::new(
-                &data,
-                test.client.transport(),
-                test.client.remote_addr(),
-                test.client.local_addr(),
-            ),
-            now,
-        ) else {
-            unreachable!();
-        };
-        assert_eq!(ignored.data, &data);
-    }
-
-    #[test]
-    fn test_server_receive_offpath_data() {
-        let _log = crate::tests::test_init_log();
-
-        let now = Instant::ZERO;
-        let mut test = crate::udp::tests::create_test();
-
-        let data = [3; 9];
-        assert!(test
-            .server
-            .recv(
-                Transmit::new(
-                    &data,
-                    TransportType::Udp,
-                    test.peer_addr,
-                    test.client.local_addr(),
-                ),
-                now,
-            )
-            .is_none());
     }
 }

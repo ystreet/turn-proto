@@ -16,11 +16,9 @@ default = ["rustls", "std", "openssl"]
 rustls = ["dep:rustls", "std", "rustls/std"]
 std = ["turn-types/std", "stun-proto/std", "thiserror/std", "rand/std"]
 openssl = ["dep:openssl", "std"]
-dimpl = ["dep:dimpl", "std"]
 
 [dependencies]
 byteorder.workspace = true
-dimpl = { workspace = true, optional = true }
 stun-proto.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

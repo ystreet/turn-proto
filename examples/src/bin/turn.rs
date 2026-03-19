@@ -66,9 +66,8 @@
 use rustls::pki_types::ServerName;
 use rustls::ClientConfig;
 use rustls_platform_verifier::ConfigVerifierExt;
+use turn_client_dimpl::{dimpl, TurnClientDimpl};
 use turn_client_proto::api::{TcpConnectError, TurnConfig};
-use turn_client_proto::client::TurnClient;
-use turn_client_proto::dimpl::TurnClientDimpl;
 use turn_client_proto::openssl::TurnClientOpensslTls;
 use turn_client_proto::prelude::*;
 use turn_client_proto::rustls::TurnClientRustls;
@@ -80,12 +79,12 @@ use turn_client_proto::udp::{
 
 use stun_proto::agent::Transmit;
 use stun_proto::Instant;
-use turn_types::stun::data::Data;
-use turn_types::stun::TransportType;
-use turn_types::AddressFamily;
+use turn_client_proto::types::stun::data::Data;
+use turn_client_proto::types::stun::message::IntegrityAlgorithm;
+use turn_client_proto::types::stun::TransportType;
+use turn_client_proto::types::AddressFamily;
 
 use clap::{Parser, ValueEnum};
-use turn_types::stun::message::IntegrityAlgorithm;
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
@@ -96,6 +95,15 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::net::UdpSocket;
 
 use tracing::error;
+
+turn_client_proto::impl_client!(
+    TurnClient,
+    (Udp, TurnClientUdp),
+    (Tcp, TurnClientTcp),
+    (Rustls, TurnClientRustls),
+    (Openssl, TurnClientOpensslTls),
+    (Dimpl, TurnClientDimpl)
+);
 
 fn init_logs() {
     use tracing_subscriber::layer::SubscriberExt;

@@ -34,15 +34,17 @@ jobs:
     - run: vcpkg install openssl:x64-windows-static-md
       if: matrix.runs-on == 'windows-latest'
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --workspace --verbose --exclude turn-fuzz
     - name: Build (without default features)
       run: cargo build --verbose --no-default-features
     - name: Build with --features "std"
-      run: cargo build --verbose --no-default-features --features "std"
-    - name: Build with --features "openssl"
-      run: cargo build --verbose --no-default-features --features "openssl"
-    - name: Build with --features "rustls"
-      run: cargo build --verbose --no-default-features --features "rustls"
+      run: cargo build --workspace --verbose --exclude turn-fuzz --no-default-features --features "std"
+    - name: Build separate crates
+      run: for d in examples turn-client-dimpl turn-server-dimpl; do pushd "$d"; cargo build --verbose; popd; done
+      if: matrix.toolchain == 'stable' && matrix.runs-on != 'windows-latest'
+    - name: Build separate crates
+      run: foreach ($d in @('examples','turn-client-dimpl','turn-server-dimpl')) { pushd "$d"; cargo build --verbose; popd }
+      if: matrix.toolchain == 'stable' && matrix.runs-on == 'windows-latest'
   test:
     strategy:
       matrix:
@@ -56,12 +58,26 @@ jobs:
     - run: vcpkg install openssl:x64-windows-static-md
       if: matrix.runs-on == 'windows-latest'
     - name: Run tests
-      run: cargo test --verbose --all-features
+      run: cargo test --workspace --verbose --all-features
+    - name: Run tests (separate crates)
+      run: for d in examples turn-client-dimpl turn-server-dimpl; do pushd "$d"; cargo test --verbose --all-features; popd; done
+      if: matrix.runs-on != 'windows-latest'
+    - name: Run tests (separate crates)
+      run: foreach ($d in @('examples','turn-client-dimpl','turn-server-dimpl')) { pushd "$d"; cargo test --verbose --all-features; popd }
+      if: matrix.runs-on == 'windows-latest'
     - name: Build benchmarks
-      run: cargo bench --no-run --verbose
+      run: cargo bench --workspace --no-run --verbose --exclude turn-fuzz
+    - name: Build benchmarks (separate crates)
+      run: for d in examples turn-client-dimpl turn-server-dimpl; do pushd "$d"; cargo bench --no-run --verbose; popd; done
+      if: matrix.runs-on != 'windows-latest'
+    - name: Build benchmarks (separate crates)
+      run: foreach ($d in @('examples','turn-client-dimpl','turn-server-dimpl')) { pushd "$d"; cargo bench --no-run --verbose; popd }
+      if: matrix.runs-on == 'windows-latest'
   clippy:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
     - name: clippy
       run: cargo clippy --verbose -- -Dwarnings
+    - name: clippy (separate crates)
+      run: for d in examples turn-client-dimpl turn-server-dimpl; do pushd "$d"; cargo clippy --verbose -- -Dwarnings; popd; done

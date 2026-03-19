@@ -28,11 +28,11 @@ jobs:
         with:
           tool: cargo-tarpaulin@0.32
 
-      - name: Run cargo-tarpaulin
-        uses: actions-rs/cargo@v1
-        with:
-          command: 'tarpaulin'
-          args: '--out Xml --lib --tests --doc -- --test-threads 1'
+      - name: Run cargo tarpaulin
+        run: cargo tarpaulin --workspace --out Xml --lib --tests --doc -- --test-threads 1
+
+      - name: Run cargo tarpaulin (separate crates)
+        run: for d in turn-client-dimpl turn-server-dimpl; do pushd "$d"; cargo tarpaulin --out Xml --lib --tests --doc -- --test-threads 1 ; popd; done
 
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v5

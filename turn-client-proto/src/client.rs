@@ -13,22 +13,11 @@
 //! A cohesive TURN client that can be one of the transport specific (UDP, TCP, TLS) implementations.
 
 use alloc::vec::Vec;
-use core::net::{IpAddr, SocketAddr};
-
-use stun_proto::agent::Transmit;
-use stun_proto::Instant;
-use turn_types::stun::{data::Data, TransportType};
 
 pub use crate::api::{
     BindChannelError, CreatePermissionError, DeleteError, SendError, TcpAllocateError, TurnEvent,
     TurnPollRet, TurnRecvRet,
 };
-use crate::api::{
-    DelayedMessageOrChannelSend, Socket5Tuple, TcpConnectError, TransmitBuild, TurnClientApi,
-    TurnPeerData,
-};
-#[cfg(feature = "dimpl")]
-use crate::dimpl::TurnClientDimpl;
 #[cfg(feature = "openssl")]
 use crate::openssl::TurnClientOpensslTls;
 #[cfg(feature = "rustls")]
@@ -36,6 +25,33 @@ use crate::rustls::TurnClientRustls;
 use crate::tcp::TurnClientTcp;
 use crate::udp::TurnClientUdp;
 
+/// Implement an enum over a list of TURN client implementations.
+///
+/// All discriminants must implement `TurnClientApi`.
+///
+/// # Example
+///
+/// ```
+/// # use turn_client_proto::udp::TurnClientUdp;
+/// # use turn_client_proto::tcp::TurnClientTcp;
+/// turn_client_proto::impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp));
+/// ```
+///
+/// Roughly translates to:
+///
+/// ```
+/// # use turn_client_proto::udp::TurnClientUdp;
+/// # use turn_client_proto::tcp::TurnClientTcp;
+/// pub enum TurnClient {
+///    Udp(TurnClientUdp),
+///    Tcp(TurnClientTcp),
+/// }
+///
+/// // impl TurnClientApi for TurnClient {
+/// //    ...
+/// // }
+/// ```
+#[macro_export]
 macro_rules! impl_client {
     ($vis:vis $name:ident, $(($variant:ident, $ty:ty)),+) => {
         /// A TURN client.
@@ -47,68 +63,68 @@ macro_rules! impl_client {
                 #[doc = " TURN client."]
                 $variant($ty),)+
         }
-        impl TurnClientApi for $name
+        impl $crate::api::TurnClientApi for $name
         {
-            fn transport(&self) -> TransportType {
+            fn transport(&self) -> $crate::types::TransportType {
                 match self {
                     $(Self::$variant(val) => val.transport(),)+
                 }
             }
-            fn local_addr(&self) -> SocketAddr {
+            fn local_addr(&self) -> core::net::SocketAddr {
                 match self {
                     $(Self::$variant(val) => val.local_addr(),)+
                 }
             }
-            fn remote_addr(&self) -> SocketAddr {
+            fn remote_addr(&self) -> core::net::SocketAddr {
                 match self {
                     $(Self::$variant(val) => val.remote_addr(),)+
                 }
             }
-            fn relayed_addresses(&self) -> impl Iterator<Item = (TransportType, SocketAddr)> + '_ {
+            fn relayed_addresses(&self) -> impl Iterator<Item = ($crate::types::TransportType, core::net::SocketAddr)> + '_ {
                 match self {
                     $(Self::$variant(val) => RelayedAddressesIter::$variant(val.relayed_addresses()),)+
                 }
             }
             fn permissions(
                 &self,
-                transport: TransportType,
-                relayed: SocketAddr,
-            ) -> impl Iterator<Item = IpAddr> + '_ {
+                transport: $crate::types::TransportType,
+                relayed: core::net::SocketAddr,
+            ) -> impl Iterator<Item = core::net::IpAddr> + '_ {
                 match self {
                     $(Self::$variant(val) => PermissionAddressesIter::$variant(val.permissions(transport, relayed)),)+
                 }
             }
-            fn delete(&mut self, now: Instant) -> Result<(), DeleteError> {
+            fn delete(&mut self, now: $crate::types::Instant) -> Result<(), $crate::api::DeleteError> {
                 match self {
                     $(Self::$variant(val) => val.delete(now),)+
                 }
             }
             fn create_permission(
                 &mut self,
-                transport: TransportType,
-                peer_addr: IpAddr,
-                now: Instant,
-            ) -> Result<(), CreatePermissionError> {
+                transport: $crate::types::TransportType,
+                peer_addr: core::net::IpAddr,
+                now: $crate::types::Instant,
+            ) -> Result<(), $crate::api::CreatePermissionError> {
                 match self {
                     $(Self::$variant(val) => val.create_permission(transport, peer_addr, now),)+
                 }
             }
-            fn have_permission(&self, transport: TransportType, to: IpAddr) -> bool {
+            fn have_permission(&self, transport: $crate::types::TransportType, to: core::net::IpAddr) -> bool {
                 match self {
                     $(Self::$variant(val) => val.have_permission(transport, to),)+
                 }
             }
             fn bind_channel(
                 &mut self,
-                transport: TransportType,
-                peer_addr: SocketAddr,
-                now: Instant,
-            ) -> Result<(), BindChannelError> {
+                transport: $crate::types::TransportType,
+                peer_addr: core::net::SocketAddr,
+                now: $crate::types::Instant,
+            ) -> Result<(), $crate::api::BindChannelError> {
                 match self {
                     $(Self::$variant(val) => val.bind_channel(transport, peer_addr, now),)+
                 }
             }
-            fn tcp_connect(&mut self, peer_addr: SocketAddr, now: Instant) -> Result<(), TcpConnectError> {
+            fn tcp_connect(&mut self, peer_addr: core::net::SocketAddr, now: $crate::types::Instant) -> Result<(), $crate::api::TcpConnectError> {
                 match self {
                     $(Self::$variant(val) => val.tcp_connect(peer_addr, now),)+
                 }
@@ -116,20 +132,20 @@ macro_rules! impl_client {
             fn allocated_tcp_socket(
                 &mut self,
                 id: u32,
-                five_tuple: Socket5Tuple,
-                peer_addr: SocketAddr,
-                local_addr: Option<SocketAddr>,
-                now: Instant,
-            ) -> Result<(), TcpAllocateError> {
+                five_tuple: $crate::api::Socket5Tuple,
+                peer_addr: core::net::SocketAddr,
+                local_addr: Option<core::net::SocketAddr>,
+                now: $crate::types::Instant,
+            ) -> Result<(), $crate::api::TcpAllocateError> {
                 match self {
                     $(Self::$variant(val) => val.allocated_tcp_socket(id, five_tuple, peer_addr, local_addr, now),)+
                 }
             }
             fn tcp_closed(
                 &mut self,
-                local_addr: SocketAddr,
-                remote_addr: SocketAddr,
-                now: Instant,
+                local_addr: core::net::SocketAddr,
+                remote_addr: core::net::SocketAddr,
+                now: $crate::types::Instant,
             ) {
                 match self {
                     $(Self::$variant(val) => val.tcp_closed(local_addr, remote_addr, now),)+
@@ -137,40 +153,40 @@ macro_rules! impl_client {
             }
             fn send_to<T: AsRef<[u8]> + core::fmt::Debug>(
                 &mut self,
-                transport: TransportType,
-                to: SocketAddr,
+                transport: $crate::types::TransportType,
+                to: core::net::SocketAddr,
                 data: T,
-                now: Instant,
-            ) -> Result<Option<TransmitBuild<DelayedMessageOrChannelSend<T>>>, SendError> {
+                now: $crate::types::Instant,
+            ) -> Result<Option<$crate::api::TransmitBuild<$crate::api::DelayedMessageOrChannelSend<T>>>, $crate::api::SendError> {
                 match self {
                     $(Self::$variant(val) => val.send_to(transport, to, data, now),)+
                 }
             }
             fn recv<T: AsRef<[u8]> + core::fmt::Debug>(
                 &mut self,
-                transmit: Transmit<T>,
-                now: Instant,
-            ) -> TurnRecvRet<T> {
+                transmit: $crate::api::Transmit<T>,
+                now: $crate::types::Instant,
+            ) -> $crate::api::TurnRecvRet<T> {
                 match self {
                     $(Self::$variant(val) => val.recv(transmit, now),)+
                 }
             }
-            fn poll_recv(&mut self, now: Instant) -> Option<TurnPeerData<Vec<u8>>> {
+            fn poll_recv(&mut self, now: $crate::types::Instant) -> Option<$crate::api::TurnPeerData<Vec<u8>>> {
                 match self {
                     $(Self::$variant(val) => val.poll_recv(now),)+
                 }
             }
-            fn poll(&mut self, now: Instant) -> TurnPollRet {
+            fn poll(&mut self, now: $crate::types::Instant) -> $crate::api::TurnPollRet {
                 match self {
                     $(Self::$variant(val) => val.poll(now),)+
                 }
             }
-            fn poll_transmit(&mut self, now: Instant) -> Option<Transmit<Data<'static>>> {
+            fn poll_transmit(&mut self, now: $crate::types::Instant) -> Option<$crate::api::Transmit<$crate::types::stun::data::Data<'static>>> {
                 match self {
                     $(Self::$variant(val) => val.poll_transmit(now),)+
                 }
             }
-            fn poll_event(&mut self) -> Option<TurnEvent> {
+            fn poll_event(&mut self) -> Option<$crate::api::TurnEvent> {
                 match self {
                     $(Self::$variant(val) => val.poll_event(),)+
                 }
@@ -181,22 +197,22 @@ macro_rules! impl_client {
                 }
             }
         }
-        enum RelayedAddressesIter<$($variant: Iterator<Item = (TransportType, SocketAddr)>, )+> {
+        enum RelayedAddressesIter<$($variant: Iterator<Item = ($crate::types::TransportType, core::net::SocketAddr)>, )+> {
             $($variant($variant),)+
         }
-        impl<$($variant: Iterator<Item = (TransportType, SocketAddr)>,)+> Iterator for RelayedAddressesIter<$($variant,)+> {
-            type Item = (TransportType, SocketAddr);
+        impl<$($variant: Iterator<Item = ($crate::types::TransportType, core::net::SocketAddr)>,)+> Iterator for RelayedAddressesIter<$($variant,)+> {
+            type Item = ($crate::types::TransportType, core::net::SocketAddr);
             fn next(&mut self) -> Option<Self::Item> {
                 match self {
                     $(Self::$variant(ref mut val) => val.next(),)+
                 }
             }
         }
-        enum PermissionAddressesIter<$($variant: Iterator<Item = IpAddr>, )+> {
+        enum PermissionAddressesIter<$($variant: Iterator<Item = core::net::IpAddr>, )+> {
             $($variant($variant),)+
         }
-        impl<$($variant: Iterator<Item = IpAddr>,)+> Iterator for PermissionAddressesIter<$($variant,)+> {
-            type Item = IpAddr;
+        impl<$($variant: Iterator<Item = core::net::IpAddr>,)+> Iterator for PermissionAddressesIter<$($variant,)+> {
+            type Item = core::net::IpAddr;
             fn next(&mut self) -> Option<Self::Item> {
                 match self {
                     $(Self::$variant(ref mut val) => val.next(),)+
@@ -212,23 +228,11 @@ macro_rules! impl_client {
 }
 pub(crate) use impl_client;
 
-#[cfg(all(feature = "rustls", feature = "openssl", feature = "dimpl"))]
-impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp), (Rustls, TurnClientRustls), (Openssl, TurnClientOpensslTls), (Dimpl, TurnClientDimpl));
-#[cfg(all(feature = "rustls", not(feature = "openssl"), feature = "dimpl"))]
-impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp), (Rustls, TurnClientRustls), (Dimpl, TurnClientDimpl));
-#[cfg(all(not(feature = "rustls"), feature = "openssl", feature = "dimpl"))]
-impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp), (Openssl, TurnClientOpensslTls), (Dimpl, TurnClientDimpl));
-#[cfg(all(not(feature = "rustls"), not(feature = "openssl"), feature = "dimpl"))]
-impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp), (Dimpl, TurnClientDimpl));
-#[cfg(all(feature = "rustls", feature = "openssl", not(feature = "dimpl")))]
+#[cfg(all(feature = "rustls", feature = "openssl"))]
 impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp), (Rustls, TurnClientRustls), (Openssl, TurnClientOpensslTls));
-#[cfg(all(feature = "rustls", not(feature = "openssl"), not(feature = "dimpl")))]
+#[cfg(all(feature = "rustls", not(feature = "openssl")))]
 impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp), (Rustls, TurnClientRustls));
-#[cfg(all(not(feature = "rustls"), feature = "openssl", not(feature = "dimpl")))]
+#[cfg(all(not(feature = "rustls"), feature = "openssl"))]
 impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp), (Openssl, TurnClientOpensslTls));
-#[cfg(all(
-    not(feature = "rustls"),
-    not(feature = "openssl"),
-    not(feature = "dimpl")
-))]
+#[cfg(all(not(feature = "rustls"), not(feature = "openssl")))]
 impl_client!(pub TurnClient, (Udp, TurnClientUdp), (Tcp, TurnClientTcp));
