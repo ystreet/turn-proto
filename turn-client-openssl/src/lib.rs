@@ -34,8 +34,8 @@ pub use turn_client_proto::api;
 use std::io::{Read, Write};
 
 use alloc::collections::VecDeque;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 
 use core::net::{IpAddr, SocketAddr};
 use core::time::Duration;
@@ -46,8 +46,8 @@ use turn_client_proto::types::TransportType;
 use tracing::{info, trace, warn};
 
 use turn_client_proto::api::*;
-use turn_client_proto::udp::TurnClientUdp;
 use turn_client_proto::tcp::TurnClientTcp;
+use turn_client_proto::udp::TurnClientUdp;
 
 use openssl::ssl::{
     HandshakeError, MidHandshakeSslStream, ShutdownResult, ShutdownState, Ssl, SslContext,

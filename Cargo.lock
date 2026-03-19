@@ -1436,9 +1436,7 @@ dependencies = [
  "byteorder",
  "criterion",
  "openssl",
- "rcgen",
  "rustls",
- "rustls-platform-verifier",
  "smallvec",
  "stun-proto",
  "thiserror 2.0.17",
@@ -1446,6 +1444,20 @@ dependencies = [
  "tracing-subscriber",
  "turn-server-proto",
  "turn-types",
+]
+
+[[package]]
+name = "turn-client-rustls"
+version = "0.1.0"
+dependencies = [
+ "api-tests",
+ "rcgen",
+ "rustls",
+ "rustls-platform-verifier",
+ "tracing",
+ "tracing-subscriber",
+ "turn-client-proto",
+ "turn-server-rustls",
 ]
 
 [[package]]
@@ -1490,6 +1502,17 @@ dependencies = [
  "tracing-subscriber",
  "turn-client-proto",
  "turn-types",
+]
+
+[[package]]
+name = "turn-server-rustls"
+version = "0.1.0"
+dependencies = [
+ "rustls",
+ "tracing",
+ "tracing-subscriber",
+ "turn-client-proto",
+ "turn-server-proto",
 ]
 
 [[package]]

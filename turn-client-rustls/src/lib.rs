@@ -8,9 +8,32 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! #turn-client-rustls
+//!
 //! TLS TURN client using Rustls.
 //!
-//! An implementation of a TURN client suitable for TLS over TCP connections.
+//! An implementation of a TURN client suitable for TLS over TCP connections connections.
+//!
+//! ## Crypto providers
+//!
+//! `turn-client-rustls` does not enable any cryptographic providers on rustls.
+//! It is the user's responsibility (library or application) to enable and use
+//! the relevant cryptographic provider (ring, aws-lc-rs, RustCrypto, etc),
+//! that they wish to use.
+
+#![deny(missing_debug_implementations)]
+#![deny(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![deny(clippy::std_instead_of_core)]
+#![deny(clippy::std_instead_of_alloc)]
+#![no_std]
+
+extern crate alloc;
+
+#[cfg(any(feature = "std", test))]
+extern crate std;
+
+pub use rustls;
 
 use alloc::sync::Arc;
 use alloc::vec;
@@ -19,27 +42,18 @@ use core::net::{IpAddr, SocketAddr};
 use core::time::Duration;
 use std::io::{Read, Write};
 
+use turn_client_proto::types::Instant;
+use turn_client_proto::types::TransportType;
+
+pub use turn_client_proto as proto;
+pub use turn_client_proto::api::*;
+
+use turn_client_proto::tcp::TurnClientTcp;
+
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection};
 
-use stun_proto::agent::Transmit;
-use stun_proto::types::data::Data;
-use stun_proto::Instant;
-
-use stun_proto::types::TransportType;
-
 use tracing::{debug, trace, warn};
-
-use crate::api::{
-    DelayedMessageOrChannelSend, Socket5Tuple, TcpAllocateError, TcpConnectError, TransmitBuild,
-    TurnClientApi, TurnConfig, TurnPeerData,
-};
-
-pub use crate::api::{
-    BindChannelError, CreatePermissionError, DeleteError, SendError, TurnEvent, TurnPollRet,
-    TurnRecvRet,
-};
-use crate::tcp::TurnClientTcp;
 
 /// A TURN client that communicates over TLS.
 #[derive(Debug)]

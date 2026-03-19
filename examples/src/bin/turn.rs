@@ -63,20 +63,16 @@
 
 #![cfg(not(tarpaulin))]
 
-use rustls::pki_types::ServerName;
-use rustls::ClientConfig;
-use rustls_platform_verifier::ConfigVerifierExt;
-
 use turn_client_dimpl::{dimpl, TurnClientDimpl};
 use turn_client_openssl::{openssl, TurnClientOpensslTls};
 use turn_client_proto::api::{TcpConnectError, TurnConfig};
 use turn_client_proto::prelude::*;
-use turn_client_proto::rustls::TurnClientRustls;
 use turn_client_proto::tcp::TurnClientTcp;
 use turn_client_proto::types::TurnCredentials;
 use turn_client_proto::udp::{
     CreatePermissionError, SendError, TurnClientUdp, TurnEvent, TurnPollRet, TurnRecvRet,
 };
+use turn_client_rustls::{rustls, TurnClientRustls};
 
 use stun_proto::agent::Transmit;
 use stun_proto::Instant;
@@ -96,6 +92,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::net::UdpSocket;
 
 use tracing::error;
+
+use rustls::pki_types::ServerName;
+use rustls::ClientConfig;
+use rustls_platform_verifier::ConfigVerifierExt;
 
 turn_client_proto::impl_client!(
     TurnClient,
@@ -738,6 +738,7 @@ impl<T: AsRef<[u8]> + std::fmt::Debug> Client<T> for ClientTcp {
 
 use rustls::crypto::ring as crypto_provider;
 mod danger {
+    use super::rustls;
     use rustls::client::danger::HandshakeSignatureValid;
     use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};

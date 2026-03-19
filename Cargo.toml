@@ -3,8 +3,10 @@ members = [
     "turn-types",
     "turn-client-proto",
     "turn-client-openssl",
+    "turn-client-rustls",
     "turn-server-proto",
     "turn-server-openssl",
+    "turn-server-rustls",
     "api-tests",
     "fuzz"
 ]

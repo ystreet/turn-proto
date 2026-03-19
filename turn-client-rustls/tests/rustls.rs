@@ -15,21 +15,25 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use core::time::Duration;
 use std::net::SocketAddr;
-use stun_proto::agent::Transmit;
-use stun_proto::Instant;
-use tracing::{debug, trace};
-use turn_client_proto::rustls::TurnClientRustls;
 
-use turn_types::message::CREATE_PERMISSION;
-use turn_types::stun::message::{Message, MessageType, MessageWriteVec, TransactionId};
-use turn_types::stun::prelude::MessageWrite;
-use turn_types::{AddressFamily, TransportType, TurnCredentials};
+use turn_client_proto::types::message::CREATE_PERMISSION;
+use turn_client_proto::types::stun::message::{
+    Message, MessageType, MessageWriteVec, TransactionId,
+};
+use turn_client_proto::types::stun::prelude::MessageWrite;
+use turn_client_proto::types::Instant;
+use turn_client_proto::types::{AddressFamily, TransportType, TurnCredentials};
 
 use turn_client_proto::api::*;
-use turn_server_proto::api::{TurnServerApi, TurnServerPollRet};
-use turn_server_proto::rustls::RustlsTurnServer;
+
+use turn_server_rustls::api::{TurnServerApi, TurnServerPollRet};
+use turn_server_rustls::RustlsTurnServer;
+
+use turn_client_rustls::TurnClientRustls;
 
 use api_tests::*;
+
+use tracing::{debug, trace};
 
 use rcgen::CertifiedKey;
 use rustls::crypto::ring as crypto_provider;
@@ -351,7 +355,7 @@ fn test_turn_rustls_offpath_data() {
     let now = create_permission(&mut test, now);
     let data = Message::builder(
         MessageType::from_class_method(
-            turn_types::stun::message::MessageClass::Error,
+            turn_client_proto::types::stun::message::MessageClass::Error,
             CREATE_PERMISSION,
         ),
         TransactionId::generate(),

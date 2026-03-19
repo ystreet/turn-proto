@@ -46,9 +46,6 @@ extern crate std;
 pub mod api;
 pub mod server;
 
-#[cfg(feature = "rustls")]
-pub mod rustls;
-
 pub use stun_proto as stun;
 pub use turn_types as types;
 
