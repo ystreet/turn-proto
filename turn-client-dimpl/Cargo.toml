@@ -16,7 +16,7 @@ rust-version = "1.85.0"
 [dependencies]
 dimpl = "0.4"
 stun-proto = "2"
-turn-client-proto = { version = "0.6.0", path = "../turn-client-proto" }
+turn-client-proto = { version = "0.7.0", path = "../turn-client-proto" }
 tracing = { version = "0.1", default-features = false, features = ["attributes"] }
 
 [dev-dependencies]

@@ -17,11 +17,11 @@ std = []
 
 [dependencies]
 openssl.workspace = true
-turn-server-proto = { version = "0.6.0", path = "../turn-server-proto" }
+turn-server-proto.workspace = true
 tracing = { version = "0.1", default-features = false, features = ["attributes"] }
 
 [dev-dependencies]
-turn-client-proto = { version = "0.6.0", path = "../turn-client-proto" }
+turn-client-proto.workspace = true
 tracing = { version = "0.1", default-features = false, features = ["attributes", "std"] }
 tracing-subscriber = "0.3"
 

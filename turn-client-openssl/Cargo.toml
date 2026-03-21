@@ -14,7 +14,7 @@ rust-version.workspace = true
 [dependencies]
 openssl.workspace = true
 stun-proto = "2"
-turn-client-proto = { version = "0.6.0", path = "../turn-client-proto" }
+turn-client-proto.workspace = true
 tracing = { version = "0.1", default-features = false, features = ["attributes"] }
 
 [dev-dependencies]

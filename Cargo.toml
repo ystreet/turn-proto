@@ -24,15 +24,15 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 repository = "https://github.com/ystreet/turn-proto"
 edition = "2021"
 rust-version = "1.80.0"
 
 [workspace.dependencies]
-turn-client-proto = { version = "0.6.0", path = "turn-client-proto" }
-turn-server-proto = { version = "0.6.0", path = "turn-server-proto" }
-turn-types = { version = "0.6.0", path = "turn-types", default-features = false }
+turn-client-proto = { version = "0.7.0", path = "turn-client-proto" }
+turn-server-proto = { version = "0.7.0", path = "turn-server-proto" }
+turn-types = { version = "0.7.0", path = "turn-types", default-features = false }
 api-tests = { path = "api-tests" }
 
 base64 = "0.22"

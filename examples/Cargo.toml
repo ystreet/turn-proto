@@ -12,7 +12,7 @@ edition = "2024"
 [workspace]
 
 [dependencies]
-turn-client-proto = { version = "0.6.0", path = "../turn-client-proto" }
+turn-client-proto = { version = "0.7.0", path = "../turn-client-proto" }
 turn-client-dimpl = { version = "0.1.0", path = "../turn-client-dimpl" }
 turn-client-openssl = { version = "0.1.0", path = "../turn-client-openssl" }
 turn-client-rustls = { version = "0.1.0", path = "../turn-client-rustls" }
