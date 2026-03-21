@@ -25,7 +25,7 @@ checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
 name = "api-tests"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "stun-proto",
  "tracing",
@@ -1424,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "turn-client-proto"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "api-tests",
  "byteorder",
@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "turn-fuzz"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "arbitrary",
  "libfuzzer-sys",
@@ -1481,7 +1481,7 @@ dependencies = [
 
 [[package]]
 name = "turn-server-proto"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "byteorder",
  "criterion",
@@ -1511,7 +1511,7 @@ dependencies = [
 
 [[package]]
 name = "turn-types"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "byteorder",
  "stun-proto",
