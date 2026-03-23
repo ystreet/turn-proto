@@ -127,7 +127,7 @@ impl TurnClientApi for TurnClientDimpl {
         let mut earliest_wait = None;
         loop {
             let ret = self.dtls.poll_output(&mut out);
-            tracing::error!("dtls poll ret {ret:?}");
+            tracing::trace!("dtls poll ret {ret:?}");
             match ret {
                 dimpl::Output::Packet(p) => {
                     self.pending_write.push_back(Transmit::new(
@@ -140,7 +140,7 @@ impl TurnClientApi for TurnClientDimpl {
                 }
                 dimpl::Output::Timeout(time) => {
                     let wait = Instant::from_nanos((time - self.base_instant).as_nanos() as i64);
-                    tracing::error!(
+                    tracing::trace!(
                         "time {time:?} base {:?} wait {wait:?} now {now:?}",
                         self.base_instant
                     );
