@@ -72,9 +72,9 @@ impl TurnClientUdp {
         fields(allocation_transport = %config.allocation_transport(),)
     )]
     pub fn allocate(local_addr: SocketAddr, remote_addr: SocketAddr, config: TurnConfig) -> Self {
-        let stun_agent = StunAgent::builder(TransportType::Udp, local_addr)
-            .remote_addr(remote_addr)
-            .build();
+        let stun_agent =
+            StunAgent::builder(TransportType::Udp, local_addr).remote_addr(remote_addr);
+        let stun_agent = config.apply_to_stun_builder(stun_agent).build();
         if config.allocation_transport() != TransportType::Udp {
             panic!("Attempt made to create a UDP TURN client without a UDP allocation");
         }

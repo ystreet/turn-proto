@@ -16,6 +16,8 @@
 use alloc::vec::Vec;
 use core::net::{IpAddr, SocketAddr};
 use core::ops::Range;
+use core::time::Duration;
+use stun_proto::agent::StunAgentBuilder;
 use stun_proto::auth::Feature;
 use turn_types::prelude::DelayedTransmitBuild;
 use turn_types::stun::message::IntegrityAlgorithm;
@@ -144,7 +146,18 @@ pub struct TurnConfig {
     credentials: TurnCredentials,
     supported_integrity: smallvec::SmallVec<[IntegrityAlgorithm; 2]>,
     anonymous_username: Feature,
+    rto: Option<RequestRto>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RequestRto {
+    initial: Duration,
+    max: Duration,
+    retransmits: u32,
+    final_retransmit_timeout: Duration,
+}
+
+impl RequestRto {}
 
 impl TurnConfig {
     /// Construct a new [`TurnConfig`] with the provided credentials.
@@ -169,6 +182,7 @@ impl TurnConfig {
             credentials,
             supported_integrity: smallvec::smallvec![IntegrityAlgorithm::Sha1],
             anonymous_username: Feature::Auto,
+            rto: None,
         }
     }
 
@@ -277,6 +291,53 @@ impl TurnConfig {
     /// [`Userhash`](stun_proto::types::attribute::Userhash) attribute.
     pub fn anonymous_username(&self) -> Feature {
         self.anonymous_username
+    }
+
+    /// Configure the default timeouts and retransmissions for each STUN request.
+    ///
+    /// - `initial` - the initial time between consecutive transmissions. If 0, or 1, then only a
+    ///   single request will be performed.
+    /// - `max` - the maximum amount of time between consecutive retransmits.
+    /// - `retransmits` - the total number of transmissions of the request.
+    /// - `final_retransmit_timeout` - the amount of time after the final transmission to wait
+    ///   for a response before considering the request as having timed out.
+    ///
+    /// As specified in RFC 8489, `initial_rto` should be >= 500ms (unless specific information is
+    /// available on the RTT, `max` is `Duration::MAX`, `retransmits` has a default value of 7,
+    /// and `last_retransmit_timeout` should be `16 * initial_rto`.
+    ///
+    /// STUN transactions over TCP will only send a single request and have a timeout of the sum of
+    /// the timeouts of a UDP transaction.
+    pub fn set_request_retransmits(
+        &mut self,
+        initial: Duration,
+        max: Duration,
+        retransmits: u32,
+        final_retransmit_timeout: Duration,
+    ) {
+        let rto = self.rto.get_or_insert(RequestRto {
+            initial,
+            max,
+            retransmits,
+            final_retransmit_timeout,
+        });
+        rto.initial = initial;
+        rto.max = max;
+        rto.retransmits = retransmits;
+        rto.final_retransmit_timeout = final_retransmit_timeout;
+    }
+
+    pub(crate) fn apply_to_stun_builder(&self, builder: StunAgentBuilder) -> StunAgentBuilder {
+        if let Some(rto) = self.rto.as_ref() {
+            builder.request_retransmits(
+                rto.initial,
+                rto.max,
+                rto.retransmits,
+                rto.final_retransmit_timeout,
+            )
+        } else {
+            builder
+        }
     }
 }
 

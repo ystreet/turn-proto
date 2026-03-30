@@ -90,9 +90,9 @@ impl TurnClientTcp {
         )
     )]
     pub fn allocate(local_addr: SocketAddr, remote_addr: SocketAddr, config: TurnConfig) -> Self {
-        let stun_agent = StunAgent::builder(TransportType::Tcp, local_addr)
-            .remote_addr(remote_addr)
-            .build();
+        let stun_agent =
+            StunAgent::builder(TransportType::Tcp, local_addr).remote_addr(remote_addr);
+        let stun_agent = config.apply_to_stun_builder(stun_agent).build();
 
         Self {
             protocol: TurnClientProtocol::new(stun_agent, config),

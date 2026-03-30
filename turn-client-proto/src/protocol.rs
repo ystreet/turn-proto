@@ -2713,18 +2713,25 @@ mod tests {
         allocation_transport: TransportType,
         families: &[AddressFamily],
     ) -> TurnClientProtocol {
-        let (local_addr, remote_addr) = generate_addresses();
         let credentials = TurnCredentials::new("tuser", "tpass");
 
-        let stun_agent = StunAgent::builder(client_transport, local_addr)
-            .remote_addr(remote_addr)
-            .build();
         let mut config = TurnConfig::new(credentials);
         config.set_allocation_transport(allocation_transport);
         config.set_address_family(families[0]);
         for family in &families[1..] {
             config.add_address_family(*family);
         }
+        new_protocol_with_config(client_transport, config)
+    }
+
+    fn new_protocol_with_config(
+        client_transport: TransportType,
+        config: TurnConfig,
+    ) -> TurnClientProtocol {
+        let (local_addr, remote_addr) = generate_addresses();
+
+        let stun_agent = StunAgent::builder(client_transport, local_addr).remote_addr(remote_addr);
+        let stun_agent = config.apply_to_stun_builder(stun_agent).build();
         let client = TurnClientProtocol::new(stun_agent, config);
         assert_eq!(client.transport(), client_transport);
         assert_eq!(client.local_addr(), local_addr);
@@ -2916,6 +2923,42 @@ mod tests {
             let _transmit = client.poll_transmit(now);
         }
         check_allocate_reply_failed(&mut client, TurnProtocolRecv::Handled, now + EXPIRY_BUFFER);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_initial_allocate_custom_timeout() {
+        let _log = crate::tests::test_init_log();
+        let mut now = Instant::ZERO;
+        let mut config = TurnConfig::new(TurnCredentials::new("tuser", "tpass"));
+        config.set_request_retransmits(
+            Duration::from_millis(600),
+            Duration::from_secs(1),
+            3,
+            Duration::from_secs(3),
+        );
+        let mut client = new_protocol_with_config(TransportType::Udp, config);
+        let _transmit = client.poll_transmit(now).unwrap();
+        let TurnPollRet::WaitUntil(new_now) = client.poll(now) else {
+            unreachable!();
+        };
+        assert_eq!(now + Duration::from_millis(600), new_now);
+        now = new_now;
+        let _transmit = client.poll_transmit(now);
+        let TurnPollRet::WaitUntil(new_now) = client.poll(now) else {
+            unreachable!();
+        };
+        assert_eq!(now + Duration::from_secs(1), new_now);
+        now = new_now;
+        let _transmit = client.poll_transmit(now);
+        let TurnPollRet::WaitUntil(new_now) = client.poll(now) else {
+            unreachable!();
+        };
+        assert_eq!(now + Duration::from_secs(3), new_now);
+        now = new_now;
+        let TurnPollRet::Closed = client.poll(now) else {
+            unreachable!();
+        };
+        check_allocate_reply_failed(&mut client, TurnProtocolRecv::Handled, now);
     }
 
     #[test]
