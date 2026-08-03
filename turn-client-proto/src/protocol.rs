@@ -367,7 +367,11 @@ impl TurnClientProtocol {
                 });
                 transaction_id.push(new_transaction_id);
                 *state = AuthState::Authenticating(transaction_id.clone());
-                stun_agent.handle_stun_message(msg, stun_agent.remote_addr().unwrap());
+                stun_agent.handle_stun_message_with_time(
+                    msg,
+                    stun_agent.remote_addr().unwrap(),
+                    now,
+                );
                 resent = true;
             }
         }
@@ -392,7 +396,11 @@ impl TurnClientProtocol {
                     is_stun_request: true,
                 });
                 alloc.pending_refresh.push((transaction_id, lifetime));
-                stun_agent.handle_stun_message(msg, stun_agent.remote_addr().unwrap());
+                stun_agent.handle_stun_message_with_time(
+                    msg,
+                    stun_agent.remote_addr().unwrap(),
+                    now,
+                );
                 resent = true;
                 break 'outer;
             }
@@ -415,7 +423,11 @@ impl TurnClientProtocol {
                     transmit,
                     is_stun_request: true,
                 });
-                stun_agent.handle_stun_message(msg, stun_agent.remote_addr().unwrap());
+                stun_agent.handle_stun_message_with_time(
+                    msg,
+                    stun_agent.remote_addr().unwrap(),
+                    now,
+                );
                 channel_resent = Some(new_transaction_id);
                 resent = true;
                 break;
@@ -435,7 +447,11 @@ impl TurnClientProtocol {
                         transmit,
                         is_stun_request: true,
                     });
-                    stun_agent.handle_stun_message(msg, stun_agent.remote_addr().unwrap());
+                    stun_agent.handle_stun_message_with_time(
+                        msg,
+                        stun_agent.remote_addr().unwrap(),
+                        now,
+                    );
                     channel_resent = Some(transaction_id);
                     resent = true;
                     break;
@@ -458,7 +474,11 @@ impl TurnClientProtocol {
                     transmit,
                     is_stun_request: true,
                 });
-                stun_agent.handle_stun_message(msg, stun_agent.remote_addr().unwrap());
+                stun_agent.handle_stun_message_with_time(
+                    msg,
+                    stun_agent.remote_addr().unwrap(),
+                    now,
+                );
                 resent = true;
                 break 'outer;
             }
@@ -477,7 +497,11 @@ impl TurnClientProtocol {
                         transmit,
                         is_stun_request: true,
                     });
-                    stun_agent.handle_stun_message(msg, stun_agent.remote_addr().unwrap());
+                    stun_agent.handle_stun_message_with_time(
+                        msg,
+                        stun_agent.remote_addr().unwrap(),
+                        now,
+                    );
                     resent = true;
                     break 'outer;
                 }
@@ -607,7 +631,7 @@ impl TurnClientProtocol {
             }
             Err(_e) => return TurnProtocolRecv::Ignored,
         }
-        if !stun_agent.handle_stun_message(&msg, from) {
+        if !stun_agent.handle_stun_message_with_time(&msg, from, now) {
             return TurnProtocolRecv::Ignored;
         }
         if msg.has_class(stun_proto::types::message::MessageClass::Request) {
@@ -1150,10 +1174,11 @@ impl TurnClientProtocol {
                         return TurnProtocolRecv::Ignored;
                     }
                 };
-                if !self
-                    .stun_agent
-                    .handle_stun_message(&transmit.data, transmit.from)
-                {
+                if !self.stun_agent.handle_stun_message_with_time(
+                    &transmit.data,
+                    transmit.from,
+                    now,
+                ) {
                     return TurnProtocolRecv::Ignored;
                 }
                 if !resend {
@@ -1214,7 +1239,10 @@ impl TurnClientProtocol {
                         }
                     }
                 }
-                if !self.stun_agent.handle_stun_message(&msg, transmit.from) {
+                if !self
+                    .stun_agent
+                    .handle_stun_message_with_time(&msg, transmit.from, now)
+                {
                     return TurnProtocolRecv::Handled;
                 }
                 if !msg.is_response() || !transaction_id.contains(&msg.transaction_id()) {
@@ -1433,10 +1461,11 @@ impl TurnClientProtocol {
                     }
                     Err(_e) => failure = true,
                 };
-                if !self
-                    .stun_agent
-                    .handle_stun_message(&transmit.data, transmit.from)
-                {
+                if !self.stun_agent.handle_stun_message_with_time(
+                    &transmit.data,
+                    transmit.from,
+                    now,
+                ) {
                     failure = true;
                 }
                 if !transmit.data.has_class(MessageClass::Success) {

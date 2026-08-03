@@ -14,7 +14,6 @@ allow = [
     "BSD-3-Clause",
     "Unicode-3.0",
     "ISC",
-    "OpenSSL",
 ]
 confidence-threshold = 0.9
 
@@ -24,9 +23,9 @@ wildcards = "allow"
 highlight = "all"
 skip-tree = [
     { crate = "windows-sys@0.52", reason = "a foundational crate for many that bumps far too frequently to ever have a shared version" },
-    { crate = "windows-sys@0.59", reason = "a foundational crate for many that bumps far too frequently to ever have a shared version" },
-    { crate = "windows-sys@0.60", reason = "a foundational crate for many that bumps far too frequently to ever have a shared version" },
     { crate = "getrandom@0.2", reason = "ring depends on an older version of the getrandom crate" },
+    { crate = "syn@2", reason = "syn 2 is used by some crates that have not updated yet" },
+    { crate = "syn@3", reason = "syn 3 is used by some crates that have updated already" },
 ]
 
 [sources]
