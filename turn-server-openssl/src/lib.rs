@@ -8,7 +8,7 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! # turn-server-dimpl
+//! # turn-server-openssl
 //!
 //! A TURN server that can handle TLS client connections.
 //!
