@@ -8,11 +8,12 @@
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! # turn-server-dimpl
+//! # turn-server-rustls
 //!
-//! A TURN server that can handle DTLS client connections using `dimpl`.
+//! A TURN server that can handle DTLS client connections using `Rustls`.
 //!
-//! `turn-server-dimpl` provides a sans-IO API for a TURN server communicating with many TURN clients.
+//! `turn-server-rustls` provides a sans-IO API for a TURN server communicating with many TURN
+//! clients.
 //!
 //! Relevant standards:
 //! - [RFC5766]: Traversal Using Relays around NAT (TURN).
