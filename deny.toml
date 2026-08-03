@@ -5,6 +5,9 @@ exclude-unpublished = true
 
 [advisories]
 db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = [
+  { id = "RUSTSEC-2026-0009", reason = "`time` is only used by rcgen a dev-only dependency" },
+]
 
 [licenses]
 allow = [
