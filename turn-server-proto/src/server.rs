@@ -682,7 +682,12 @@ impl TurnServerProtocol {
         let mut modified = false;
         let mut removed_client = false;
         if request_lifetime == 0 {
-            error!("deleting allocation");
+            info!(
+                "request to delete allocation ({}: local: {} -> {} remote) with requested family {requested_family:?}",
+                transmit.transport,
+                transmit.to,
+                transmit.from
+            );
             if let Some(family) = requested_family {
                 if let Some(allocation_idx) = client.allocations.iter().position(|allocation| {
                     (family == AddressFamily::IPV4 && allocation.addr.is_ipv4())
@@ -754,7 +759,6 @@ impl TurnServerProtocol {
         };
 
         if request_lifetime == 0 {
-            error!("{:?}", tcp_stun_change);
             info!(
                 "Successfully deleted allocation {}, client {} to {}",
                 transmit.transport, transmit.from, transmit.to
@@ -1145,7 +1149,6 @@ impl TurnServerProtocol {
             ));
         };
 
-        error!("now: {now}, expires {}", alloc.expires_at);
         if alloc.expires_at < now {
             trace!("allocation has expired");
             // allocation has expired
