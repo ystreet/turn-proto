@@ -177,9 +177,7 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
                     transmit.to,
                 )
             },
-            |transmit| {
-                test.server.recv(transmit, now).unwrap();
-            },
+            |transmit| test.server.recv(transmit, now).unwrap(),
             criterion::BatchSize::SmallInput,
         )
     });
@@ -226,7 +224,8 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
                     Ok(test.relayed_addr),
                     now,
                 );
-                let _transmit = test.server.poll_transmit(now).unwrap();
+                let transmit = test.server.poll_transmit(now).unwrap();
+                (test, transmit)
             },
             criterion::BatchSize::SmallInput,
         )
@@ -274,7 +273,8 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
                     Err(turn_server_proto::api::SocketAllocateError::InsufficientCapacity),
                     now,
                 );
-                let _transmit = test.server.poll_transmit(now).unwrap();
+                let transmit = test.server.poll_transmit(now).unwrap();
+                (test, transmit)
             },
             criterion::BatchSize::SmallInput,
         )
@@ -304,7 +304,8 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
                 (test, transmit)
             },
             |(mut test, transmit)| {
-                let _transmit = test.server.recv(transmit, now).unwrap();
+                let transmit = test.server.recv(transmit, now).unwrap();
+                (test, transmit)
             },
             criterion::BatchSize::SmallInput,
         )
@@ -335,7 +336,8 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
                 (test, transmit)
             },
             |(mut test, transmit)| {
-                let _transmit = test.server.recv(transmit, now).unwrap();
+                let transmit = test.server.recv(transmit, now).unwrap();
+                (test, transmit)
             },
             criterion::BatchSize::SmallInput,
         )
@@ -385,9 +387,7 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
                         transmit.to,
                     )
                 },
-                |transmit| {
-                    let _transmit = test.server.recv(transmit, now).unwrap();
-                },
+                |transmit| test.server.recv(transmit, now).unwrap(),
                 criterion::BatchSize::SmallInput,
             )
         });
@@ -427,9 +427,7 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
                         transmit.to,
                     )
                 },
-                |transmit| {
-                    let _transmit = test.server.recv(transmit, now).unwrap();
-                },
+                |transmit| test.server.recv(transmit, now).unwrap(),
                 criterion::BatchSize::SmallInput,
             )
         });
@@ -474,9 +472,7 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
                         transmit.to,
                     )
                 },
-                |transmit| {
-                    let _transmit = test.server.recv(transmit, now).unwrap();
-                },
+                |transmit| test.server.recv(transmit, now).unwrap(),
                 criterion::BatchSize::SmallInput,
             )
         });
@@ -511,9 +507,7 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
                         transmit.to,
                     )
                 },
-                |transmit| {
-                    let _transmit = test.server.recv(transmit, now).unwrap();
-                },
+                |transmit| test.server.recv(transmit, now).unwrap(),
                 criterion::BatchSize::SmallInput,
             )
         });
