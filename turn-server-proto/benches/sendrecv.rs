@@ -146,6 +146,15 @@ impl<T: TurnClientApi> TurnTest<T> {
 
 static SIZES: [usize; 3] = [32, 1024, 16000];
 
+fn default_config(credentials: TurnCredentials) -> TurnConfig {
+    let mut config = TurnConfig::new(credentials);
+    config.set_anonymous_username(stun_proto::auth::Feature::Disabled);
+    config.set_address_family(turn_types::AddressFamily::IPV4);
+    config.set_supported_integrity(turn_types::stun::message::IntegrityAlgorithm::Sha1);
+    config.set_allocation_transport(TransportType::Udp);
+    config
+}
+
 fn bench_turn_server_sendrecv(c: &mut Criterion) {
     let mut test = TurnTest::new(
         |local_addr: SocketAddr, remote_addr: SocketAddr, credentials: TurnCredentials| {
@@ -182,8 +191,11 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
                     |local_addr: SocketAddr,
                      remote_addr: SocketAddr,
                      credentials: TurnCredentials| {
-                        let config = TurnConfig::new(credentials);
-                        TurnClientUdp::allocate(local_addr, remote_addr, config)
+                        TurnClientUdp::allocate(
+                            local_addr,
+                            remote_addr,
+                            default_config(credentials),
+                        )
                     },
                 );
                 let transmit = test.client.poll_transmit(now).unwrap();
@@ -227,8 +239,11 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
                     |local_addr: SocketAddr,
                      remote_addr: SocketAddr,
                      credentials: TurnCredentials| {
-                        let config = TurnConfig::new(credentials);
-                        TurnClientUdp::allocate(local_addr, remote_addr, config)
+                        TurnClientUdp::allocate(
+                            local_addr,
+                            remote_addr,
+                            default_config(credentials),
+                        )
                     },
                 );
                 let transmit = test.client.poll_transmit(now).unwrap();
@@ -272,8 +287,11 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
                     |local_addr: SocketAddr,
                      remote_addr: SocketAddr,
                      credentials: TurnCredentials| {
-                        let config = TurnConfig::new(credentials);
-                        TurnClientUdp::allocate(local_addr, remote_addr, config)
+                        TurnClientUdp::allocate(
+                            local_addr,
+                            remote_addr,
+                            default_config(credentials),
+                        )
                     },
                 );
                 let now = test.allocate(now);
@@ -299,8 +317,11 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
                     |local_addr: SocketAddr,
                      remote_addr: SocketAddr,
                      credentials: TurnCredentials| {
-                        let config = TurnConfig::new(credentials);
-                        TurnClientUdp::allocate(local_addr, remote_addr, config)
+                        TurnClientUdp::allocate(
+                            local_addr,
+                            remote_addr,
+                            default_config(credentials),
+                        )
                     },
                 );
                 let now = test.allocate(now);
@@ -418,8 +439,7 @@ fn bench_turn_server_sendrecv(c: &mut Criterion) {
     let mut group = c.benchmark_group("Recv");
     let mut test = TurnTest::new(
         |local_addr: SocketAddr, remote_addr: SocketAddr, credentials: TurnCredentials| {
-            let config = TurnConfig::new(credentials);
-            TurnClientUdp::allocate(local_addr, remote_addr, config)
+            TurnClientUdp::allocate(local_addr, remote_addr, default_config(credentials))
         },
     );
     let now = Instant::ZERO;
