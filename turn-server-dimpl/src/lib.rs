@@ -31,7 +31,6 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(clippy::std_instead_of_core)]
 #![deny(clippy::std_instead_of_alloc)]
-#![no_std]
 
 extern crate alloc;
 
