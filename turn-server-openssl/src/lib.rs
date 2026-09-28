@@ -189,7 +189,7 @@ impl std::io::Read for OsslBio {
 
         buf[..max].copy_from_slice(&self.incoming[..max]);
         if max == len {
-            self.incoming.truncate(0);
+            self.incoming.clear();
         } else {
             self.incoming.drain(..max);
         }

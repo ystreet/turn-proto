@@ -179,7 +179,7 @@ impl std::io::Read for OsslBio {
 
         buf[..max].copy_from_slice(&self.incoming[..max]);
         if max == len {
-            self.incoming.truncate(0);
+            self.incoming.clear();
         } else {
             self.incoming.drain(..max);
         }
@@ -363,16 +363,14 @@ impl TurnClientApi for TurnClientOpensslTls {
                 Ok(stream) => stream,
                 Err(e) => {
                     warn!("handshake error: {e:?}");
-                    if let Some(outgoing) = socket.handshake.inner_mut().pop_outgoing() {
-                        return Some(Transmit::new(
+                    return socket.handshake.inner_mut().pop_outgoing().map(|outgoing| {
+                        Transmit::new(
                             outgoing.into_boxed_slice().into(),
                             client_transport,
                             socket.local_addr,
                             socket.remote_addr,
-                        ));
-                    } else {
-                        return None;
-                    }
+                        )
+                    });
                 }
             };
             for data in socket.pending_write.drain(..) {
