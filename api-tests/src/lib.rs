@@ -1007,14 +1007,9 @@ pub fn turn_create_permission_timeout<A: TurnClientApi, S: TurnServerApi>(
     let transmit = test.client.poll_transmit(expiry).unwrap();
     let msg = Message::from_bytes(&transmit.data).unwrap();
     assert_eq!(msg.method(), CREATE_PERMISSION);
-    // drop the create permission refresh (and retransmits)
+    // drop the create permission refresh, its retransmits and retries
     let mut expiry = now;
-    let n_transmits = if test.client.transport() == TransportType::Udp {
-        8
-    } else {
-        2
-    };
-    for _i in 0..n_transmits {
+    while expiry < now + EXPIRY_BUFFER {
         let TurnPollRet::WaitUntil(new_now) = test.client.poll(expiry) else {
             unreachable!()
         };

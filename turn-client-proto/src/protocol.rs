@@ -264,9 +264,6 @@ impl TurnClientProtocol {
                     "Received error response to create permission request for {}",
                     permission.ip
                 );
-                permission.expired = true;
-                permission.expires_at = now;
-                permission.pending_refresh.clear();
                 pending_events.push_front(TurnEvent::PermissionCreateFailed(
                     allocations[alloc_idx].transport,
                     permission.ip,
@@ -278,7 +275,6 @@ impl TurnClientProtocol {
                     permission.ip,
                 ));
                 permission.expires_at = now + PERMISSION_DURATION;
-                permission.expired = false;
                 allocations[alloc_idx].permissions.push(permission);
             }
             true
@@ -312,10 +308,9 @@ impl TurnClientProtocol {
                     "Received error response to create permission request for {}",
                     permission.ip
                 );
-                permission.expired = true;
-                permission.expires_at = now;
                 pending_events
                     .push_back(TurnEvent::PermissionCreateFailed(transport, permission.ip));
+                allocations[alloc_idx].permissions.swap_remove(existing_idx);
             } else {
                 permission.expires_at = now + PERMISSION_DURATION;
             }
@@ -848,7 +843,8 @@ impl TurnClientProtocol {
                                 transport,
                                 channel.peer_addr,
                             ));
-                            channel.expires_at = now;
+                            let channel = allocations[alloc_idx].channels.swap_remove(existing_idx);
+                            allocations[alloc_idx].expired_channels.push(channel);
                             return TurnProtocolRecv::Handled;
                         }
                         info!("Succesfully created/refreshed {channel:?}");
@@ -1104,7 +1100,7 @@ impl TurnClientProtocol {
                 && allocation
                     .permissions
                     .iter()
-                    .any(|permission| !permission.expired && permission.ip == to)
+                    .any(|permission| permission.ip == to)
         })
     }
 
@@ -1590,7 +1586,6 @@ impl TurnClientProtocol {
                 allocation
                     .permissions
                     .iter()
-                    .filter(|permission| !permission.expired)
                     .map(|permission| permission.ip)
             })
     }
@@ -1655,6 +1650,10 @@ impl TurnClientProtocol {
             }
             AuthState::Authenticated => {
                 let mut remove_allocation_indices = vec![];
+                // poll_transmit() will not send a request before this
+                let request_ready = self.last_send_time.map_or(now, |last_send| {
+                    (last_send + MIN_STUN_REQUEST_CADENCE).max(now)
+                });
                 for (idx, alloc) in self.allocations.iter_mut().enumerate() {
                     // TCP socket creation from the user.
                     for pending in alloc.pending_tcp_allocate.iter_mut() {
@@ -1695,7 +1694,8 @@ impl TurnClientProtocol {
                         }) {
                             warn!("Refresh timed out or was cancelled");
                             if alloc.expires_at > now {
-                                expires_at = alloc.expires_at;
+                                alloc.pending_refresh.clear();
+                                expires_at = request_ready;
                             } else {
                                 remove_allocation_indices.push(idx);
                                 continue;
@@ -1711,7 +1711,7 @@ impl TurnClientProtocol {
                             continue;
                         }
                     } else if alloc.expires_at > now {
-                        expires_at = alloc.refresh_time().max(now);
+                        expires_at = alloc.refresh_time().max(request_ready);
                     } else {
                         warn!(
                             "Allocation {} {} timed out",
@@ -1760,7 +1760,7 @@ impl TurnClientProtocol {
 
                     // refresh TURN channel allocation
                     let mut remove_chan_idx = None;
-                    for (chan_idx, channel) in alloc.channels.iter().enumerate() {
+                    for (chan_idx, channel) in alloc.channels.iter_mut().enumerate() {
                         trace!(
                             "channel {} {} {} refresh time in {:?}",
                             channel.id,
@@ -1768,28 +1768,31 @@ impl TurnClientProtocol {
                             channel.peer_addr,
                             channel.refresh_time() - now
                         );
-                        if !channel.pending_refresh.is_empty() {
-                            if cancelled_transaction.is_some_and(|cancelled| {
-                                channel.pending_refresh.contains(&cancelled)
-                            }) {
-                                // TODO: need to eventually fail when the permission times out.
-                                warn!("{} channel {} from {} to {} refresh timed out or was cancelled", alloc.transport, channel.id, alloc.relayed_address, channel.peer_addr);
-                                expires_at = channel.expires_at;
-                                remove_chan_idx = Some(chan_idx);
-                            } else if channel.expires_at <= now {
-                                info!(
-                                    "{} channel {} from {} to {} has expired",
-                                    alloc.transport,
-                                    channel.id,
-                                    alloc.relayed_address,
-                                    channel.peer_addr
-                                );
-                                remove_chan_idx = Some(chan_idx);
-                            } else {
-                                expires_at = expires_at.min(channel.expires_at);
-                            }
+                        if channel.expires_at <= now {
+                            info!(
+                                "{} channel {} from {} to {} has expired",
+                                alloc.transport,
+                                channel.id,
+                                alloc.relayed_address,
+                                channel.peer_addr
+                            );
+                            remove_chan_idx = Some(chan_idx);
+                        } else if cancelled_transaction
+                            .is_some_and(|cancelled| channel.pending_refresh.contains(&cancelled))
+                        {
+                            warn!(
+                                "{} channel {} from {} to {} refresh timed out or was cancelled",
+                                alloc.transport,
+                                channel.id,
+                                alloc.relayed_address,
+                                channel.peer_addr
+                            );
+                            channel.pending_refresh.clear();
+                            expires_at = expires_at.min(request_ready);
+                        } else if !channel.pending_refresh.is_empty() {
+                            expires_at = expires_at.min(channel.expires_at);
                         } else {
-                            expires_at = expires_at.min(channel.refresh_time().max(now));
+                            expires_at = expires_at.min(channel.refresh_time().max(request_ready));
                         }
                     }
                     if let Some(chan_idx) = remove_chan_idx {
@@ -1799,6 +1802,7 @@ impl TurnClientProtocol {
                         alloc.expired_channels.push(channel);
                         self.pending_events
                             .push_back(TurnEvent::ChannelCreateFailed(alloc.transport, peer_addr));
+                        expires_at = now;
                     }
                     alloc.expired_channels.retain(|expired| {
                         if expired.expires_at + CHANNEL_REMOVE_DURATION >= now {
@@ -1821,33 +1825,36 @@ impl TurnClientProtocol {
                             permission.ip,
                             permission.refresh_time() - now
                         );
-                        if !permission.pending_refresh.is_empty() {
-                            if cancelled_transaction.is_some_and(|cancelled| {
-                                permission.pending_refresh.contains(&cancelled)
-                            }) {
-                                warn!(
-                                    "permission {} from {} to {} refresh timed out or was cancelled",
-                                    alloc.transport, alloc.relayed_address, permission.ip
-                                );
-                                expires_at = permission.expires_at;
-                            } else if permission.expires_at <= now {
-                                info!(
-                                    "permission {} from {} to {} has expired",
-                                    alloc.transport, alloc.relayed_address, permission.ip
-                                );
-                                permission.expired = true;
-                                self.pending_events
-                                    .push_back(TurnEvent::PermissionCreateFailed(
-                                        alloc.transport,
-                                        permission.ip,
-                                    ));
-                            } else {
-                                expires_at = expires_at.min(permission.expires_at);
-                            }
+                        if permission.expires_at <= now {
+                            info!(
+                                "permission {} from {} to {} has expired",
+                                alloc.transport, alloc.relayed_address, permission.ip
+                            );
+                            self.pending_events
+                                .push_back(TurnEvent::PermissionCreateFailed(
+                                    alloc.transport,
+                                    permission.ip,
+                                ));
+                            expires_at = now;
+                        } else if cancelled_transaction.is_some_and(|cancelled| {
+                            permission.pending_refresh.contains(&cancelled)
+                        }) {
+                            warn!(
+                                "permission {} from {} to {} refresh timed out or was cancelled",
+                                alloc.transport, alloc.relayed_address, permission.ip
+                            );
+                            permission.pending_refresh.clear();
+                            expires_at = expires_at.min(request_ready);
+                        } else if !permission.pending_refresh.is_empty() {
+                            expires_at = expires_at.min(permission.expires_at);
                         } else {
-                            expires_at = expires_at.min(permission.refresh_time().max(now));
+                            expires_at =
+                                expires_at.min(permission.refresh_time().max(request_ready));
                         }
                     }
+                    alloc
+                        .permissions
+                        .retain(|permission| permission.expires_at > now);
 
                     // check for any cancelled tcp CONNECT
                     for (idx, tcp) in alloc.pending_tcp_turn.iter_mut().enumerate() {
@@ -2120,7 +2127,6 @@ impl TurnClientProtocol {
             return Err(CreatePermissionError::NoAllocation);
         };
         let permission = Permission {
-            expired: false,
             expires_at: now,
             ip: peer_addr,
             pending_refresh: vec![],
@@ -2430,7 +2436,6 @@ impl TurnClientProtocol {
 
         // FIXME: update any existing permission
         let permission = Permission {
-            expired: false,
             expires_at: now,
             ip: peer_addr.ip(),
             pending_refresh: vec![],
@@ -2511,13 +2516,13 @@ impl Allocation {
     fn have_permission(&self, peer_addr: IpAddr) -> bool {
         self.permissions
             .iter()
-            .any(|permission| !permission.expired && permission.ip == peer_addr)
+            .any(|permission| permission.ip == peer_addr)
     }
 
     fn have_pending_permission(&self, peer_addr: IpAddr) -> bool {
         self.pending_permissions
             .iter()
-            .any(|(permission, _transaction_id)| !permission.expired && permission.ip == peer_addr)
+            .any(|(permission, _transaction_id)| permission.ip == peer_addr)
     }
 }
 
@@ -2563,7 +2568,6 @@ impl Channel {
 
 #[derive(Debug)]
 struct Permission {
-    expired: bool,
     expires_at: Instant,
     ip: IpAddr,
     pending_refresh: Vec<TransactionId>,
@@ -4157,6 +4161,64 @@ mod tests {
             client.poll_event(),
             Some(TurnEvent::PermissionCreateFailed(_, _))
         ));
+        assert!(client.poll_event().is_none());
+        create_permission(&mut client, now);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_create_permission_refresh_timeout_retry() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        create_permission(&mut client, now);
+        let mut now = wait_advance(&mut client, now);
+        create_permission_success_response(&mut client, generate_xor_peer_address().ip(), now);
+        // drop the refresh until it times out, then answer the retry
+        let answer_at = now + PERMISSION_DURATION - Duration::from_secs(15);
+        loop {
+            let TurnPollRet::WaitUntil(new_now) = client.poll(now) else {
+                unreachable!();
+            };
+            now = new_now;
+            if now >= answer_at {
+                break;
+            }
+            let _transmit = client.poll_transmit(now);
+        }
+        create_permission_refresh_success_response(&mut client, now);
+        let (transport, _relayed) = client.relayed_addresses().next().unwrap();
+        assert!(client.have_permission(transport, generate_xor_peer_address().ip()));
+        assert!(client.poll_event().is_none());
+    }
+
+    #[test]
+    fn test_turn_client_protocol_not_polled_past_expiry() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut client = new_protocol();
+        initial_allocate(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        authenticated_allocate(&mut client, now);
+        channel_bind(&mut client, now);
+        let now = wait_advance(&mut client, now);
+        channel_bind_success_response(&mut client, now);
+        let now = now + CHANNEL_DURATION;
+        assert!(matches!(client.poll(now), TurnPollRet::WaitUntil(wait) if wait == now));
+        assert!(matches!(
+            client.poll_event(),
+            Some(TurnEvent::PermissionCreateFailed(_, _))
+        ));
+        assert!(matches!(
+            client.poll_event(),
+            Some(TurnEvent::ChannelCreateFailed(_, _))
+        ));
+        assert!(client.poll_event().is_none());
+        let (transport, _relayed) = client.relayed_addresses().next().unwrap();
+        assert!(!client.have_permission(transport, generate_xor_peer_address().ip()));
+        assert!(matches!(client.poll(now), TurnPollRet::WaitUntil(wait) if wait > now));
     }
 
     #[test]
