@@ -129,12 +129,34 @@ impl DelayedTransmitBuild for &[u8] {
 pub struct DelayedChannel<T: AsRef<[u8]> + core::fmt::Debug> {
     data: T,
     channel_id: u16,
+    padded: bool,
 }
 
 impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedChannel<T> {
     /// Construct a new [`DelayedChannel`] with the specified channel ID and data.
+    ///
+    /// The result is not padded, as is usual over UDP. Use [`DelayedChannel::new_for_transport`]
+    /// for TCP and TLS.
     pub fn new(channel_id: u16, data: T) -> Self {
-        Self { channel_id, data }
+        Self {
+            channel_id,
+            data,
+            padded: false,
+        }
+    }
+
+    /// Construct a new [`DelayedChannel`] for sending over `transport`.
+    ///
+    /// Over TCP (and TLS over TCP), the channel data is padded with zeros to a multiple of 4
+    /// bytes, as required by [RFC 8656 Section 12.5].
+    ///
+    /// [RFC 8656 Section 12.5]: https://datatracker.ietf.org/doc/html/rfc8656#section-12.5
+    pub fn new_for_transport(channel_id: u16, data: T, transport: TransportType) -> Self {
+        Self {
+            channel_id,
+            data,
+            padded: transport == TransportType::Tcp,
+        }
     }
 }
 
@@ -147,7 +169,12 @@ impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedChannel<T> {
 
 impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedTransmitBuild for DelayedChannel<T> {
     fn len(&self) -> usize {
-        self.data.as_ref().len() + 4
+        let len = self.data.as_ref().len() + 4;
+        if self.padded {
+            crate::tcp::tcp_padded_len(len)
+        } else {
+            len
+        }
     }
 
     fn build(self) -> Vec<u8> {
@@ -155,18 +182,21 @@ impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedTransmitBuild for DelayedChannel<
         let data_len = data.len();
         let mut header = [0; 4];
         self.write_header_into(data_len as u16, &mut header);
-        let mut out = Vec::with_capacity(4 + data_len);
+        let mut out = Vec::with_capacity(self.len());
         out.extend(header.as_slice());
         out.extend_from_slice(data);
+        out.resize(self.len(), 0);
         out
     }
 
     fn write_into(self, dest: &mut [u8]) -> usize {
         let data = self.data.as_ref();
         let data_len = data.len();
+        let len = self.len();
         self.write_header_into(data_len as u16, dest);
         dest[4..4 + data_len].copy_from_slice(data);
-        data_len + 4
+        dest[4 + data_len..len].fill(0);
+        len
     }
 }
 
@@ -269,5 +299,30 @@ mod tests {
             DelayedTransmitBuild::write_into(data.as_slice(), &mut out),
             7
         );
+    }
+
+    #[test]
+    fn test_delayed_channel_padding_follows_transport() {
+        for (data_len, padded_len) in [(0, 4), (1, 8), (3, 8), (4, 8), (5, 12)] {
+            let data = vec![9; data_len];
+            let udp =
+                DelayedChannel::new_for_transport(0x4000, data.as_slice(), TransportType::Udp);
+            assert_eq!(udp.len(), data_len + 4);
+            assert_eq!(udp.build().len(), data_len + 4);
+
+            let tcp =
+                || DelayedChannel::new_for_transport(0x4000, data.as_slice(), TransportType::Tcp);
+            assert_eq!(tcp().len(), padded_len);
+            let built = tcp().build();
+            assert_eq!(built.len(), padded_len);
+            assert_eq!(&built[4..4 + data_len], data.as_slice());
+            assert!(built[4 + data_len..].iter().all(|&byte| byte == 0));
+            // The header carries the unpadded length.
+            assert_eq!(BigEndian::read_u16(&built[2..4]) as usize, data_len);
+
+            let mut out = vec![0xff; padded_len + 3];
+            assert_eq!(tcp().write_into(&mut out), padded_len);
+            assert_eq!(&out[..padded_len], built.as_slice());
+        }
     }
 }

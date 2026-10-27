@@ -549,6 +549,14 @@ impl<A: TurnClientApi, S: TurnServerApi> TurnTest<A, S> {
         assert_eq!(transmit.from, self.client.local_addr());
         assert_eq!(transmit.to, self.server.listen_address());
         let transmit = transmit_send_build(transmit);
+        if transmit.transport == TransportType::Tcp {
+            // RFC 8656 Section 12.5
+            assert_eq!(
+                transmit.data.len() % 4,
+                0,
+                "ChannelData over TCP must be padded"
+            );
+        }
         let transmit = self
             .server
             .recv(transmit, now)
@@ -574,6 +582,13 @@ impl<A: TurnClientApi, S: TurnServerApi> TurnTest<A, S> {
             )
             .unwrap()
             .build();
+        if transmit.transport == TransportType::Tcp {
+            assert_eq!(
+                transmit.data.len() % 4,
+                0,
+                "ChannelData over TCP must be padded"
+            );
+        }
         assert_eq!(transmit.transport, self.client.transport());
         assert_eq!(transmit.from, self.server.listen_address());
         assert_eq!(transmit.to, self.client.local_addr());
@@ -887,6 +902,27 @@ pub fn turn_channel_bind<A: TurnClientApi, S: TurnServerApi>(
     assert_eq!(transport, test.allocation_transport);
     assert_eq!(permission_ip, test.peer_addr.ip());
     test.sendrecv_data_channel(now);
+}
+
+/// Several ChannelData messages in a row whose payloads are not a multiple of 4 bytes. Over TCP each
+/// one is padded (RFC 8656 Section 12.5) and the stream must stay aligned for the next one.
+pub fn turn_channel_bind_unaligned_data<A: TurnClientApi, S: TurnServerApi>(
+    test: &mut TurnTest<A, S>,
+    now: Instant,
+) {
+    let now = test.allocate(now);
+    assert!(matches!(
+        test.client.poll_event(),
+        Some(TurnEvent::AllocationCreated(_, _))
+    ));
+    let now = test.bind_channel(now);
+    assert!(matches!(
+        test.client.poll_event(),
+        Some(TurnEvent::PermissionCreated(_, _))
+    ));
+    for len in [1, 2, 3, 5, 6, 7] {
+        test.sendrecv_data_channel_with_data(&vec![4; len], &vec![5; len + 2], now);
+    }
 }
 
 pub fn turn_peer_incoming_stun<A: TurnClientApi, S: TurnServerApi>(

@@ -105,6 +105,16 @@ fn test_tcp_turn_channel_bind() {
 }
 
 #[test]
+fn test_tcp_turn_channel_bind_unaligned_data() {
+    let _log = test_init_log();
+    let now = Instant::ZERO;
+    for split in TRANSMIT_SPLITS {
+        let mut test = create_test(split);
+        turn_channel_bind_unaligned_data(&mut test, now);
+    }
+}
+
+#[test]
 fn test_tcp_turn_peer_incoming_stun() {
     let _log = test_init_log();
     let now = Instant::ZERO;

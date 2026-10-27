@@ -1534,7 +1534,11 @@ impl TurnClientProtocol {
         if let Some(channel) = self.channel(transport, to) {
             if channel.expires_at >= now {
                 return Ok(TransmitBuild::new(
-                    DelayedMessageOrChannelSend::new_channel(data, channel.id),
+                    DelayedMessageOrChannelSend::new_channel(
+                        data,
+                        channel.id,
+                        self.stun_agent.transport(),
+                    ),
                     self.stun_agent.transport(),
                     self.stun_agent.local_addr(),
                     self.stun_agent.remote_addr().unwrap(),
