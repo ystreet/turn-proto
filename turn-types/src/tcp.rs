@@ -138,16 +138,37 @@ impl AsRef<[u8]> for StoredTcp {
     }
 }
 
+/// The number of bytes a [`ChannelData`] of `channel_len` bytes (including its 4 byte header)
+/// occupies on a TCP or TLS connection.
+///
+/// "Over TCP and TLS-over-TCP, the ChannelData message MUST be padded to a multiple of four bytes
+/// in order to ensure the alignment of subsequent messages." ([RFC 8656 Section 12.5])
+///
+/// [RFC 8656 Section 12.5]: https://datatracker.ietf.org/doc/html/rfc8656#section-12.5
+pub(crate) fn tcp_padded_len(channel_len: usize) -> usize {
+    (channel_len + 3) & !3
+}
+
 /// A TCP buffer for TURN messages.
+///
+/// [`ChannelData`] on TCP is padded to a multiple of 4 bytes ([RFC 8656 Section 12.5]). The padding
+/// is removed: returned channel data always ends at the end of its payload.
+///
+/// [RFC 8656 Section 12.5]: https://datatracker.ietf.org/doc/html/rfc8656#section-12.5
 #[derive(Debug, Default)]
 pub struct TurnTcpBuffer {
     tcp_buffer: Vec<u8>,
+    /// Padding of an already returned [`ChannelData`] that has not been received yet.
+    padding_to_skip: usize,
 }
 
 impl TurnTcpBuffer {
     /// Construct a new [`TurnTcpBuffer`].
     pub fn new() -> Self {
-        Self { tcp_buffer: vec![] }
+        Self {
+            tcp_buffer: vec![],
+            padding_to_skip: 0,
+        }
     }
 
     /// Provide incoming TCP data to parse.
@@ -166,8 +187,10 @@ impl TurnTcpBuffer {
         &mut self,
         transmit: Transmit<T>,
     ) -> Option<IncomingTcp<T>> {
+        let skip = self.padding_to_skip.min(transmit.data.as_ref().len());
+        self.padding_to_skip -= skip;
         if self.tcp_buffer.is_empty() {
-            let data = transmit.data.as_ref();
+            let data = &transmit.data.as_ref()[skip..];
             trace!("Trying to parse incoming data as a complete message/channel");
             let Ok(hdr) = MessageHeader::from_bytes(data) else {
                 let Ok(channel) = ChannelData::parse(data) else {
@@ -180,10 +203,11 @@ impl TurnTcpBuffer {
                     channel.len = channel_len - 4,
                     "Incoming data contains a channel",
                 );
-                if channel_len < data.len() {
-                    self.tcp_buffer.extend_from_slice(&data[channel_len..]);
-                }
-                return Some(IncomingTcp::CompleteChannel(transmit, 0..channel_len));
+                self.consume_channel_padding(data, channel_len);
+                return Some(IncomingTcp::CompleteChannel(
+                    transmit,
+                    skip..skip + channel_len,
+                ));
             };
             let msg_len = MessageHeader::LENGTH + hdr.data_length() as usize;
             debug!(
@@ -198,11 +222,20 @@ impl TurnTcpBuffer {
             if msg_len < data.len() {
                 self.tcp_buffer.extend_from_slice(&data[msg_len..]);
             }
-            return Some(IncomingTcp::CompleteMessage(transmit, 0..msg_len));
+            return Some(IncomingTcp::CompleteMessage(transmit, skip..skip + msg_len));
         }
 
-        self.tcp_buffer.extend_from_slice(transmit.data.as_ref());
+        self.tcp_buffer
+            .extend_from_slice(&transmit.data.as_ref()[skip..]);
         self.poll_recv().map(|recv| recv.into_incoming(transmit))
+    }
+
+    /// Stores the data following a complete channel of `channel_len` bytes at the start of
+    /// `data`, without its padding. Padding that has not arrived yet is skipped once it does.
+    fn consume_channel_padding(&mut self, data: &[u8], channel_len: usize) {
+        let consumed = tcp_padded_len(channel_len).min(data.len());
+        self.padding_to_skip = tcp_padded_len(channel_len) - consumed;
+        self.tcp_buffer.extend_from_slice(&data[consumed..]);
     }
 
     /// Return the next complete message (if any).
@@ -231,15 +264,15 @@ impl TurnTcpBuffer {
                 );
                 return None;
             }
-            let (data, remaining) = self.tcp_buffer.split_at(channel_len);
-            let data_binding = data.to_vec();
+            let buffered = core::mem::take(&mut self.tcp_buffer);
+            let data_binding = buffered[..channel_len].to_vec();
             debug!(
                 channel.id = id,
                 channel.len = channel_data_len,
-                remaining = remaining.len(),
+                remaining = buffered.len() - channel_len,
                 "buffered data contains a channel",
             );
-            self.tcp_buffer = remaining.to_vec();
+            self.consume_channel_padding(&buffered, channel_len);
             return Some(StoredTcp::Channel(data_binding));
         };
         let msg_len = MessageHeader::LENGTH + hdr.data_length() as usize;
@@ -526,5 +559,133 @@ mod tests {
             unreachable!()
         };
         assert_eq!(produced, msg);
+    }
+
+    /// A ChannelData frame as RFC 8656 §12.5 requires it on TCP: padded to a
+    /// multiple of 4 bytes. Returns the padded bytes and the unpadded frame.
+    fn generate_padded_channel(payload_len: usize) -> (Vec<u8>, Vec<u8>) {
+        let payload = vec![0x55; payload_len];
+        let mut frame = vec![0; payload_len + 4];
+        ChannelData::new(0x4001, &payload).write_into_unchecked(&mut frame);
+        let mut padded = frame.clone();
+        padded.resize((frame.len() + 3) & !3, 0);
+        (padded, frame)
+    }
+
+    #[test]
+    fn test_incoming_tcp_padded_channel_and_message() {
+        let _init = crate::tests::test_init_log();
+        let (local_addr, remote_addr) = generate_addresses();
+        let mut tcp = TurnTcpBuffer::new();
+        let (padded, frame) = generate_padded_channel(3);
+        let msg = generate_message();
+        let mut input = padded.clone();
+        input.extend_from_slice(&msg);
+        let ret = tcp
+            .incoming_tcp(Transmit::new(
+                input.clone(),
+                TransportType::Tcp,
+                remote_addr,
+                local_addr,
+            ))
+            .unwrap();
+        let IncomingTcp::CompleteChannel(_, range) = &ret else {
+            unreachable!()
+        };
+        assert_eq!(*range, 0..frame.len());
+        assert_eq!(ret.channel().unwrap().data(), &[0x55; 3]);
+        let StoredTcp::Message(produced) = tcp.poll_recv().unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(produced, msg);
+        assert!(tcp.is_empty());
+    }
+
+    #[test]
+    fn test_incoming_tcp_padded_channels_back_to_back() {
+        let _init = crate::tests::test_init_log();
+        let (local_addr, remote_addr) = generate_addresses();
+        let mut tcp = TurnTcpBuffer::new();
+        let (first, _) = generate_padded_channel(1);
+        let (second, second_frame) = generate_padded_channel(6);
+        let mut input = first.clone();
+        input.extend_from_slice(&second);
+        let ret = tcp
+            .incoming_tcp(Transmit::new(
+                input,
+                TransportType::Tcp,
+                remote_addr,
+                local_addr,
+            ))
+            .unwrap();
+        assert_eq!(ret.channel().unwrap().data(), &[0x55; 1]);
+        let StoredTcp::Channel(produced) = tcp.poll_recv().unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(produced, second_frame);
+        assert!(tcp.poll_recv().is_none());
+        assert!(tcp.is_empty());
+    }
+
+    #[test]
+    fn test_incoming_tcp_channel_padding_arrives_later() {
+        let _init = crate::tests::test_init_log();
+        let (local_addr, remote_addr) = generate_addresses();
+        let mut tcp = TurnTcpBuffer::new();
+        let (padded, frame) = generate_padded_channel(5);
+        // The whole payload, but none of its padding yet.
+        let ret = tcp
+            .incoming_tcp(Transmit::new(
+                frame.clone(),
+                TransportType::Tcp,
+                remote_addr,
+                local_addr,
+            ))
+            .unwrap();
+        assert_eq!(ret.channel().unwrap().data(), &[0x55; 5]);
+        let msg = generate_message();
+        let mut rest = padded[frame.len()..].to_vec();
+        rest.extend_from_slice(&msg);
+        let ret = tcp
+            .incoming_tcp(Transmit::new(
+                rest.clone(),
+                TransportType::Tcp,
+                remote_addr,
+                local_addr,
+            ))
+            .unwrap();
+        let IncomingTcp::CompleteMessage(_, range) = &ret else {
+            unreachable!()
+        };
+        assert_eq!(*range, padded.len() - frame.len()..rest.len());
+        assert_eq!(ret.data(), &msg);
+        assert!(tcp.is_empty());
+    }
+
+    #[test]
+    fn test_incoming_tcp_padded_channel_and_message_bytewise() {
+        let _init = crate::tests::test_init_log();
+        let (local_addr, remote_addr) = generate_addresses();
+        let (padded, frame) = generate_padded_channel(2);
+        let msg = generate_message();
+        let mut input = padded.clone();
+        input.extend_from_slice(&msg);
+        let mut tcp = TurnTcpBuffer::new();
+        let mut produced = vec![];
+        for byte in input.chunks(1) {
+            if let Some(ret) = tcp.incoming_tcp(Transmit::new(
+                byte,
+                TransportType::Tcp,
+                remote_addr,
+                local_addr,
+            )) {
+                produced.push(ret.data().to_vec());
+            }
+            while let Some(stored) = tcp.poll_recv() {
+                produced.push(stored.data().to_vec());
+            }
+        }
+        assert_eq!(produced, vec![frame, msg]);
+        assert!(tcp.is_empty());
     }
 }

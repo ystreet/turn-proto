@@ -614,8 +614,10 @@ pub enum DelayedMessageOrChannelSend<T: AsRef<[u8]> + core::fmt::Debug> {
 }
 
 impl<T: AsRef<[u8]> + core::fmt::Debug> DelayedMessageOrChannelSend<T> {
-    pub(crate) fn new_channel(data: T, channel_id: u16) -> Self {
-        Self::Channel(DelayedChannel::new(channel_id, data))
+    pub(crate) fn new_channel(data: T, channel_id: u16, transport: TransportType) -> Self {
+        Self::Channel(DelayedChannel::new_for_transport(
+            channel_id, data, transport,
+        ))
     }
 
     pub(crate) fn new_message(data: T, peer_addr: SocketAddr) -> Self {

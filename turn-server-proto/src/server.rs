@@ -2152,9 +2152,10 @@ impl TurnServerApi for TurnServer {
                     existing.id, transmit.from, allocation.addr
                 );
                 Some(TransmitBuild::new(
-                    DelayedMessageOrChannelSend::Channel(DelayedChannel::new(
+                    DelayedMessageOrChannelSend::Channel(DelayedChannel::new_for_transport(
                         existing.id,
                         transmit.data,
+                        client.transport,
                     )),
                     client.transport,
                     client.local_addr,
@@ -5245,10 +5246,11 @@ mod tests {
         );
         validate_authenticated_allocate_reply(&reply.data, creds.clone());
         channel_bind(&mut server, creds.clone(), &nonce, now);
+        // RFC 8656 Section 12.5: ChannelData over TCP is padded to a multiple of 4 bytes.
         let data = {
             let channel = ChannelData::new(0x4000, [7; 3].as_slice());
-            let mut out = vec![0; 7];
-            channel.write_into_unchecked(&mut out);
+            let mut out = vec![0; 8];
+            channel.write_into_unchecked(&mut out[..7]);
             out
         };
         for i in 1..data.len() - 1 {
@@ -5261,7 +5263,7 @@ mod tests {
             assert_eq!(ret.transport, TransportType::Udp);
             assert_eq!(ret.from, relayed_address());
             assert_eq!(ret.to, peer_address());
-            assert_eq!(&ret.data.build(), &data[4..]);
+            assert_eq!(&ret.data.build(), &data[4..7]);
         }
     }
 
