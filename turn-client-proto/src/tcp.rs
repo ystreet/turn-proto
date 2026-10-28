@@ -102,6 +102,14 @@ impl TurnClientTcp {
             )]),
         }
     }
+
+    /// The control connection carries data that is neither STUN nor ChannelData. The stream
+    /// cannot be resynchronised, so stop reading it and fail the client.
+    fn control_stream_broken(&mut self, key: (SocketAddr, SocketAddr)) {
+        warn!("Control connection data cannot be parsed, closing");
+        self.incoming_tcp_buffers.remove(&key);
+        self.protocol.protocol_error();
+    }
 }
 
 impl TurnClientApi for TurnClientTcp {
@@ -232,19 +240,21 @@ impl TurnClientApi for TurnClientTcp {
                 .remove(&(transmit.to, transmit.from));
             return TurnRecvRet::Handled;
         }
+        let key = (transmit.to, transmit.from);
 
         let tcp_buffer = match tcp_buffer {
             TcpBuffer::WaitingForConnectionBindResponse(buffer) => {
                 match buffer.incoming_tcp(transmit) {
-                    None => return TurnRecvRet::Handled,
                     // protocol violation
-                    Some(
+                    Err(_) | Ok(None) => return TurnRecvRet::Handled,
+                    // protocol violation
+                    Ok(Some(
                         IncomingTcp::CompleteChannel(transmit, _)
                         | IncomingTcp::StoredChannel(_, transmit),
-                    ) => {
+                    )) => {
                         return TurnRecvRet::Ignored(transmit);
                     }
-                    Some(IncomingTcp::CompleteMessage(transmit, msg_range)) => {
+                    Ok(Some(IncomingTcp::CompleteMessage(transmit, msg_range))) => {
                         let Ok(msg) = Message::from_bytes(
                             &transmit.data.as_ref()[msg_range.start..msg_range.end],
                         ) else {
@@ -275,7 +285,7 @@ impl TurnClientApi for TurnClientTcp {
                             return TurnRecvRet::Handled;
                         }
                     }
-                    Some(IncomingTcp::StoredMessage(msg_data, transmit)) => {
+                    Ok(Some(IncomingTcp::StoredMessage(msg_data, transmit))) => {
                         let Ok(msg) = Message::from_bytes(&msg_data) else {
                             return TurnRecvRet::Handled;
                         };
@@ -323,8 +333,12 @@ impl TurnClientApi for TurnClientTcp {
         };
 
         let ret = match tcp_buffer.incoming_tcp(transmit) {
-            None => TurnRecvRet::Handled,
-            Some(IncomingTcp::CompleteMessage(transmit, msg_range)) => {
+            Err(_) => {
+                self.control_stream_broken(key);
+                return TurnRecvRet::Handled;
+            }
+            Ok(None) => TurnRecvRet::Handled,
+            Ok(Some(IncomingTcp::CompleteMessage(transmit, msg_range))) => {
                 let Ok(msg) =
                     Message::from_bytes(&transmit.data.as_ref()[msg_range.start..msg_range.end])
                 else {
@@ -338,7 +352,7 @@ impl TurnClientApi for TurnClientTcp {
                     msg_range.start,
                 )
             }
-            Some(IncomingTcp::CompleteChannel(transmit, range)) => {
+            Ok(Some(IncomingTcp::CompleteChannel(transmit, range))) => {
                 let channel =
                     ChannelData::parse(&transmit.data.as_ref()[range.start..range.end]).unwrap();
                 match self.protocol.handle_channel(channel, now) {
@@ -358,7 +372,7 @@ impl TurnClientApi for TurnClientTcp {
                     }),
                 }
             }
-            Some(IncomingTcp::StoredMessage(msg_data, transmit)) => {
+            Ok(Some(IncomingTcp::StoredMessage(msg_data, transmit))) => {
                 let Ok(msg) = Message::from_bytes(&msg_data) else {
                     return TurnRecvRet::Handled;
                 };
@@ -370,7 +384,7 @@ impl TurnClientApi for TurnClientTcp {
                     msg_data,
                 )
             }
-            Some(IncomingTcp::StoredChannel(data, transmit)) => {
+            Ok(Some(IncomingTcp::StoredChannel(data, transmit))) => {
                 let channel = ChannelData::parse(&data).unwrap();
                 match self.protocol.handle_channel(channel, now) {
                     // XXX: Ignored should probably produce an error for TCP
@@ -406,6 +420,7 @@ impl TurnClientApi for TurnClientTcp {
     }
 
     fn poll_recv(&mut self, now: Instant) -> Option<TurnPeerData<Vec<u8>>> {
+        let mut broken_control = None;
         for ((local_addr, remote_addr), tcp_buffer) in self.incoming_tcp_buffers.iter_mut() {
             match tcp_buffer {
                 TcpBuffer::Passthrough(_) => continue,
@@ -421,7 +436,7 @@ impl TurnClientApi for TurnClientTcp {
                     return ret;
                 }
                 TcpBuffer::WaitingForConnectionBindResponse(buffer) => {
-                    if let Some(recv) = buffer.poll_recv() {
+                    if let Ok(Some(recv)) = buffer.poll_recv() {
                         match recv {
                             // protocol violation
                             StoredTcp::Channel(_) => continue,
@@ -454,7 +469,10 @@ impl TurnClientApi for TurnClientTcp {
                     }
                 }
                 TcpBuffer::Control(buffer) => {
-                    while let Some(recv) = buffer.poll_recv() {
+                    while let Some(recv) = buffer.poll_recv().unwrap_or_else(|_| {
+                        broken_control = Some((*local_addr, *remote_addr));
+                        None
+                    }) {
                         match recv {
                             StoredTcp::Message(msg_data) => {
                                 let Ok(msg) = Message::from_bytes(&msg_data) else {
@@ -504,6 +522,9 @@ impl TurnClientApi for TurnClientTcp {
                 }
             }
         }
+        if let Some(key) = broken_control {
+            self.control_stream_broken(key);
+        }
         None
     }
 
@@ -517,5 +538,52 @@ pub(crate) fn ensure_data_owned(data: Vec<u8>, range: Range<usize>) -> Vec<u8> {
         data
     } else {
         data[range.start..range.end].to_vec()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use turn_types::TurnCredentials;
+
+    use super::*;
+
+    #[test]
+    fn test_turn_client_tcp_garbage_on_control_connection_closes() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let local_addr = "192.168.0.1:4000".parse().unwrap();
+        let remote_addr = "10.0.0.1:3478".parse().unwrap();
+        let mut config = TurnConfig::new(TurnCredentials::new("tuser", "tpass"));
+        config.set_allocation_transport(TransportType::Udp);
+        let mut client = TurnClientTcp::allocate(local_addr, remote_addr, config);
+        assert!(client.poll_transmit(now).is_some());
+
+        // Neither a STUN header (wrong magic cookie) nor a channel number.
+        let garbage = [0x01, 0x01, 0x00, 0x04, 0xde, 0xad, 0xbe, 0xef];
+        assert!(matches!(
+            client.recv(
+                Transmit::new(&garbage[..], TransportType::Tcp, remote_addr, local_addr),
+                now,
+            ),
+            TurnRecvRet::Handled
+        ));
+        let mut failed = 0;
+        while let Some(event) = client.poll_event() {
+            assert!(matches!(event, TurnEvent::AllocationCreateFailed(_)));
+            failed += 1;
+        }
+        assert!(failed > 0);
+        assert!(matches!(client.poll(now), TurnPollRet::Closed));
+        // The control connection is no longer read, so the error is reported once.
+        assert!(matches!(
+            client.recv(
+                Transmit::new(&garbage[..], TransportType::Tcp, remote_addr, local_addr),
+                now,
+            ),
+            TurnRecvRet::Ignored(_)
+        ));
+        assert!(client.poll_recv(now).is_none());
+        assert!(client.poll_event().is_none());
+        assert!(matches!(client.poll(now), TurnPollRet::Closed));
     }
 }

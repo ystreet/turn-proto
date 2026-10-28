@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use stun_proto::agent::Transmit;
-use stun_types::message::{Message, MessageHeader};
+use stun_types::message::{Message, MessageHeader, StunParseError};
 use tracing::{debug, trace};
 
 use crate::channel::ChannelData;
@@ -173,8 +173,12 @@ impl TurnTcpBuffer {
 
     /// Provide incoming TCP data to parse.
     ///
-    /// A return value of `None` indicates that the more data is required to provide a complete
+    /// A return value of `Ok(None)` indicates that the more data is required to provide a complete
     /// STUN [`Message`] or a [`ChannelData`].
+    ///
+    /// An error is returned when the data can be neither the start of a STUN [`Message`] nor of a
+    /// [`ChannelData`]. The stream cannot be resynchronised after that: the buffered data is
+    /// dropped and the connection should be closed.
     #[tracing::instrument(
         level = "trace",
         skip(self, transmit),
@@ -186,16 +190,29 @@ impl TurnTcpBuffer {
     pub fn incoming_tcp<T: AsRef<[u8]> + core::fmt::Debug>(
         &mut self,
         transmit: Transmit<T>,
-    ) -> Option<IncomingTcp<T>> {
+    ) -> Result<Option<IncomingTcp<T>>, StunParseError> {
         let skip = self.padding_to_skip.min(transmit.data.as_ref().len());
         self.padding_to_skip -= skip;
         if self.tcp_buffer.is_empty() {
             let data = &transmit.data.as_ref()[skip..];
             trace!("Trying to parse incoming data as a complete message/channel");
-            let Ok(hdr) = MessageHeader::from_bytes(data) else {
-                let Ok(channel) = ChannelData::parse(data) else {
-                    self.tcp_buffer.extend_from_slice(data);
-                    return None;
+            let hdr = MessageHeader::from_bytes(data);
+            if let Err(StunParseError::Truncated { .. }) = hdr {
+                self.tcp_buffer.extend_from_slice(data);
+                return Ok(None);
+            }
+            let Ok(hdr) = hdr else {
+                let channel = match ChannelData::parse(data) {
+                    Ok(channel) => channel,
+                    Err(StunParseError::Truncated { .. }) => {
+                        self.tcp_buffer.extend_from_slice(data);
+                        return Ok(None);
+                    }
+                    Err(e) => {
+                        debug!("Incoming data is neither a message nor a channel");
+                        self.padding_to_skip = 0;
+                        return Err(e);
+                    }
                 };
                 let channel_len = 4 + channel.data().len();
                 debug!(
@@ -204,10 +221,10 @@ impl TurnTcpBuffer {
                     "Incoming data contains a channel",
                 );
                 self.consume_channel_padding(data, channel_len);
-                return Some(IncomingTcp::CompleteChannel(
+                return Ok(Some(IncomingTcp::CompleteChannel(
                     transmit,
                     skip..skip + channel_len,
-                ));
+                )));
             };
             let msg_len = MessageHeader::LENGTH + hdr.data_length() as usize;
             debug!(
@@ -217,17 +234,20 @@ impl TurnTcpBuffer {
             );
             if data.len() < msg_len {
                 self.tcp_buffer.extend_from_slice(data);
-                return None;
+                return Ok(None);
             }
             if msg_len < data.len() {
                 self.tcp_buffer.extend_from_slice(&data[msg_len..]);
             }
-            return Some(IncomingTcp::CompleteMessage(transmit, skip..skip + msg_len));
+            return Ok(Some(IncomingTcp::CompleteMessage(
+                transmit,
+                skip..skip + msg_len,
+            )));
         }
 
         self.tcp_buffer
             .extend_from_slice(&transmit.data.as_ref()[skip..]);
-        self.poll_recv().map(|recv| recv.into_incoming(transmit))
+        Ok(self.poll_recv()?.map(|recv| recv.into_incoming(transmit)))
     }
 
     /// Stores the data following a complete channel of `channel_len` bytes at the start of
@@ -239,6 +259,10 @@ impl TurnTcpBuffer {
     }
 
     /// Return the next complete message (if any).
+    ///
+    /// An error is returned when the buffered data can be neither the start of a STUN [`Message`]
+    /// nor of a [`ChannelData`]. The stream cannot be resynchronised after that: the buffered data
+    /// is dropped and the connection should be closed.
     #[tracing::instrument(
         level = "trace",
         skip(self),
@@ -246,14 +270,34 @@ impl TurnTcpBuffer {
             buffered_len = self.tcp_buffer.len(),
         )
     )]
-    pub fn poll_recv(&mut self) -> Option<StoredTcp> {
-        let Ok(hdr) = MessageHeader::from_bytes(&self.tcp_buffer) else {
-            let Ok((id, channel_data_len)) = ChannelData::parse_header(&self.tcp_buffer) else {
-                trace!(
-                    buffered.len = self.tcp_buffer.len(),
-                    "cannot parse stored data"
-                );
-                return None;
+    pub fn poll_recv(&mut self) -> Result<Option<StoredTcp>, StunParseError> {
+        let hdr = MessageHeader::from_bytes(&self.tcp_buffer);
+        if let Err(StunParseError::Truncated { .. }) = hdr {
+            trace!(
+                buffered.len = self.tcp_buffer.len(),
+                "need more bytes to complete STUN message header"
+            );
+            return Ok(None);
+        }
+        let Ok(hdr) = hdr else {
+            let (id, channel_data_len) = match ChannelData::parse_header(&self.tcp_buffer) {
+                Ok(header) => header,
+                Err(StunParseError::Truncated { .. }) => {
+                    trace!(
+                        buffered.len = self.tcp_buffer.len(),
+                        "need more bytes to complete channel data header"
+                    );
+                    return Ok(None);
+                }
+                Err(e) => {
+                    debug!(
+                        buffered.len = self.tcp_buffer.len(),
+                        "stored data is neither a message nor a channel"
+                    );
+                    self.tcp_buffer.clear();
+                    self.padding_to_skip = 0;
+                    return Err(e);
+                }
             };
             let channel_len = 4 + channel_data_len;
             if self.tcp_buffer.len() < channel_len {
@@ -262,7 +306,7 @@ impl TurnTcpBuffer {
                     required = channel_len,
                     "need more bytes to complete channel data"
                 );
-                return None;
+                return Ok(None);
             }
             let buffered = core::mem::take(&mut self.tcp_buffer);
             let data_binding = buffered[..channel_len].to_vec();
@@ -273,7 +317,7 @@ impl TurnTcpBuffer {
                 "buffered data contains a channel",
             );
             self.consume_channel_padding(&buffered, channel_len);
-            return Some(StoredTcp::Channel(data_binding));
+            return Ok(Some(StoredTcp::Channel(data_binding)));
         };
         let msg_len = MessageHeader::LENGTH + hdr.data_length() as usize;
         if self.tcp_buffer.len() < msg_len {
@@ -282,7 +326,7 @@ impl TurnTcpBuffer {
                 required = msg_len,
                 "need more bytes to complete STUN message"
             );
-            return None;
+            return Ok(None);
         }
         let (data, remaining) = self.tcp_buffer.split_at(msg_len);
         let data_binding = data.to_vec();
@@ -293,7 +337,7 @@ impl TurnTcpBuffer {
             "stored data contains a message",
         );
         self.tcp_buffer = remaining.to_vec();
-        Some(StoredTcp::Message(data_binding))
+        Ok(Some(StoredTcp::Message(data_binding)))
     }
 
     /// Returns the underlying buffer.
@@ -364,6 +408,7 @@ mod tests {
                 remote_addr,
                 local_addr,
             ))
+            .unwrap()
             .unwrap();
         assert!(matches!(ret, IncomingTcp::CompleteMessage(_, _)));
         assert_eq!(ret.data(), &msg);
@@ -387,6 +432,7 @@ mod tests {
                 remote_addr,
                 local_addr,
             ))
+            .unwrap()
             .unwrap();
         assert!(matches!(ret, IncomingTcp::CompleteChannel(_, _)));
         assert_eq!(ret.data(), &msg);
@@ -411,7 +457,7 @@ mod tests {
                 remote_addr,
                 local_addr,
             ));
-            assert!(ret.is_none());
+            assert!(ret.unwrap().is_none());
 
             let data = tcp.into_inner();
             assert_eq!(&data, &msg[..i]);
@@ -422,7 +468,7 @@ mod tests {
                 remote_addr,
                 local_addr,
             ));
-            assert!(ret.is_none());
+            assert!(ret.unwrap().is_none());
             assert!(!tcp.is_empty());
             assert_eq!(tcp.len(), i);
         }
@@ -433,6 +479,7 @@ mod tests {
                 remote_addr,
                 local_addr,
             ))
+            .unwrap()
             .unwrap();
         assert_eq!(ret.data(), &msg);
         assert_eq!(ret.as_ref(), &msg);
@@ -460,7 +507,7 @@ mod tests {
                 remote_addr,
                 local_addr,
             ));
-            assert!(ret.is_none());
+            assert!(ret.unwrap().is_none());
 
             let data = tcp.into_inner();
             assert_eq!(&data, &channel[..i]);
@@ -471,7 +518,7 @@ mod tests {
                 remote_addr,
                 local_addr,
             ));
-            assert!(ret.is_none());
+            assert!(ret.unwrap().is_none());
             assert!(!tcp.is_empty());
             assert_eq!(tcp.len(), i);
         }
@@ -482,6 +529,7 @@ mod tests {
                 remote_addr,
                 local_addr,
             ))
+            .unwrap()
             .unwrap();
         assert_eq!(ret.data(), &channel);
         assert_eq!(ret.as_ref(), &channel);
@@ -509,6 +557,7 @@ mod tests {
                 remote_addr,
                 local_addr,
             ))
+            .unwrap()
             .unwrap();
         assert_eq!(ret.data(), &msg);
         assert_eq!(ret.as_ref(), &msg);
@@ -518,7 +567,7 @@ mod tests {
         };
         assert_eq!(msg_range, 0..msg.len());
         assert_eq!(transmit.data, input);
-        let ret = tcp.poll_recv().unwrap();
+        let ret = tcp.poll_recv().unwrap().unwrap();
         assert_eq!(ret.data(), &channel);
         assert_eq!(ret.as_ref(), &channel);
         let StoredTcp::Channel(produced) = ret else {
@@ -543,6 +592,7 @@ mod tests {
                 remote_addr,
                 local_addr,
             ))
+            .unwrap()
             .unwrap();
         assert_eq!(ret.data(), &channel);
         assert_eq!(ret.as_ref(), &channel);
@@ -552,7 +602,7 @@ mod tests {
         };
         assert_eq!(channel_range, 0..channel.len());
         assert_eq!(transmit.data, input);
-        let ret = tcp.poll_recv().unwrap();
+        let ret = tcp.poll_recv().unwrap().unwrap();
         assert_eq!(ret.data(), &msg);
         assert_eq!(ret.as_ref(), &msg);
         let StoredTcp::Message(produced) = ret else {
@@ -588,13 +638,14 @@ mod tests {
                 remote_addr,
                 local_addr,
             ))
+            .unwrap()
             .unwrap();
         let IncomingTcp::CompleteChannel(_, range) = &ret else {
             unreachable!()
         };
         assert_eq!(*range, 0..frame.len());
         assert_eq!(ret.channel().unwrap().data(), &[0x55; 3]);
-        let StoredTcp::Message(produced) = tcp.poll_recv().unwrap() else {
+        let StoredTcp::Message(produced) = tcp.poll_recv().unwrap().unwrap() else {
             unreachable!()
         };
         assert_eq!(produced, msg);
@@ -617,13 +668,14 @@ mod tests {
                 remote_addr,
                 local_addr,
             ))
+            .unwrap()
             .unwrap();
         assert_eq!(ret.channel().unwrap().data(), &[0x55; 1]);
-        let StoredTcp::Channel(produced) = tcp.poll_recv().unwrap() else {
+        let StoredTcp::Channel(produced) = tcp.poll_recv().unwrap().unwrap() else {
             unreachable!()
         };
         assert_eq!(produced, second_frame);
-        assert!(tcp.poll_recv().is_none());
+        assert!(tcp.poll_recv().unwrap().is_none());
         assert!(tcp.is_empty());
     }
 
@@ -641,6 +693,7 @@ mod tests {
                 remote_addr,
                 local_addr,
             ))
+            .unwrap()
             .unwrap();
         assert_eq!(ret.channel().unwrap().data(), &[0x55; 5]);
         let msg = generate_message();
@@ -653,6 +706,7 @@ mod tests {
                 remote_addr,
                 local_addr,
             ))
+            .unwrap()
             .unwrap();
         let IncomingTcp::CompleteMessage(_, range) = &ret else {
             unreachable!()
@@ -673,19 +727,95 @@ mod tests {
         let mut tcp = TurnTcpBuffer::new();
         let mut produced = vec![];
         for byte in input.chunks(1) {
-            if let Some(ret) = tcp.incoming_tcp(Transmit::new(
-                byte,
-                TransportType::Tcp,
-                remote_addr,
-                local_addr,
-            )) {
+            if let Some(ret) = tcp
+                .incoming_tcp(Transmit::new(
+                    byte,
+                    TransportType::Tcp,
+                    remote_addr,
+                    local_addr,
+                ))
+                .unwrap()
+            {
                 produced.push(ret.data().to_vec());
             }
-            while let Some(stored) = tcp.poll_recv() {
+            while let Some(stored) = tcp.poll_recv().unwrap() {
                 produced.push(stored.data().to_vec());
             }
         }
         assert_eq!(produced, vec![frame, msg]);
+        assert!(tcp.is_empty());
+    }
+
+    #[test]
+    fn test_incoming_tcp_unparseable_data_is_an_error() {
+        let _init = crate::tests::test_init_log();
+        let (local_addr, remote_addr) = generate_addresses();
+        // Starts like a STUN message but the magic cookie does not match, and is not a
+        // channel number either.
+        for garbage in [
+            &[0x00, 0x01, 0x00, 0x00, 0xde, 0xad][..],
+            &[0x00, 0x01, 0x00, 0x00, 0xde, 0xad, 0xbe, 0xef, 0x00, 0x00][..],
+            &[0xff, 0xff, 0x00, 0x04][..],
+        ] {
+            let mut tcp = TurnTcpBuffer::new();
+            assert!(tcp
+                .incoming_tcp(Transmit::new(
+                    garbage,
+                    TransportType::Tcp,
+                    remote_addr,
+                    local_addr,
+                ))
+                .is_err());
+            assert!(tcp.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_incoming_tcp_unparseable_data_split_is_an_error() {
+        let _init = crate::tests::test_init_log();
+        let (local_addr, remote_addr) = generate_addresses();
+        let mut tcp = TurnTcpBuffer::new();
+        // The first bytes could still be the start of a STUN message.
+        assert!(tcp
+            .incoming_tcp(Transmit::new(
+                &[0x00, 0x01, 0x00][..],
+                TransportType::Tcp,
+                remote_addr,
+                local_addr,
+            ))
+            .unwrap()
+            .is_none());
+        // The magic cookie does not match.
+        assert!(tcp
+            .incoming_tcp(Transmit::new(
+                &[0x00, 0xde, 0xad][..],
+                TransportType::Tcp,
+                remote_addr,
+                local_addr,
+            ))
+            .is_err());
+        assert!(tcp.is_empty());
+    }
+
+    #[test]
+    fn test_incoming_tcp_unparseable_data_after_message_is_an_error() {
+        let _init = crate::tests::test_init_log();
+        let (local_addr, remote_addr) = generate_addresses();
+        let mut tcp = TurnTcpBuffer::new();
+        let msg = generate_message();
+        let mut input = msg.clone();
+        input.extend_from_slice(&[0xff, 0xff, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00]);
+        let ret = tcp
+            .incoming_tcp(Transmit::new(
+                input,
+                TransportType::Tcp,
+                remote_addr,
+                local_addr,
+            ))
+            .unwrap()
+            .unwrap();
+        assert_eq!(ret.data(), &msg);
+        assert!(tcp.poll_recv().is_err());
         assert!(tcp.is_empty());
     }
 }

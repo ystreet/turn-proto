@@ -1263,9 +1263,9 @@ dependencies = [
 
 [[package]]
 name = "stun-types"
-version = "2.0.3"
+version = "2.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7ec5f6730f68951e45aa8c9f42912fcb87932c690c10963c2133751e42c6552"
+checksum = "034e7be5ad5d62256b8df9b7344ef58b1cfee797cc7dabfacdc28efb3d3a192d"
 dependencies = [
  "arbitrary",
  "byteorder",

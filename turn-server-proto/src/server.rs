@@ -1771,6 +1771,23 @@ impl TurnServer {
         self.protocol.stun.transport()
     }
 
+    /// Stops reading a client's TCP connection and asks for it to be closed.
+    fn close_tcp_client(&mut self, client_addr: SocketAddr, listen_addr: SocketAddr) {
+        if self
+            .incoming_tcp_buffers
+            .remove(&(client_addr, listen_addr))
+            .is_some()
+        {
+            self.protocol
+                .pending_socket_removals
+                .push_back(Socket5Tuple {
+                    transport: TransportType::Tcp,
+                    local_addr: listen_addr,
+                    remote_addr: client_addr,
+                });
+        }
+    }
+
     fn remove_allocation_resources(
         allocation: &mut Allocation,
         peer_tcp: &mut BTreeMap<(SocketAddr, SocketAddr), PeerTcp>,
@@ -2223,9 +2240,15 @@ impl TurnServerApi for TurnServer {
                         }
                     };
 
+                    let (client_addr, listen_addr) = (transmit.from, transmit.to);
                     match tcp_buffer.incoming_tcp(transmit) {
-                        None => None,
-                        Some(IncomingTcp::CompleteMessage(transmit, range)) => {
+                        Err(_) => {
+                            debug!("TCP data from {client_addr} is neither STUN nor a channel, closing");
+                            self.close_tcp_client(client_addr, listen_addr);
+                            None
+                        }
+                        Ok(None) => None,
+                        Ok(Some(IncomingTcp::CompleteMessage(transmit, range))) => {
                             let Ok(msg) = Message::from_bytes(
                                 &transmit.data.as_ref()[range.start..range.end],
                             ) else {
@@ -2320,7 +2343,7 @@ impl TurnServerApi for TurnServer {
                                 Ok(None) => None,
                             }
                         }
-                        Some(IncomingTcp::CompleteChannel(transmit, range)) => {
+                        Ok(Some(IncomingTcp::CompleteChannel(transmit, range))) => {
                             let Ok(channel) =
                                 ChannelData::parse(&transmit.data.as_ref()[range.start..range.end])
                             else {
@@ -2347,7 +2370,7 @@ impl TurnServerApi for TurnServer {
                                 to,
                             ))
                         }
-                        Some(IncomingTcp::StoredMessage(data, transmit)) => {
+                        Ok(Some(IncomingTcp::StoredMessage(data, transmit))) => {
                             let mut tcp_stun_change = None;
                             let ret = self
                                 .protocol
@@ -2419,7 +2442,7 @@ impl TurnServerApi for TurnServer {
                             }
                             ret
                         }
-                        Some(IncomingTcp::StoredChannel(data, transmit)) => {
+                        Ok(Some(IncomingTcp::StoredChannel(data, transmit))) => {
                             let Ok(channel) = ChannelData::parse(&data) else {
                                 return None;
                             };
@@ -2709,6 +2732,7 @@ impl TurnServerApi for TurnServer {
             return None;
         }
         let mut removed_allocations = vec![];
+        let mut unparseable = None;
         for (&(remote_addr, local_addr), incoming_tcp) in self.incoming_tcp_buffers.iter_mut() {
             let (tcp_type, tcp_buffer) = match incoming_tcp {
                 TcpBuffer::Unknown(tcp_buffer) => (TcpStunType::Unknown, tcp_buffer),
@@ -2733,7 +2757,12 @@ impl TurnServerApi for TurnServer {
             };
 
             let ret = match tcp_buffer.poll_recv() {
-                Some(StoredTcp::Message(msg)) => {
+                Err(_) => {
+                    unparseable = Some((remote_addr, local_addr));
+                    break;
+                }
+                Ok(None) => continue,
+                Ok(Some(StoredTcp::Message(msg))) => {
                     let mut tcp_stun_change = None;
                     let ret = self.protocol.handle_listen_tcp_stored_message(
                         &self.peer_tcp,
@@ -2786,7 +2815,7 @@ impl TurnServerApi for TurnServer {
                     }
                     ret
                 }
-                Some(StoredTcp::Channel(channel)) => {
+                Ok(Some(StoredTcp::Channel(channel))) => {
                     let Ok(channel) = ChannelData::parse(&channel) else {
                         continue;
                     };
@@ -2803,11 +2832,15 @@ impl TurnServerApi for TurnServer {
                     )?;
                     Some(Transmit::new(channel.data().to_vec(), transport, from, to))
                 }
-                None => continue,
             };
             if ret.is_some() {
                 return ret;
             }
+        }
+
+        if let Some((client_addr, listen_addr)) = unparseable {
+            debug!("TCP data from {client_addr} is neither STUN nor a channel, closing");
+            self.close_tcp_client(client_addr, listen_addr);
         }
 
         for mut allocation in removed_allocations {
@@ -5643,6 +5676,50 @@ mod tests {
         );
 
         tcp_data_transfer(&mut server, now);
+    }
+
+    // Neither a STUN header (wrong magic cookie) nor a channel number.
+    const UNPARSEABLE_TCP: [u8; 8] = [0x01, 0x01, 0x00, 0x04, 0xde, 0xad, 0xbe, 0xef];
+
+    fn assert_tcp_client_closed(server: &mut TurnServer, now: Instant) {
+        assert!(!server
+            .incoming_tcp_buffers
+            .contains_key(&(client_address(), listen_address())));
+        let TurnServerPollRet::TcpClose {
+            local_addr,
+            remote_addr,
+        } = server.poll(now)
+        else {
+            unreachable!();
+        };
+        assert_eq!(local_addr, listen_address());
+        assert_eq!(remote_addr, client_address());
+    }
+
+    #[test]
+    fn test_server_tcp_unparseable_data_closes() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut server = new_server(TransportType::Tcp);
+        assert!(server
+            .recv(client_transmit(UNPARSEABLE_TCP, TransportType::Tcp), now)
+            .is_none());
+        assert_tcp_client_closed(&mut server, now);
+    }
+
+    #[test]
+    fn test_server_tcp_unparseable_data_after_message_closes() {
+        let _init = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        let mut server = new_server(TransportType::Tcp);
+        let mut data = initial_allocate_msg();
+        data.extend_from_slice(&UNPARSEABLE_TCP);
+        let reply = server
+            .recv(client_transmit(data, TransportType::Tcp), now)
+            .unwrap();
+        validate_initial_allocate_reply(&reply.build().data);
+        assert!(server.poll_transmit(now).is_none());
+        assert_tcp_client_closed(&mut server, now);
     }
 
     #[test]

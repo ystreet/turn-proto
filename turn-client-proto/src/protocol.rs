@@ -656,8 +656,10 @@ impl TurnClientProtocol {
                     return TurnProtocolRecv::Handled;
                 };
                 let peer_addr = xor_peer_addr.addr(msg.transaction_id());
+                // Only TCP allocations (RFC 6062) can handle connection attempts.
                 let Some(allocation) = allocations.iter_mut().find(|alloc| {
-                    alloc.transport == transport
+                    alloc.transport == TransportType::Tcp
+                        && alloc.transport == transport
                         && alloc.relayed_address.is_ipv4() == peer_addr.is_ipv4()
                 }) else {
                     let msg = Self::bad_request_signed(&msg, stun_auth).finish();
@@ -5259,6 +5261,57 @@ mod tests {
         assert!(msg.has_class(MessageClass::Error));
         let error = msg.attribute::<ErrorCode>().unwrap();
         assert_eq!(error.code(), ErrorCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_turn_client_protocol_connection_attempt_refused_for_udp_allocation() {
+        let _log = crate::tests::test_init_log();
+        let now = Instant::ZERO;
+        for client_transport in [TransportType::Udp, TransportType::Tcp] {
+            let mut client = new_protocol_with_families(
+                client_transport,
+                TransportType::Udp,
+                &[AddressFamily::IPV4],
+            );
+            initial_allocate(&mut client, now);
+            let now = wait_advance(&mut client, now);
+            authenticated_allocate(&mut client, now);
+
+            let credentials = client_credentials(&client);
+            for (connection_id, port) in [(1, 4000), (2, 4001)] {
+                let peer = SocketAddr::new(generate_xor_peer_address().ip(), port);
+                let request =
+                    server_connection_attempt_message(connection_id, credentials.clone(), peer)
+                        .finish();
+                let msg_transmit = Transmit::new(
+                    Message::from_bytes(&request).unwrap(),
+                    client.transport(),
+                    client.remote_addr(),
+                    client.local_addr(),
+                );
+                assert!(matches!(
+                    client.handle_message(msg_transmit, now),
+                    TurnProtocolRecv::Handled
+                ));
+                let transmit = client.poll_transmit(now).unwrap();
+                let msg = Message::from_bytes(&transmit.data).unwrap();
+                msg.validate_integrity(&credentials.clone().into()).unwrap();
+                assert!(msg.has_method(CONNECTION_ATTEMPT));
+                assert!(msg.has_class(MessageClass::Error));
+                assert_eq!(
+                    msg.attribute::<ErrorCode>().unwrap().code(),
+                    ErrorCode::BAD_REQUEST
+                );
+            }
+            assert!(client
+                .allocations
+                .iter()
+                .all(|alloc| alloc.pending_tcp_allocate.is_empty()));
+            assert!(!matches!(
+                client.poll(now),
+                TurnPollRet::AllocateTcpSocket { .. }
+            ));
+        }
     }
 
     #[test]
