@@ -222,7 +222,7 @@ impl TurnClientApi for TurnClientRustls {
                                 client_transport,
                                 socket.local_addr,
                                 socket.remote_addr,
-                            ))
+                            ));
                         }
                         Err(e) => {
                             warn!("error during handshake: {e:?}");
@@ -258,7 +258,7 @@ impl TurnClientApi for TurnClientRustls {
                             client_transport,
                             socket.local_addr,
                             socket.remote_addr,
-                        ))
+                        ));
                     }
                     Err(e) => {
                         warn!("error writing TLS: {e:?}");
@@ -422,7 +422,7 @@ impl TurnClientApi for TurnClientRustls {
                             client_transport,
                             socket.local_addr,
                             socket.remote_addr,
-                        )))
+                        )));
                     }
                     Err(e) => {
                         warn!("Error when writing TLS records: {e:?}");

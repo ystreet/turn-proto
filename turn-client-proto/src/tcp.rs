@@ -18,10 +18,10 @@ use core::net::{IpAddr, SocketAddr};
 use core::ops::Range;
 use turn_types::stun::message::Message;
 
-use stun_proto::agent::{StunAgent, Transmit};
-use stun_proto::types::data::Data;
-use stun_proto::types::TransportType;
 use stun_proto::Instant;
+use stun_proto::agent::{StunAgent, Transmit};
+use stun_proto::types::TransportType;
+use stun_proto::types::data::Data;
 
 use turn_types::channel::ChannelData;
 use turn_types::tcp::{IncomingTcp, StoredTcp, TurnTcpBuffer};

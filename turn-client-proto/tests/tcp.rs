@@ -11,7 +11,7 @@
 use core::time::Duration;
 use std::net::SocketAddr;
 
-use stun_proto::{agent::Transmit, Instant};
+use stun_proto::{Instant, agent::Transmit};
 use turn_client_proto::api::*;
 use turn_client_proto::tcp::TurnClientTcp;
 use turn_server_proto::api::*;
@@ -405,18 +405,19 @@ fn test_turn_tcp_connection_bind_success_with_data_poll_recv() {
 
         let data = [8; 7];
         // some peer sent data before ConnectionBind has completed
-        assert!(test
-            .server
-            .recv(
-                Transmit::new(
-                    data,
-                    test.allocation_transport,
-                    test.peer_addr,
-                    relayed_address
-                ),
-                now
-            )
-            .is_none());
+        assert!(
+            test.server
+                .recv(
+                    Transmit::new(
+                        data,
+                        test.allocation_transport,
+                        test.peer_addr,
+                        relayed_address
+                    ),
+                    now
+                )
+                .is_none()
+        );
 
         let now = test.client_advance(now);
         let transmit = test.client.poll_transmit(now).unwrap();
@@ -475,18 +476,19 @@ fn test_turn_tcp_connection_bind_success_with_data_recv() {
 
         let data = [8; 7];
         // some peer sent data before ConnectionBind has completed
-        assert!(test
-            .server
-            .recv(
-                Transmit::new(
-                    data,
-                    test.allocation_transport,
-                    test.peer_addr,
-                    relayed_address
-                ),
-                now
-            )
-            .is_none());
+        assert!(
+            test.server
+                .recv(
+                    Transmit::new(
+                        data,
+                        test.allocation_transport,
+                        test.peer_addr,
+                        relayed_address
+                    ),
+                    now
+                )
+                .is_none()
+        );
 
         let now = test.client_advance(now);
         let transmit = test.client.poll_transmit(now).unwrap();

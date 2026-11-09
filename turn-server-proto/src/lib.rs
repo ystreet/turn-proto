@@ -52,8 +52,8 @@ pub use turn_types as types;
 #[cfg(test)]
 mod tests {
     use tracing::subscriber::DefaultGuard;
-    use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::SubscriberExt;
 
     pub fn test_init_log() -> DefaultGuard {
         turn_types::debug_init();

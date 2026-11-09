@@ -12,15 +12,15 @@
 
 use std::net::SocketAddr;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use stun_proto::agent::Transmit;
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use stun_proto::Instant;
+use stun_proto::agent::Transmit;
 use turn_client_proto::api::{DelayedMessageOrChannelSend, TurnConfig, TurnEvent, TurnRecvRet};
 use turn_client_proto::prelude::*;
 use turn_client_proto::udp::{TurnClientUdp, TurnPollRet};
 use turn_server_proto::api::{TurnServerApi, TurnServerPollRet};
 use turn_server_proto::server::TurnServer;
-use turn_types::{stun::TransportType, TurnCredentials};
+use turn_types::{TurnCredentials, stun::TransportType};
 
 struct TurnTest<T: TurnClientApi> {
     client: T,
@@ -97,11 +97,12 @@ impl<T: TurnClientApi> TurnTest<T> {
             self.client.recv(transmit, now),
             TurnRecvRet::Handled
         ));
-        assert!(self
-            .client
-            .relayed_addresses()
-            .any(|(transport, relayed)| transport == TransportType::Udp
-                && relayed == self.relayed_addr));
+        assert!(
+            self.client
+                .relayed_addresses()
+                .any(|(transport, relayed)| transport == TransportType::Udp
+                    && relayed == self.relayed_addr)
+        );
         assert!(matches!(
             self.client.poll_event(),
             Some(TurnEvent::AllocationCreated(TransportType::Udp, _))

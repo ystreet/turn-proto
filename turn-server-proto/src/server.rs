@@ -27,22 +27,23 @@ use turn_types::stun::prelude::AttributeExt;
 use turn_types::tcp::{IncomingTcp, StoredTcp, TurnTcpBuffer};
 use turn_types::transmit::{DelayedChannel, DelayedMessage, TransmitBuild};
 
+use stun_proto::Instant;
 use stun_proto::agent::{StunAgent, Transmit};
+use stun_proto::types::TransportType;
 use stun_proto::types::attribute::{
     AttributeType, ErrorCode, Fingerprint, MessageIntegrity, Nonce, Realm, Username,
     XorMappedAddress,
 };
 use stun_proto::types::message::{
-    LongTermCredentials, Message, MessageClass, MessageType, MessageWrite, MessageWriteExt,
-    MessageWriteVec, TransactionId, BINDING,
+    BINDING, LongTermCredentials, Message, MessageClass, MessageType, MessageWrite,
+    MessageWriteExt, MessageWriteVec, TransactionId,
 };
 use stun_proto::types::prelude::{Attribute, AttributeFromRaw, AttributeStaticType};
-use stun_proto::types::TransportType;
-use stun_proto::Instant;
 use turn_types::channel::ChannelData;
 
 use turn_types::message::{CONNECT, CONNECTION_ATTEMPT, CONNECTION_BIND, CREATE_PERMISSION};
 
+use turn_types::AddressFamily;
 use turn_types::attribute::{
     AdditionalAddressFamily, AddressErrorCode, ConnectionId, Data as AData, DontFragment, EvenPort,
     Icmp, RequestedAddressFamily, ReservationToken,
@@ -52,7 +53,6 @@ use turn_types::attribute::{
 };
 use turn_types::message::{ALLOCATE, CHANNEL_BIND, DATA, REFRESH, SEND};
 use turn_types::stun::message::{IntegrityAlgorithm, MessageHeader};
-use turn_types::AddressFamily;
 
 use tracing::{debug, error, info, trace, warn};
 
@@ -185,20 +185,15 @@ impl TurnServerProtocol {
                 {
                     trace!(
                         "checking user: {username:?} vs {:?} || {userhash:?} vs {:?}",
-                        client.username,
-                        client.userhash
+                        client.username, client.userhash
                     );
                     if username.as_ref().is_some_and(|u| {
-                        client
-                            .username
-                            .as_ref()
-                            .map_or(true, |cu| u.username() != cu)
+                        client.username.as_ref().is_none_or(|cu| u.username() != cu)
                     }) || userhash.as_ref().map(|u| *u.hash()) != client.userhash
                     {
                         trace!(
                             "mismatched username: {username:?} vs {:?} || {userhash:?} vs {:?}",
-                            client.username,
-                            client.userhash
+                            client.username, client.userhash
                         );
                         let error = ErrorCode::builder(ErrorCode::WRONG_CREDENTIALS)
                             .build()
@@ -684,9 +679,7 @@ impl TurnServerProtocol {
         if request_lifetime == 0 {
             info!(
                 "request to delete allocation ({}: local: {} -> {} remote) with requested family {requested_family:?}",
-                transmit.transport,
-                transmit.to,
-                transmit.from
+                transmit.transport, transmit.to, transmit.from
             );
             if let Some(family) = requested_family {
                 if let Some(allocation_idx) = client.allocations.iter().position(|allocation| {
@@ -694,9 +687,9 @@ impl TurnServerProtocol {
                         || (family == AddressFamily::IPV6 && allocation.addr.is_ipv6())
                 }) {
                     modified = true;
-                    *tcp_stun_change = Some(TcpStunChange::Delete(vec![client
-                        .allocations
-                        .swap_remove(allocation_idx)]));
+                    *tcp_stun_change = Some(TcpStunChange::Delete(vec![
+                        client.allocations.swap_remove(allocation_idx),
+                    ]));
                     if client.allocations.is_empty() {
                         self.remove_client_by_5tuple(
                             transmit.transport,
@@ -719,7 +712,7 @@ impl TurnServerProtocol {
             }
         } else {
             for allocation in client.allocations.iter_mut() {
-                if requested_family.map_or(true, |family| {
+                if requested_family.is_none_or(|family| {
                     (family == AddressFamily::IPV4 && allocation.addr.is_ipv4())
                         || (family == AddressFamily::IPV6 && allocation.addr.is_ipv6())
                 }) {
@@ -1375,9 +1368,7 @@ impl TurnServerProtocol {
         else {
             trace!(
                 "no client for transport {} from {}, to {}",
-                transmit.transport,
-                transmit.from,
-                transmit.to
+                transmit.transport, transmit.from, transmit.to
             );
             return Err(());
         };
@@ -1426,7 +1417,7 @@ impl TurnServerProtocol {
         tcp_stun_change: &mut Option<TcpStunChange>,
     ) -> Result<Option<InternalHandleStun>, MessageWriteVec> {
         trace!("received STUN message {}", transmit.data);
-        let ret = if transmit
+        if transmit
             .data
             .has_class(stun_proto::types::message::MessageClass::Request)
         {
@@ -1506,8 +1497,7 @@ impl TurnServerProtocol {
             }
         } else {
             Ok(None)
-        };
-        ret
+        }
     }
 
     fn client_from_5tuple(
@@ -1802,8 +1792,7 @@ impl TurnServer {
         for pending in allocation.pending_tcp_connect.drain(..) {
             trace!(
                 "removing pending tcp connection to peer {} from {}",
-                pending.peer_addr,
-                pending.relayed_addr
+                pending.peer_addr, pending.relayed_addr
             );
             pending_socket_removals.push_back(Socket5Tuple {
                 transport: TransportType::Tcp,
@@ -1816,8 +1805,7 @@ impl TurnServer {
                 remove_peer_connections.push((relayed_addr, peer_addr));
                 trace!(
                     "removing tcp peer connection from {} to {}",
-                    relayed_addr,
-                    peer_addr
+                    relayed_addr, peer_addr
                 );
                 pending_socket_removals.push_back(Socket5Tuple {
                     transport: TransportType::Tcp,
@@ -1858,8 +1846,7 @@ impl TurnServer {
             if remove_client_connections.contains(&(client_addr, listen_addr)) {
                 trace!(
                     "removing tcp connection to client {} from {}",
-                    client_addr,
-                    listen_addr
+                    client_addr, listen_addr
                 );
                 pending_socket_removals.push_back(Socket5Tuple {
                     transport: TransportType::Tcp,
@@ -2243,7 +2230,9 @@ impl TurnServerApi for TurnServer {
                     let (client_addr, listen_addr) = (transmit.from, transmit.to);
                     match tcp_buffer.incoming_tcp(transmit) {
                         Err(_) => {
-                            debug!("TCP data from {client_addr} is neither STUN nor a channel, closing");
+                            debug!(
+                                "TCP data from {client_addr} is neither STUN nor a channel, closing"
+                            );
                             self.close_tcp_client(client_addr, listen_addr);
                             None
                         }
@@ -2892,10 +2881,14 @@ impl TurnServerApi for TurnServer {
                 && pending.allocation_transport == allocation_transport
                 && pending.pending_families.contains(&family)
         }) else {
-            warn!("No pending allocation for transport: {transport}, local: {local_addr:?}, remote {remote_addr:?}");
+            warn!(
+                "No pending allocation for transport: {transport}, local: {local_addr:?}, remote {remote_addr:?}"
+            );
             return;
         };
-        info!("pending allocation for transport: {transport}, local: {local_addr:?}, remote {remote_addr:?} family {family} resulted in Udp {socket_addr:?}");
+        info!(
+            "pending allocation for transport: {transport}, local: {local_addr:?}, remote {remote_addr:?} family {family} resulted in Udp {socket_addr:?}"
+        );
         let pending = &mut self.protocol.pending_allocates[position];
         pending.pending_sockets.push((family, socket_addr));
         pending.pending_families.retain(|fam| *fam != family);
@@ -3008,7 +3001,9 @@ impl TurnServerApi for TurnServer {
             self.protocol
                 .mut_client_from_5tuple(TransportType::Tcp, listen_addr, client_addr)
         else {
-            warn!("No client for transport: TCP, local: {listen_addr}, remote {client_addr}. Ignoring TCP connect");
+            warn!(
+                "No client for transport: TCP, local: {listen_addr}, remote {client_addr}. Ignoring TCP connect"
+            );
             return;
         };
         let Some(allocation) = client.allocations.iter_mut().find(|allocation| {
@@ -3261,9 +3256,9 @@ enum InternalHandleStun {
 mod tests {
     use alloc::string::{String, ToString};
     use turn_types::{
+        TurnCredentials,
         prelude::DelayedTransmitBuild,
         stun::message::{IntegrityAlgorithm, LongTermKeyCredentials, Method},
-        TurnCredentials,
     };
 
     use super::*;
@@ -4699,15 +4694,17 @@ mod tests {
         let _init = crate::tests::test_init_log();
         let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
-        assert!(server
-            .recv(
-                client_transmit(
-                    send_indication(peer_address(), [8; 9].as_slice()),
-                    server.transport()
-                ),
-                now,
-            )
-            .is_none());
+        assert!(
+            server
+                .recv(
+                    client_transmit(
+                        send_indication(peer_address(), [8; 9].as_slice()),
+                        server.transport()
+                    ),
+                    now,
+                )
+                .is_none()
+        );
     }
 
     #[test]
@@ -4726,15 +4723,17 @@ mod tests {
         );
         let (_msg, lifetime) = validate_authenticated_allocate_reply(&reply.data, creds.clone());
         let now = now + Duration::from_secs(lifetime as u64 + 1);
-        assert!(server
-            .recv(
-                client_transmit(
-                    send_indication(peer_address(), [8; 9].as_slice()),
-                    server.transport()
-                ),
-                now,
-            )
-            .is_none());
+        assert!(
+            server
+                .recv(
+                    client_transmit(
+                        send_indication(peer_address(), [8; 9].as_slice()),
+                        server.transport()
+                    ),
+                    now,
+                )
+                .is_none()
+        );
     }
 
     #[test]
@@ -4753,15 +4752,17 @@ mod tests {
         );
         let (_msg, lifetime) = validate_authenticated_allocate_reply(&reply.data, creds.clone());
         let now = now + Duration::from_secs(lifetime as u64 + 1);
-        assert!(server
-            .recv(
-                client_transmit(
-                    send_indication(ipv6_peer_address(), [8; 9].as_slice()),
-                    server.transport()
-                ),
-                now,
-            )
-            .is_none());
+        assert!(
+            server
+                .recv(
+                    client_transmit(
+                        send_indication(ipv6_peer_address(), [8; 9].as_slice()),
+                        server.transport()
+                    ),
+                    now,
+                )
+                .is_none()
+        );
     }
 
     #[test]
@@ -4779,15 +4780,17 @@ mod tests {
             now,
         );
         validate_authenticated_allocate_reply(&reply.data, creds.clone());
-        assert!(server
-            .recv(
-                client_transmit(
-                    send_indication(peer_address(), [8; 9].as_slice()),
-                    server.transport()
-                ),
-                now,
-            )
-            .is_none());
+        assert!(
+            server
+                .recv(
+                    client_transmit(
+                        send_indication(peer_address(), [8; 9].as_slice()),
+                        server.transport()
+                    ),
+                    now,
+                )
+                .is_none()
+        );
     }
 
     fn create_permission_with_address(
@@ -4909,25 +4912,27 @@ mod tests {
             now,
         );
         validate_authenticated_allocate_reply(&reply.data, creds.clone());
-        assert!(server
-            .recv(
-                client_transmit(
-                    {
-                        let request = Message::builder(
-                            MessageType::from_class_method(
-                                MessageClass::Indication,
-                                Method::new(0x123),
-                            ),
-                            TransactionId::generate(),
-                            MessageWriteVec::new(),
-                        );
-                        request.finish()
-                    },
-                    server.transport(),
-                ),
-                now,
-            )
-            .is_none());
+        assert!(
+            server
+                .recv(
+                    client_transmit(
+                        {
+                            let request = Message::builder(
+                                MessageType::from_class_method(
+                                    MessageClass::Indication,
+                                    Method::new(0x123),
+                                ),
+                                TransactionId::generate(),
+                                MessageWriteVec::new(),
+                            );
+                            request.finish()
+                        },
+                        server.transport(),
+                    ),
+                    now,
+                )
+                .is_none()
+        );
     }
 
     #[test]
@@ -4935,9 +4940,11 @@ mod tests {
         let _init = crate::tests::test_init_log();
         let now = Instant::ZERO;
         let mut server = new_server(TransportType::Udp);
-        assert!(server
-            .recv(client_transmit([4; 12], server.transport()), now)
-            .is_none());
+        assert!(
+            server
+                .recv(client_transmit([4; 12], server.transport()), now)
+                .is_none()
+        );
     }
 
     #[test]
@@ -4955,9 +4962,11 @@ mod tests {
             now,
         );
         validate_authenticated_allocate_reply(&reply.data, creds.clone());
-        assert!(server
-            .recv(client_transmit([4; 12], server.transport()), now)
-            .is_none());
+        assert!(
+            server
+                .recv(client_transmit([4; 12], server.transport()), now)
+                .is_none()
+        );
     }
 
     #[test]
@@ -4975,20 +4984,22 @@ mod tests {
             now,
         );
         validate_authenticated_allocate_reply(&reply.data, creds.clone());
-        assert!(server
-            .recv(
-                client_transmit(
-                    {
-                        let channel = ChannelData::new(0x4000, [7; 3].as_slice());
-                        let mut out = vec![0; 7];
-                        channel.write_into_unchecked(&mut out);
-                        out
-                    },
-                    server.transport()
-                ),
-                now
-            )
-            .is_none());
+        assert!(
+            server
+                .recv(
+                    client_transmit(
+                        {
+                            let channel = ChannelData::new(0x4000, [7; 3].as_slice());
+                            let mut out = vec![0; 7];
+                            channel.write_into_unchecked(&mut out);
+                            out
+                        },
+                        server.transport()
+                    ),
+                    now
+                )
+                .is_none()
+        );
     }
 
     #[test]
@@ -5008,20 +5019,22 @@ mod tests {
         validate_authenticated_allocate_reply(&reply.data, creds.clone());
         channel_bind(&mut server, creds.clone(), &nonce, now);
         let now = now + PERMISSION_DURATION + Duration::from_secs(1);
-        assert!(server
-            .recv(
-                client_transmit(
-                    {
-                        let channel = ChannelData::new(0x4000, [7; 3].as_slice());
-                        let mut out = vec![0; 7];
-                        channel.write_into_unchecked(&mut out);
-                        out
-                    },
-                    server.transport()
-                ),
-                now
-            )
-            .is_none());
+        assert!(
+            server
+                .recv(
+                    client_transmit(
+                        {
+                            let channel = ChannelData::new(0x4000, [7; 3].as_slice());
+                            let mut out = vec![0; 7];
+                            channel.write_into_unchecked(&mut out);
+                            out
+                        },
+                        server.transport()
+                    ),
+                    now
+                )
+                .is_none()
+        );
     }
 
     #[test]
@@ -5041,17 +5054,19 @@ mod tests {
         validate_authenticated_allocate_reply(&reply.data, creds.clone());
         create_permission(&mut server, creds.clone(), &nonce, now);
         let now = now + PERMISSION_DURATION + Duration::from_secs(1);
-        assert!(server
-            .recv(
-                Transmit::new(
-                    [6; 7],
-                    TransportType::Udp,
-                    peer_address(),
-                    relayed_address()
-                ),
-                now
-            )
-            .is_none());
+        assert!(
+            server
+                .recv(
+                    Transmit::new(
+                        [6; 7],
+                        TransportType::Udp,
+                        peer_address(),
+                        relayed_address()
+                    ),
+                    now
+                )
+                .is_none()
+        );
     }
 
     fn create_udp(source: SocketAddr, destination: SocketAddr) -> Vec<u8> {
@@ -5163,19 +5178,21 @@ mod tests {
         validate_authenticated_allocate_reply(&reply.data, creds.clone());
         create_permission(&mut server, creds.clone(), &nonce, now);
         // icmpv6 for ipv4 allocation is ignored
-        assert!(server
-            .recv_icmp(
-                AddressFamily::IPV6,
-                create_icmpv6(
-                    pnet_packet::icmpv6::Icmpv6Types::DestinationUnreachable,
-                    pnet_packet::icmpv6::Icmpv6Code::new(0),
-                    0,
-                    create_udp(ipv6_peer_address(), ipv6_relayed_address())
+        assert!(
+            server
+                .recv_icmp(
+                    AddressFamily::IPV6,
+                    create_icmpv6(
+                        pnet_packet::icmpv6::Icmpv6Types::DestinationUnreachable,
+                        pnet_packet::icmpv6::Icmpv6Code::new(0),
+                        0,
+                        create_udp(ipv6_peer_address(), ipv6_relayed_address())
+                    )
+                    .packet(),
+                    now
                 )
-                .packet(),
-                now
-            )
-            .is_none());
+                .is_none()
+        );
         let icmp_type = pnet_packet::icmp::IcmpTypes::DestinationUnreachable;
         let icmp_code =
             pnet_packet::icmp::destination_unreachable::IcmpCodes::DestinationHostUnreachable;
@@ -5223,19 +5240,21 @@ mod tests {
             now,
         );
         // icmpv4 for ipv6 allocation is ignored
-        assert!(server
-            .recv_icmp(
-                AddressFamily::IPV4,
-                create_icmpv4(
-                    pnet_packet::icmp::IcmpTypes::DestinationUnreachable,
-                    pnet_packet::icmp::IcmpCode::new(0),
-                    0,
-                    create_udp(peer_address(), relayed_address())
+        assert!(
+            server
+                .recv_icmp(
+                    AddressFamily::IPV4,
+                    create_icmpv4(
+                        pnet_packet::icmp::IcmpTypes::DestinationUnreachable,
+                        pnet_packet::icmp::IcmpCode::new(0),
+                        0,
+                        create_udp(peer_address(), relayed_address())
+                    )
+                    .packet(),
+                    now
                 )
-                .packet(),
-                now
-            )
-            .is_none());
+                .is_none()
+        );
         let icmp_type = pnet_packet::icmpv6::Icmpv6Types::DestinationUnreachable;
         let icmp_code = pnet_packet::icmpv6::Icmpv6Code::new(3);
         let transmit = server
@@ -5287,9 +5306,11 @@ mod tests {
             out
         };
         for i in 1..data.len() - 1 {
-            assert!(server
-                .recv(client_transmit(&data[..i], server.transport()), now)
-                .is_none());
+            assert!(
+                server
+                    .recv(client_transmit(&data[..i], server.transport()), now)
+                    .is_none()
+            );
             let ret = server
                 .recv(client_transmit(&data[i..], server.transport()), now)
                 .unwrap();
@@ -5323,9 +5344,11 @@ mod tests {
         msg.add_attribute(&AData::new(&[7; 3])).unwrap();
         let data = msg.clone().build();
         for i in 1..data.len() - 1 {
-            assert!(server
-                .recv(client_transmit(&data[..i], server.transport()), now)
-                .is_none());
+            assert!(
+                server
+                    .recv(client_transmit(&data[..i], server.transport()), now)
+                    .is_none()
+            );
             let ret = server
                 .recv(client_transmit(&data[i..], server.transport()), now)
                 .unwrap();
@@ -5362,23 +5385,27 @@ mod tests {
 
             let initial_allocate1 = initial_allocate_msg();
             let initial_allocate2 = initial_allocate_msg();
-            assert!(server
-                .recv(
-                    client_transmit(&initial_allocate1[..split], TransportType::Tcp,),
-                    now
-                )
-                .is_none());
+            assert!(
+                server
+                    .recv(
+                        client_transmit(&initial_allocate1[..split], TransportType::Tcp,),
+                        now
+                    )
+                    .is_none()
+            );
 
-            assert!(server
-                .recv(
-                    client_transmit_from(
-                        &initial_allocate2[..split],
-                        TransportType::Tcp,
-                        client_address2,
-                    ),
-                    now
-                )
-                .is_none());
+            assert!(
+                server
+                    .recv(
+                        client_transmit_from(
+                            &initial_allocate2[..split],
+                            TransportType::Tcp,
+                            client_address2,
+                        ),
+                        now
+                    )
+                    .is_none()
+            );
 
             let reply = server
                 .recv(
@@ -5417,59 +5444,71 @@ mod tests {
                 &families2,
             );
 
-            assert!(server
-                .recv(
-                    client_transmit(&auth_alloc[..split], TransportType::Tcp,),
-                    now
-                )
-                .is_none());
+            assert!(
+                server
+                    .recv(
+                        client_transmit(&auth_alloc[..split], TransportType::Tcp,),
+                        now
+                    )
+                    .is_none()
+            );
 
-            assert!(server
-                .recv(
-                    client_transmit_from(
-                        &auth_alloc2[..split],
-                        TransportType::Tcp,
-                        client_address2,
-                    ),
-                    now
-                )
-                .is_none());
+            assert!(
+                server
+                    .recv(
+                        client_transmit_from(
+                            &auth_alloc2[..split],
+                            TransportType::Tcp,
+                            client_address2,
+                        ),
+                        now
+                    )
+                    .is_none()
+            );
 
-            assert!(server
-                .recv(
-                    client_transmit(&auth_alloc[split..], TransportType::Tcp),
-                    now,
-                )
-                .is_none());
+            assert!(
+                server
+                    .recv(
+                        client_transmit(&auth_alloc[split..], TransportType::Tcp),
+                        now,
+                    )
+                    .is_none()
+            );
             let reply = authenticated_allocate_reply(&mut server, &families, now);
             validate_authenticated_allocate_reply(&reply.data, creds.clone());
 
-            assert!(server
-                .recv(
-                    client_transmit_from(
-                        &auth_alloc2[split..],
-                        TransportType::Tcp,
-                        client_address2
-                    ),
-                    now,
-                )
-                .is_none());
+            assert!(
+                server
+                    .recv(
+                        client_transmit_from(
+                            &auth_alloc2[split..],
+                            TransportType::Tcp,
+                            client_address2
+                        ),
+                        now,
+                    )
+                    .is_none()
+            );
             let reply = authenticated_allocate_reply(&mut server, &families2, now);
             validate_authenticated_allocate_reply(&reply.data, creds2.clone());
 
             let perm = create_permission_request(creds.clone(), &nonce, peer_address());
             let perm2 = create_permission_request(creds.clone(), &nonce2, peer_address2);
 
-            assert!(server
-                .recv(client_transmit(&perm[..split], TransportType::Tcp,), now)
-                .is_none());
+            assert!(
+                server
+                    .recv(client_transmit(&perm[..split], TransportType::Tcp,), now)
+                    .is_none()
+            );
 
-            assert!(server
-                .recv(
-                    client_transmit_from(&perm2[..split], TransportType::Tcp, client_address2,),
-                    now
-                )
-                .is_none());
+            assert!(
+                server
+                    .recv(
+                        client_transmit_from(&perm2[..split], TransportType::Tcp, client_address2,),
+                        now
+                    )
+                    .is_none()
+            );
 
             let reply = server
                 .recv(client_transmit(&perm[split..], TransportType::Tcp), now)
@@ -5532,9 +5571,11 @@ mod tests {
         now: Instant,
     ) -> u32 {
         let msg = tcp_connect_msg(peer_addr, credentials, nonce);
-        assert!(server
-            .recv(client_transmit(msg, server.transport()), now)
-            .is_none());
+        assert!(
+            server
+                .recv(client_transmit(msg, server.transport()), now)
+                .is_none()
+        );
         let TurnServerPollRet::TcpConnect {
             relayed_addr,
             peer_addr,
@@ -5682,9 +5723,11 @@ mod tests {
     const UNPARSEABLE_TCP: [u8; 8] = [0x01, 0x01, 0x00, 0x04, 0xde, 0xad, 0xbe, 0xef];
 
     fn assert_tcp_client_closed(server: &mut TurnServer, now: Instant) {
-        assert!(!server
-            .incoming_tcp_buffers
-            .contains_key(&(client_address(), listen_address())));
+        assert!(
+            !server
+                .incoming_tcp_buffers
+                .contains_key(&(client_address(), listen_address()))
+        );
         let TurnServerPollRet::TcpClose {
             local_addr,
             remote_addr,
@@ -5701,9 +5744,11 @@ mod tests {
         let _init = crate::tests::test_init_log();
         let now = Instant::ZERO;
         let mut server = new_server(TransportType::Tcp);
-        assert!(server
-            .recv(client_transmit(UNPARSEABLE_TCP, TransportType::Tcp), now)
-            .is_none());
+        assert!(
+            server
+                .recv(client_transmit(UNPARSEABLE_TCP, TransportType::Tcp), now)
+                .is_none()
+        );
         assert_tcp_client_closed(&mut server, now);
     }
 
@@ -5743,17 +5788,19 @@ mod tests {
 
         // early peer data
         let peer_data = [12; 6];
-        assert!(server
-            .recv(
-                Transmit::new(
-                    peer_data,
-                    server.transport(),
-                    peer_address(),
-                    relayed_address()
-                ),
-                now,
-            )
-            .is_none());
+        assert!(
+            server
+                .recv(
+                    Transmit::new(
+                        peer_data,
+                        server.transport(),
+                        peer_address(),
+                        relayed_address()
+                    ),
+                    now,
+                )
+                .is_none()
+        );
 
         // client data sent directly after CONNECTION-BIND
         let data = [9; 5];
@@ -5990,9 +6037,11 @@ mod tests {
             create_permission(&mut server, creds.clone(), &nonce, now);
 
             let msg = tcp_connect_msg(peer_address(), creds.clone(), &nonce);
-            assert!(server
-                .recv(client_transmit(msg, server.transport()), now)
-                .is_none());
+            assert!(
+                server
+                    .recv(client_transmit(msg, server.transport()), now)
+                    .is_none()
+            );
             let TurnServerPollRet::TcpConnect {
                 relayed_addr,
                 peer_addr,

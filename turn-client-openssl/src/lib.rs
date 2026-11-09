@@ -203,7 +203,9 @@ impl TurnClientOpensslTls {
             protocol: match transport {
                 TransportType::Udp => {
                     if config.allocation_transport() != TransportType::Udp {
-                        panic!("Cannot create a TCP allocation with a UDP connection to the TURN server")
+                        panic!(
+                            "Cannot create a TCP allocation with a UDP connection to the TURN server"
+                        )
                     }
                     TcpOrUdp::Udp(TurnClientUdp::allocate(local_addr, remote_addr, config))
                 }

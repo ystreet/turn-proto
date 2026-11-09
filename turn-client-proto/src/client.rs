@@ -200,7 +200,7 @@ macro_rules! impl_client {
             type Item = ($crate::types::TransportType, core::net::SocketAddr);
             fn next(&mut self) -> Option<Self::Item> {
                 match self {
-                    $(Self::$variant(ref mut val) => val.next(),)+
+                    $(Self::$variant(val) => val.next(),)+
                 }
             }
         }
@@ -211,7 +211,7 @@ macro_rules! impl_client {
             type Item = core::net::IpAddr;
             fn next(&mut self) -> Option<Self::Item> {
                 match self {
-                    $(Self::$variant(ref mut val) => val.next(),)+
+                    $(Self::$variant(val) => val.next(),)+
                 }
             }
         }

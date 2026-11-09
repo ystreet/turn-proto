@@ -361,10 +361,10 @@ mod tests {
     use core::net::SocketAddr;
 
     use stun_types::{
+        TransportType,
         attribute::Software,
         message::{Message, MessageWriteVec},
         prelude::{MessageWrite, MessageWriteExt},
-        TransportType,
     };
     use tracing::info;
 
@@ -758,14 +758,15 @@ mod tests {
             &[0xff, 0xff, 0x00, 0x04][..],
         ] {
             let mut tcp = TurnTcpBuffer::new();
-            assert!(tcp
-                .incoming_tcp(Transmit::new(
+            assert!(
+                tcp.incoming_tcp(Transmit::new(
                     garbage,
                     TransportType::Tcp,
                     remote_addr,
                     local_addr,
                 ))
-                .is_err());
+                .is_err()
+            );
             assert!(tcp.is_empty());
         }
     }
@@ -776,24 +777,26 @@ mod tests {
         let (local_addr, remote_addr) = generate_addresses();
         let mut tcp = TurnTcpBuffer::new();
         // The first bytes could still be the start of a STUN message.
-        assert!(tcp
-            .incoming_tcp(Transmit::new(
+        assert!(
+            tcp.incoming_tcp(Transmit::new(
                 &[0x00, 0x01, 0x00][..],
                 TransportType::Tcp,
                 remote_addr,
                 local_addr,
             ))
             .unwrap()
-            .is_none());
+            .is_none()
+        );
         // The magic cookie does not match.
-        assert!(tcp
-            .incoming_tcp(Transmit::new(
+        assert!(
+            tcp.incoming_tcp(Transmit::new(
                 &[0x00, 0xde, 0xad][..],
                 TransportType::Tcp,
                 remote_addr,
                 local_addr,
             ))
-            .is_err());
+            .is_err()
+        );
         assert!(tcp.is_empty());
     }
 

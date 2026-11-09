@@ -23,7 +23,7 @@ tracing.workspace = true
 turn-types.workspace = true
 pnet_packet = { version = "0.35", default-features = false }
 openssl = { workspace = true, optional = true }
-rand = { version = "0.9", default-features = false, features = ["alloc", "os_rng"] }
+rand = { version = "0.10", default-features = false }
 rustls = { workspace = true, optional = true }
 smallvec = "1"
 

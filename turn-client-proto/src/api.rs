@@ -24,10 +24,10 @@ use turn_types::stun::message::IntegrityAlgorithm;
 pub use turn_types::transmit::TransmitBuild;
 use turn_types::transmit::{DelayedChannel, DelayedMessage};
 
-pub use stun_proto::agent::Transmit;
-pub use stun_proto::types::data::Data;
-use stun_proto::types::TransportType;
 use stun_proto::Instant;
+pub use stun_proto::agent::Transmit;
+use stun_proto::types::TransportType;
+pub use stun_proto::types::data::Data;
 use turn_types::{AddressFamily, TurnCredentials};
 
 /// The public API of a TURN client.

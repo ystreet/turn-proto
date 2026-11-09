@@ -16,18 +16,18 @@ use alloc::sync::Arc;
 use core::time::Duration;
 use std::net::SocketAddr;
 
+use turn_client_proto::types::Instant;
 use turn_client_proto::types::message::CREATE_PERMISSION;
 use turn_client_proto::types::stun::message::{
     Message, MessageType, MessageWriteVec, TransactionId,
 };
 use turn_client_proto::types::stun::prelude::MessageWrite;
-use turn_client_proto::types::Instant;
 use turn_client_proto::types::{AddressFamily, TransportType, TurnCredentials};
 
 use turn_client_proto::api::*;
 
-use turn_server_rustls::api::{TurnServerApi, TurnServerPollRet};
 use turn_server_rustls::RustlsTurnServer;
+use turn_server_rustls::api::{TurnServerApi, TurnServerPollRet};
 
 use turn_client_rustls::TurnClientRustls;
 
@@ -41,10 +41,10 @@ use rustls::pki_types::PrivateKeyDer;
 use rustls::{ClientConfig, ServerConfig};
 
 mod danger {
-    use rustls::client::danger::HandshakeSignatureValid;
-    use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
-    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
     use rustls::DigitallySignedStruct;
+    use rustls::client::danger::HandshakeSignatureValid;
+    use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 
     use alloc::vec::Vec;
 
@@ -216,10 +216,11 @@ fn create_permission<A: TurnClientApi, S: TurnServerApi>(
     let event = test.client.poll_event().unwrap();
     assert!(matches!(event, TurnEvent::PermissionCreated(_, _)));
     let (transport, relayed) = test.client.relayed_addresses().next().unwrap();
-    assert!(test
-        .client
-        .permissions(transport, relayed)
-        .any(|perm_ip| perm_ip == test.peer_addr.ip()));
+    assert!(
+        test.client
+            .permissions(transport, relayed)
+            .any(|perm_ip| perm_ip == test.peer_addr.ip())
+    );
     assert!(test.client.have_permission(transport, test.peer_addr.ip()));
     now
 }
@@ -245,10 +246,11 @@ fn channel_bind<A: TurnClientApi, S: TurnServerApi>(
         assert!(matches!(event, TurnEvent::PermissionCreated(_, _)));
     }
     let (transport, relayed) = test.client.relayed_addresses().next().unwrap();
-    assert!(test
-        .client
-        .permissions(transport, relayed)
-        .any(|perm_ip| perm_ip == test.peer_addr.ip()));
+    assert!(
+        test.client
+            .permissions(transport, relayed)
+            .any(|perm_ip| perm_ip == test.peer_addr.ip())
+    );
     assert!(test.client.have_permission(transport, test.peer_addr.ip()));
     now
 }
@@ -520,18 +522,19 @@ fn test_turn_rustls_tcp_allocation_send_recv_client_close() {
     else {
         unreachable!();
     };
-    assert!(test
-        .server
-        .recv(
-            Transmit::new(
-                [],
-                TransportType::Tcp,
-                test.local_tcp_socket,
-                test.server.listen_address()
-            ),
-            now
-        )
-        .is_none());
+    assert!(
+        test.server
+            .recv(
+                Transmit::new(
+                    [],
+                    TransportType::Tcp,
+                    test.local_tcp_socket,
+                    test.server.listen_address()
+                ),
+                now
+            )
+            .is_none()
+    );
     assert_eq!(local_addr, test.server.listen_address());
     assert_eq!(remote_addr, test.local_tcp_socket);
     test.client.poll(now);
@@ -553,18 +556,19 @@ fn test_turn_rustls_tcp_allocation_send_recv_peer_close() {
     tcp_sendrecv_data(&mut test, now);
     assert!(test.client.poll_transmit(now).is_none());
     assert!(test.client.poll_event().is_none());
-    assert!(test
-        .server
-        .recv(
-            Transmit::new(
-                vec![],
-                TransportType::Tcp,
-                test.peer_addr,
-                test.turn_alloc_addr,
-            ),
-            now,
-        )
-        .is_none());
+    assert!(
+        test.server
+            .recv(
+                Transmit::new(
+                    vec![],
+                    TransportType::Tcp,
+                    test.peer_addr,
+                    test.turn_alloc_addr,
+                ),
+                now,
+            )
+            .is_none()
+    );
     let TurnServerPollRet::WaitUntil(_) = test.server.poll(now) else {
         unreachable!();
     };
