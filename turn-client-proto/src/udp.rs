@@ -15,9 +15,9 @@
 use alloc::vec::Vec;
 use core::net::{IpAddr, SocketAddr};
 
+use stun_proto::Instant;
 use stun_proto::agent::{StunAgent, Transmit};
 use stun_proto::types::data::Data;
-use stun_proto::Instant;
 
 use stun_proto::types::TransportType;
 
@@ -216,7 +216,7 @@ impl TurnClientApi for TurnClientUdp {
                         },
                         transport,
                         peer,
-                    })
+                    });
                 }
             }
         };

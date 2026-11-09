@@ -13,8 +13,8 @@ extern crate alloc;
 use alloc::string::String;
 use core::time::Duration;
 use std::net::SocketAddr;
-use stun_proto::agent::Transmit;
 use stun_proto::Instant;
+use stun_proto::agent::Transmit;
 
 use openssl::asn1::{Asn1Integer, Asn1Time, Asn1Type};
 use openssl::bn::BigNum;
@@ -22,7 +22,7 @@ use openssl::hash::MessageDigest;
 use openssl::nid::Nid;
 use openssl::pkey::{PKey, Private};
 use openssl::ssl::{SslContext, SslMethod};
-use openssl::x509::{X509Name, X509};
+use openssl::x509::{X509, X509Name};
 use tracing::{debug, trace};
 
 use turn_client_proto::types::message::CREATE_PERMISSION;
@@ -36,8 +36,8 @@ use turn_client_proto::api::*;
 
 use turn_client_openssl::TurnClientOpensslTls;
 
-use turn_server_openssl::api::{TurnServerApi, TurnServerPollRet};
 use turn_server_openssl::OpensslTurnServer;
+use turn_server_openssl::api::{TurnServerApi, TurnServerPollRet};
 
 use api_tests::*;
 
@@ -243,10 +243,11 @@ fn create_permission<A: TurnClientApi, S: TurnServerApi>(
     let event = test.client.poll_event().unwrap();
     assert!(matches!(event, TurnEvent::PermissionCreated(_, _)));
     let (transport, relayed) = test.client.relayed_addresses().next().unwrap();
-    assert!(test
-        .client
-        .permissions(transport, relayed)
-        .any(|perm_ip| perm_ip == test.peer_addr.ip()));
+    assert!(
+        test.client
+            .permissions(transport, relayed)
+            .any(|perm_ip| perm_ip == test.peer_addr.ip())
+    );
     assert!(test.client.have_permission(transport, test.peer_addr.ip()));
     now
 }
@@ -271,10 +272,11 @@ fn channel_bind<A: TurnClientApi, S: TurnServerApi>(
         assert!(matches!(event, TurnEvent::PermissionCreated(_, _)));
     }
     let (transport, relayed) = test.client.relayed_addresses().next().unwrap();
-    assert!(test
-        .client
-        .permissions(transport, relayed)
-        .any(|perm_ip| perm_ip == test.peer_addr.ip()));
+    assert!(
+        test.client
+            .permissions(transport, relayed)
+            .any(|perm_ip| perm_ip == test.peer_addr.ip())
+    );
     assert!(test.client.have_permission(transport, test.peer_addr.ip()));
     now
 }
@@ -553,18 +555,19 @@ fn test_turn_openssl_tcp_allocation_send_recv_client_close() {
     else {
         unreachable!();
     };
-    assert!(test
-        .server
-        .recv(
-            Transmit::new(
-                [],
-                TransportType::Tcp,
-                test.local_tcp_socket,
-                test.server.listen_address()
-            ),
-            now
-        )
-        .is_none());
+    assert!(
+        test.server
+            .recv(
+                Transmit::new(
+                    [],
+                    TransportType::Tcp,
+                    test.local_tcp_socket,
+                    test.server.listen_address()
+                ),
+                now
+            )
+            .is_none()
+    );
     assert_eq!(local_addr, test.server.listen_address());
     assert_eq!(remote_addr, test.local_tcp_socket);
     test.client.poll(now);
@@ -586,18 +589,19 @@ fn test_turn_openssl_tcp_allocation_send_recv_peer_close() {
     tcp_sendrecv_data(&mut test, now);
     assert!(test.client.poll_transmit(now).is_none());
     assert!(test.client.poll_event().is_none());
-    assert!(test
-        .server
-        .recv(
-            Transmit::new(
-                vec![],
-                TransportType::Tcp,
-                test.peer_addr,
-                test.turn_alloc_addr,
-            ),
-            now,
-        )
-        .is_none());
+    assert!(
+        test.server
+            .recv(
+                Transmit::new(
+                    vec![],
+                    TransportType::Tcp,
+                    test.peer_addr,
+                    test.turn_alloc_addr,
+                ),
+                now,
+            )
+            .is_none()
+    );
     let TurnServerPollRet::WaitUntil(_) = test.server.poll(now) else {
         unreachable!();
     };

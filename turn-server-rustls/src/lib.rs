@@ -47,14 +47,14 @@ use core::net::SocketAddr;
 use core::time::Duration;
 use std::io::{Read, Write};
 
+use turn_server_proto::types::AddressFamily;
 use turn_server_proto::types::prelude::DelayedTransmitBuild;
 use turn_server_proto::types::transmit::TransmitBuild;
-use turn_server_proto::types::AddressFamily;
 
 use turn_server_proto::api::Transmit;
 use turn_server_proto::server::TurnServer;
-use turn_server_proto::types::stun::TransportType;
 use turn_server_proto::types::Instant;
+use turn_server_proto::types::stun::TransportType;
 
 pub use turn_server_proto as proto;
 pub use turn_server_proto::api;

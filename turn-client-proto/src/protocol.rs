@@ -18,14 +18,15 @@ use alloc::vec::Vec;
 use core::net::{IpAddr, SocketAddr};
 use core::ops::Range;
 use core::time::Duration;
+use stun_proto::Instant;
 use stun_proto::agent::{StunAgent, StunAgentPollRet, Transmit};
 use stun_proto::auth::{LongTermClientAuth, LongTermClientValidation};
+use stun_proto::types::TransportType;
 use stun_proto::types::attribute::ErrorCode;
 use stun_proto::types::data::Data;
 use stun_proto::types::message::{Message, MessageClass, TransactionId};
-use stun_proto::types::TransportType;
-use stun_proto::Instant;
 use tracing::{debug, info, trace, warn};
+use turn_types::AddressFamily;
 use turn_types::attribute::{
     AdditionalAddressFamily, ChannelNumber, ConnectionId, Icmp, Lifetime, RequestedAddressFamily,
     XorPeerAddress, XorRelayedAddress,
@@ -37,7 +38,6 @@ use turn_types::stun::message::{MessageHeader, MessageType, MessageWriteVec};
 use turn_types::stun::prelude::{
     Attribute, AttributeExt, AttributeFromRaw, AttributeStaticType, MessageWrite, MessageWriteExt,
 };
-use turn_types::AddressFamily;
 
 use crate::api::{
     BindChannelError, CreatePermissionError, DataRangeOrOwned, DelayedMessageOrChannelSend,
@@ -405,7 +405,11 @@ impl TurnClientProtocol {
                 if !transaction_id.contains(&msg.transaction_id()) {
                     continue;
                 }
-                info!("Received STALE_NONCE in response to BIND_CHANNEL {} for transaction {}, resending", channel.peer_addr, msg.transaction_id());
+                info!(
+                    "Received STALE_NONCE in response to BIND_CHANNEL {} for transaction {}, resending",
+                    channel.peer_addr,
+                    msg.transaction_id()
+                );
                 let (transmit, new_transaction_id) = Self::send_channel_bind_request(
                     stun_agent,
                     stun_auth,
@@ -429,7 +433,11 @@ impl TurnClientProtocol {
             }
             for channel in alloc.channels.iter_mut() {
                 if channel.pending_refresh.contains(&msg.transaction_id()) {
-                    info!("Received STALE_NONCE in response to BIND_CHANNEL {} for transaction {}, resending", channel.peer_addr, msg.transaction_id());
+                    info!(
+                        "Received STALE_NONCE in response to BIND_CHANNEL {} for transaction {}, resending",
+                        channel.peer_addr,
+                        msg.transaction_id()
+                    );
                     let (transmit, transaction_id) = Self::send_channel_bind_request(
                         stun_agent,
                         stun_auth,
@@ -460,7 +468,11 @@ impl TurnClientProtocol {
                     transaction_id.push(new_transaction_id);
                     break 'outer;
                 }
-                info!("Received STALE_NONCE in response to CREATE_PERMISSION {} for transaction {}, resending", permission.ip, msg.transaction_id());
+                info!(
+                    "Received STALE_NONCE in response to CREATE_PERMISSION {} for transaction {}, resending",
+                    permission.ip,
+                    msg.transaction_id()
+                );
                 let peer_addr = permission.ip;
                 let (transmit, new_transaction_id) =
                     Self::send_create_permission_request(stun_agent, stun_auth, peer_addr, now);
@@ -483,7 +495,11 @@ impl TurnClientProtocol {
                         permission.pending_refresh.push(new_transaction_id);
                         break 'outer;
                     }
-                    info!("Received STALE_NONCE in response to CREATE_PERMISSION {} for transaction {}, resending", permission.ip, msg.transaction_id());
+                    info!(
+                        "Received STALE_NONCE in response to CREATE_PERMISSION {} for transaction {}, resending",
+                        permission.ip,
+                        msg.transaction_id()
+                    );
                     let peer_addr = permission.ip;
                     let (transmit, transaction_id) =
                         Self::send_create_permission_request(stun_agent, stun_auth, peer_addr, now);
@@ -562,7 +578,7 @@ impl TurnClientProtocol {
                             }
                             Icmp::TYPE => icmp = Icmp::from_raw(attr).ok(),
                             atype if atype.comprehension_required() => {
-                                return TurnProtocolRecv::Ignored
+                                return TurnProtocolRecv::Ignored;
                             }
                             _atype => (),
                         }
@@ -733,7 +749,9 @@ impl TurnClientProtocol {
                         else {
                             continue;
                         };
-                        debug!("removed pending REFRESH transaction {transaction_id} with requested lifetime of {requested_lifetime}");
+                        debug!(
+                            "removed pending REFRESH transaction {transaction_id} with requested lifetime of {requested_lifetime}"
+                        );
                         if is_success {
                             if requested_lifetime == 0 {
                                 alloc.pending_refresh.clear();
@@ -745,7 +763,9 @@ impl TurnClientProtocol {
                                 };
                                 let lifetime = lifetime.seconds() as u64;
                                 if lifetime < MIN_LIFETIME.as_secs() {
-                                    warn!("Server provided an invalid lifetime value ({lifetime}) in the REFRESH response, ignoring");
+                                    warn!(
+                                        "Server provided an invalid lifetime value ({lifetime}) in the REFRESH response, ignoring"
+                                    );
                                 } else {
                                     alloc.pending_refresh.clear();
                                     *request_count = 0;
@@ -1249,7 +1269,9 @@ impl TurnClientProtocol {
                 match msg.class() {
                     stun_proto::types::message::MessageClass::Error => {
                         let Ok(error_code) = msg.attribute::<ErrorCode>() else {
-                            info!("Authenticating ALLOCATE error response missing ErrorCode attribute");
+                            info!(
+                                "Authenticating ALLOCATE error response missing ErrorCode attribute"
+                            );
                             self.state = AuthState::Error;
                             for fam in self.families.iter().cloned() {
                                 self.pending_events
@@ -1270,7 +1292,9 @@ impl TurnClientProtocol {
                                 }
                             });
                             if removed_ipv4_family {
-                                info!("Attempt to create dual IPv4/6 allocation failed with IPv4 failure. Attempting to create IPv6-only allocation");
+                                info!(
+                                    "Attempt to create dual IPv4/6 allocation failed with IPv4 failure. Attempting to create IPv6-only allocation"
+                                );
                                 self.pending_events
                                     .push_front(TurnEvent::AllocationCreateFailed(
                                         AddressFamily::IPV4,
@@ -1365,7 +1389,9 @@ impl TurnClientProtocol {
                                 .push_front(TurnEvent::AllocationCreateFailed(fam));
                         }
                         if !any_relayed {
-                            warn!("Authenticated ALLOCATE response missing XorRelayedAddress attributes");
+                            warn!(
+                                "Authenticated ALLOCATE response missing XorRelayedAddress attributes"
+                            );
                             self.state = AuthState::Error;
                             return TurnProtocolRecv::Handled;
                         };
@@ -1814,8 +1840,7 @@ impl TurnClientProtocol {
                         if expired.expires_at + CHANNEL_REMOVE_DURATION >= now {
                             trace!(
                                 "removing expired channel {} for peer {}",
-                                expired.id,
-                                expired.peer_addr
+                                expired.id, expired.peer_addr
                             );
                             true
                         } else {
@@ -2726,6 +2751,7 @@ pub(crate) enum TurnProtocolChannelRecv {
 mod tests {
     use alloc::string::ToString;
 
+    use turn_types::TurnCredentials;
     use turn_types::attribute::ConnectionId;
     use turn_types::prelude::DelayedTransmitBuild;
     use turn_types::stun::attribute::{Nonce, Realm, UnknownAttributes};
@@ -2733,7 +2759,6 @@ mod tests {
         IntegrityAlgorithm, LongTermKeyCredentials, MessageHeader, Method,
     };
     use turn_types::stun::prelude::AttributeStaticType;
-    use turn_types::TurnCredentials;
 
     use crate::api::tests::generate_addresses;
 
@@ -2804,18 +2829,14 @@ mod tests {
         let msg = Message::from_bytes(&transmit.data).unwrap();
         trace!(
             "client sending from {} to {} over {} {msg}",
-            transmit.from,
-            transmit.to,
-            transmit.transport
+            transmit.from, transmit.to, transmit.transport
         );
         assert_eq!(msg.method(), method);
         let reply = reply(msg);
         let msg = Message::from_bytes(&reply).unwrap();
         trace!(
             "client receiving from {} to {} over {} {msg}",
-            transmit.to,
-            transmit.from,
-            transmit.transport
+            transmit.to, transmit.from, transmit.transport
         );
         client.handle_message(
             Transmit::new(msg, transmit.transport, transmit.to, transmit.from),
@@ -4563,8 +4584,8 @@ mod tests {
     }
 
     #[test]
-    fn test_turn_client_protocol_tcp_connection_bind_pending_already_exists_on_client_after_connect(
-    ) {
+    fn test_turn_client_protocol_tcp_connection_bind_pending_already_exists_on_client_after_connect()
+     {
         let _log = crate::tests::test_init_log();
         let now = Instant::ZERO;
         let mut client = new_protocol_with_families(
@@ -5303,10 +5324,12 @@ mod tests {
                     ErrorCode::BAD_REQUEST
                 );
             }
-            assert!(client
-                .allocations
-                .iter()
-                .all(|alloc| alloc.pending_tcp_allocate.is_empty()));
+            assert!(
+                client
+                    .allocations
+                    .iter()
+                    .all(|alloc| alloc.pending_tcp_allocate.is_empty())
+            );
             assert!(!matches!(
                 client.poll(now),
                 TurnPollRet::AllocateTcpSocket { .. }

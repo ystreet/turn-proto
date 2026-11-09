@@ -20,6 +20,7 @@ use tracing::trace;
 use turn_client_proto::api::*;
 use turn_server_proto::api::{TurnServerApi, TurnServerPollRet};
 use turn_types::{
+    TurnCredentials,
     attribute::{
         ConnectionId, Data as AData, Lifetime, RequestedTransport, XorPeerAddress,
         XorRelayedAddress,
@@ -34,22 +35,21 @@ use turn_types::{
         message::{Message, MessageClass, MessageType, MessageWriteVec, Method, TransactionId},
         prelude::{MessageWrite, MessageWriteExt},
     },
-    TurnCredentials,
 };
 
 use tracing::subscriber::DefaultGuard;
-use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
 
 use alloc::vec::Vec;
 use core::net::SocketAddr;
 use turn_types::prelude::DelayedTransmitBuild;
 use turn_types::transmit::TransmitBuild;
 
-use stun_proto::agent::Transmit;
-use stun_proto::types::data::Data;
-use stun_proto::types::TransportType;
 use stun_proto::Instant;
+use stun_proto::agent::Transmit;
+use stun_proto::types::TransportType;
+use stun_proto::types::data::Data;
 
 static EXPIRY_BUFFER: Duration = Duration::from_secs(60);
 static PERMISSION_DURATION: Duration = Duration::from_secs(300);
@@ -285,13 +285,14 @@ impl<A: TurnClientApi, S: TurnServerApi> TurnTest<A, S> {
             self.client_recv(transmit, now),
             TurnRecvRet::Handled
         ));
-        assert!(self
-            .client
-            .relayed_addresses()
-            .any(
-                |(transport, relayed)| transport == self.allocation_transport
-                    && relayed == self.turn_alloc_addr
-            ));
+        assert!(
+            self.client
+                .relayed_addresses()
+                .any(
+                    |(transport, relayed)| transport == self.allocation_transport
+                        && relayed == self.turn_alloc_addr
+                )
+        );
         now
     }
 
@@ -323,13 +324,14 @@ impl<A: TurnClientApi, S: TurnServerApi> TurnTest<A, S> {
             self.client_recv(transmit, now),
             TurnRecvRet::Handled
         ));
-        assert!(self
-            .client
-            .relayed_addresses()
-            .any(
-                |(transport, relayed)| transport == self.allocation_transport
-                    && relayed == self.turn_alloc_addr
-            ));
+        assert!(
+            self.client
+                .relayed_addresses()
+                .any(
+                    |(transport, relayed)| transport == self.allocation_transport
+                        && relayed == self.turn_alloc_addr
+                )
+        );
         now
     }
 
@@ -370,13 +372,15 @@ impl<A: TurnClientApi, S: TurnServerApi> TurnTest<A, S> {
             self.client_recv(transmit, now),
             TurnRecvRet::Handled
         ));
-        assert!(!self
-            .client
-            .relayed_addresses()
-            .any(
-                |(transport, relayed)| transport == self.allocation_transport
-                    && relayed == self.turn_alloc_addr
-            ));
+        assert!(
+            !self
+                .client
+                .relayed_addresses()
+                .any(
+                    |(transport, relayed)| transport == self.allocation_transport
+                        && relayed == self.turn_alloc_addr
+                )
+        );
         now
     }
 
@@ -434,10 +438,11 @@ impl<A: TurnClientApi, S: TurnServerApi> TurnTest<A, S> {
     }
 
     fn validate_client_permission_state(&self) {
-        assert!(self
-            .client
-            .permissions(self.allocation_transport, self.turn_alloc_addr)
-            .any(|perm_addr| perm_addr == self.peer_addr.ip()));
+        assert!(
+            self.client
+                .permissions(self.allocation_transport, self.turn_alloc_addr)
+                .any(|perm_addr| perm_addr == self.peer_addr.ip())
+        );
     }
 
     fn bind_channel(&mut self, now: Instant) -> Instant {
@@ -470,9 +475,10 @@ impl<A: TurnClientApi, S: TurnServerApi> TurnTest<A, S> {
             self.client_recv(transmit, now),
             TurnRecvRet::Handled
         ));
-        assert!(self
-            .client
-            .have_permission(self.allocation_transport, self.peer_addr.ip()));
+        assert!(
+            self.client
+                .have_permission(self.allocation_transport, self.peer_addr.ip())
+        );
         now
     }
 
@@ -1057,9 +1063,11 @@ pub fn turn_create_permission_timeout<A: TurnClientApi, S: TurnServerApi>(
         unreachable!()
     };
 
-    assert!(!test
-        .client
-        .have_permission(test.allocation_transport, test.peer_addr.ip()));
+    assert!(
+        !test
+            .client
+            .have_permission(test.allocation_transport, test.peer_addr.ip())
+    );
     let Some(TurnEvent::PermissionCreateFailed(_transport, ip)) = test.client.poll_event() else {
         unreachable!();
     };

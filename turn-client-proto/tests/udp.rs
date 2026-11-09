@@ -13,8 +13,8 @@ extern crate alloc;
 use std::net::SocketAddr;
 
 use alloc::string::String;
-use stun_proto::agent::Transmit;
 use stun_proto::Instant;
+use stun_proto::agent::Transmit;
 use turn_server_proto::api::TurnServerApi;
 use turn_server_proto::server::TurnServer;
 use turn_types::{TransportType, TurnCredentials};
@@ -178,16 +178,17 @@ fn test_server_receive_offpath_data() {
     let mut test = create_test();
 
     let data = [3; 9];
-    assert!(test
-        .server
-        .recv(
-            Transmit::new(
-                &data,
-                TransportType::Udp,
-                test.peer_addr,
-                test.client.local_addr(),
-            ),
-            now,
-        )
-        .is_none());
+    assert!(
+        test.server
+            .recv(
+                Transmit::new(
+                    &data,
+                    TransportType::Udp,
+                    test.peer_addr,
+                    test.client.local_addr(),
+                ),
+                now,
+            )
+            .is_none()
+    );
 }
