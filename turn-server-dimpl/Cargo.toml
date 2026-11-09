@@ -1,7 +1,7 @@
 [package]
 name = "turn-server-dimpl"
 description = "TURN server protocol in a sans-IO fashion (Dimpl)"
-version = "0.2.1"
+version = "0.3.0"
 authors = ["Matthew Waters <matthew@centricular.com>"]
 license = "MIT OR Apache-2.0"
 keywords = ["TURN"]
@@ -9,7 +9,7 @@ categories = ["network-programming", ]
 documentation = "https://docs.rs/turn-server-dimpl"
 edition = "2024"
 repository = "https://github.com/ystreet/turn-proto"
-rust-version = "1.85.0"
+rust-version = "1.89.0"
 
 [workspace]
 
@@ -18,12 +18,12 @@ default = ["std"]
 std = []
 
 [dependencies]
-dimpl = "0.7"
-turn-server-proto = { version = "0.7.0", path = "../turn-server-proto" }
+dimpl = "0.9"
+turn-server-proto = { version = "0.8.0", path = "../turn-server-proto" }
 tracing = { version = "0.1", default-features = false, features = ["attributes"] }
 
 [dev-dependencies]
-turn-client-proto = { version = "0.7.0", path = "../turn-client-proto" }
+turn-client-proto = { version = "0.8.0", path = "../turn-client-proto" }
 tracing = { version = "0.1", default-features = false, features = ["attributes", "std"] }
 tracing-subscriber = "0.3"
 
