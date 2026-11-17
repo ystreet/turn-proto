@@ -471,26 +471,13 @@ impl TurnClientApi for TurnClientRustls {
             );
             return TurnRecvRet::Ignored(transmit);
         };
-        let mut data = std::io::Cursor::new(transmit.data.as_ref());
-
-        let io_state = match socket.tls.read_tls(&mut data) {
-            Ok(_written) => match socket.tls.process_new_packets() {
-                Ok(io_state) => io_state,
-                Err(e) => {
-                    self.protocol.protocol_error();
-                    warn!("Error processing TLS: {e:?}");
-                    return TurnRecvRet::Ignored(transmit);
-                }
-            },
-            Err(e) => {
-                warn!("Error receiving data: {e:?}");
-                self.protocol.protocol_error();
-                return TurnRecvRet::Ignored(transmit);
-            }
-        };
-        if io_state.plaintext_bytes_to_read() > 0 {
-            let mut out = vec![0; 2048];
-            let n = match socket.tls.reader().read(&mut out) {
+        // `read_tls()` may not consume all of the input, and the decrypted data may exceed a
+        // single read: loop until both are drained.
+        let input = transmit.data.as_ref();
+        let mut data = std::io::Cursor::new(input);
+        let mut out = Vec::new();
+        while (data.position() as usize) < input.len() {
+            let consumed = match socket.tls.read_tls(&mut data) {
                 Ok(n) => n,
                 Err(e) => {
                     warn!("Error receiving data: {e:?}");
@@ -498,7 +485,29 @@ impl TurnClientApi for TurnClientRustls {
                     return TurnRecvRet::Ignored(transmit);
                 }
             };
-            out.resize(n, 0);
+            let io_state = match socket.tls.process_new_packets() {
+                Ok(io_state) => io_state,
+                Err(e) => {
+                    self.protocol.protocol_error();
+                    warn!("Error processing TLS: {e:?}");
+                    return TurnRecvRet::Ignored(transmit);
+                }
+            };
+            let pending = io_state.plaintext_bytes_to_read();
+            if pending > 0 {
+                let start = out.len();
+                out.resize(start + pending, 0);
+                if let Err(e) = socket.tls.reader().read_exact(&mut out[start..]) {
+                    warn!("Error receiving data: {e:?}");
+                    self.protocol.protocol_error();
+                    return TurnRecvRet::Ignored(transmit);
+                }
+            }
+            if consumed == 0 {
+                break;
+            }
+        }
+        if !out.is_empty() {
             let transmit = Transmit::new(out, transmit.transport, transmit.from, transmit.to);
 
             return match self.protocol.recv(transmit, now) {

@@ -597,3 +597,46 @@ fn test_turn_rustls_tcp_allocation_send_recv_peer_close() {
         Err(SendError::NoTcpSocket)
     ));
 }
+
+#[test]
+fn test_turn_rustls_recv_coalesced_records() {
+    let _log = test_init_log();
+    let now = Instant::ZERO;
+    let mut test = create_test();
+    allocate(&mut test, now);
+    let now = create_permission(&mut test, now);
+
+    // Several TLS records arriving in a single read: more than one `read_tls` worth of
+    // ciphertext and more than 2048 bytes of plaintext.
+    let packets: Vec<Vec<u8>> = (0..4u8).map(|i| vec![i; 1400]).collect();
+    let mut coalesced = Vec::new();
+    let mut last = None;
+    for p in &packets {
+        let transmit = test
+            .server
+            .recv(
+                Transmit::new(
+                    p.clone(),
+                    TransportType::Udp,
+                    test.peer_addr,
+                    test.turn_alloc_addr,
+                ),
+                now,
+            )
+            .unwrap()
+            .build();
+        coalesced.extend_from_slice(&transmit.data);
+        last = Some(transmit);
+    }
+    let last = last.unwrap();
+    let transmit = Transmit::new(coalesced, last.transport, last.from, last.to);
+
+    let mut received = Vec::new();
+    if let TurnRecvRet::PeerData(peer_data) = test.client.recv(transmit, now) {
+        received.push(peer_data.data().to_vec());
+    }
+    while let Some(peer_data) = test.client.poll_recv(now) {
+        received.push(peer_data.data().to_vec());
+    }
+    assert_eq!(received, packets);
+}
